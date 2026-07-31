@@ -3381,26 +3381,27 @@ const byOp  = function (op) {
   return COLL.filter(function (c) { return c.op === op; })[0];
 };
 
-/* Ring cost factor, read off the published `ring_factor` formula rather than
-   re-derived, so the slide and the generator cannot drift apart. */
-function ringFactor(fstr, N) {
-  if (fstr === "S") return 1;
-  if (fstr === "(N-1)/N * S") return (N - 1) / N;
-  if (fstr === "2(N-1)/N * S") return 2 * (N - 1) / N;
-  console.warn("nn-internals slides: unrecognised ring factor '" + fstr + "'");
-  return 1;
+/* Ring cost factor. The generator now publishes the number per world size on
+   every collective, so nothing here parses the formula string; the string is
+   only ever displayed. */
+function ringFactor(op, N) {
+  const c = typeof op === "string" ? byOp(op) : op;
+  if (!c) { console.warn("nn-internals slides: unknown collective"); return 1; }
+  const at = c.ring_factor_at_world && c.ring_factor_at_world[String(N)];
+  return at === undefined ? c.ring_factor_numeric : at;
 }
-/* self-check against the generator's own numbers */
+/* self-check: the published factors, the ring table and the DDP schedule
+   payload all have to agree, or one of the three has drifted. */
 (function () {
   const rt = PA.ring.table.filter(function (r) { return r.world === WORLD; })[0];
   if (rt) {
-    if (Math.abs(ringFactor(byOp("all_reduce").ring_factor, WORLD) - rt.all_reduce) > 1e-9 ||
-        Math.abs(ringFactor(byOp("all_gather").ring_factor, WORLD) - rt.all_gather) > 1e-9) {
-      console.warn("nn-internals slides: ring factor disagrees with PARALLEL.ring.table");
+    if (Math.abs(ringFactor("all_reduce", WORLD) - rt.all_reduce) > 1e-9 ||
+        Math.abs(ringFactor("all_gather", WORLD) - rt.all_gather) > 1e-9) {
+      console.warn("nn-internals slides: ring_factor_at_world disagrees with PARALLEL.ring.table");
     }
   }
   const ddpSent = STRAT.ddp.schedule[0].sent_per_gpu_elements;
-  if (Math.abs(ddpSent - ringFactor(byOp("all_reduce").ring_factor, WORLD) * NPAR) > 1e-6) {
+  if (Math.abs(ddpSent - ringFactor("all_reduce", WORLD) * NPAR) > 1e-6) {
     console.warn("nn-internals slides: DDP schedule payload disagrees with the ring factor");
   }
 })();
@@ -3651,7 +3652,7 @@ function collSpec(op) {
 /** One slide per collective, built from PARALLEL.collectives. */
 function collectiveSlide(op, extraNote) {
   const c = byOp(op), spec = collSpec(op);
-  const fac = ringFactor(c.ring_factor, WORLD);
+  const fac = ringFactor(c, WORLD);
   return {
     chapter: "Collectives · " + op,
     plain: op + " · " + c.sig,
@@ -3819,9 +3820,9 @@ S({
       "Done: every rank holds the identical, fully-reduced vector."
     ];
     ctx.cap = h("phaselabel", ctx.caps[0]);
-    const rsF = ringFactor(byOp("reduce_scatter").ring_factor, WORLD);
-    const agF = ringFactor(byOp("all_gather").ring_factor, WORLD);
-    const arF = ringFactor(byOp("all_reduce").ring_factor, WORLD);
+    const rsF = ringFactor("reduce_scatter", WORLD);
+    const agF = ringFactor("all_gather", WORLD);
+    const arF = ringFactor("all_reduce", WORLD);
     return [
       kicker("Collectives · the decomposition that matters"),
       title("<span class='mono'>all_reduce</span> is not a primitive", true),
@@ -3911,7 +3912,7 @@ S({
             cls: "gradient" }), "f-right"),
           frag(NN.formula({ rule: "total sent per GPU",
             sub: "2(N−1) × S/N = " + byOp("all_reduce").ring_factor,
-            result: f(ringFactor(byOp("all_reduce").ring_factor, WORLD) * NPAR, 2) +
+            result: f(ringFactor("all_reduce", WORLD) * NPAR, 2) +
                     " elements", cls: "gradient" }), "f-right"),
           ctx.desc
         ])
@@ -4373,11 +4374,16 @@ S({
     "only its slice of the parameters, and then all-gathers the updated slices " +
     "so everyone has whole weights again for the next forward. Per-GPU model " +
     "state goes from " + memTot(DDP) + " elements to " + memTot(Z1) +
-    ". Communication: the schedule has " + Z1.schedule.length + " collectives, " +
-    "and the total sent works out at " + Z1.comm_vs_ddp + "× DDP — you pay a " +
-    "half extra pass for a large memory win. This is the stage most people can " +
-    "turn on with no thought at all, because gradients and weights are " +
-    "untouched and nothing about the step changes.",
+    ". Now look hard at the schedule, because this is the part everyone gets " +
+    "wrong — including, until recently, this deck. Stage 1 does NOT all-reduce. " +
+    "It reduce-scatters the gradients, because a rank that only updates shard i " +
+    "only needs shard i of the gradient, and then all-gathers the updated " +
+    "WEIGHTS. Two halves, " + f(ringFactor("reduce_scatter", WORLD), 3) + "S + " +
+    f(ringFactor("all_gather", WORLD), 3) + "S = " +
+    f(ringFactor("all_reduce", WORLD), 3) + "S, which is exactly what DDP's " +
+    "all-reduce cost. " + Z1.comm_vs_ddp + "× DDP. Not almost — exactly. So " +
+    "stage 1 is a free memory saving, and it is the switch you turn on without " +
+    "thinking about it.",
   build: function () {
     const m = Z1.memory_per_gpu;
     return [
@@ -4422,9 +4428,9 @@ S({
     "that the receiver will not use. Delete it. That is stage 2: you get " +
     "gradient sharding, and you get it by doing strictly less work.",
   build: function () {
-    const rsF = ringFactor(byOp("reduce_scatter").ring_factor, WORLD);
-    const agF = ringFactor(byOp("all_gather").ring_factor, WORLD);
-    const arF = ringFactor(byOp("all_reduce").ring_factor, WORLD);
+    const rsF = ringFactor("reduce_scatter", WORLD);
+    const agF = ringFactor("all_gather", WORLD);
+    const arF = ringFactor("all_reduce", WORLD);
     return [
       kicker("Distributed · ZeRO · the insight"),
       title("Stop halfway through the all-reduce"),
