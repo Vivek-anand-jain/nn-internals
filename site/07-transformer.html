@@ -1,0 +1,1757 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 07 The Transformer Block</title>
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+  /* Page-local layout only. No new tensor hues, no raw hex. */
+  section.block { scroll-margin-top: 74px; }
+
+  .tfdiag { width: 100%; height: auto; display: block; }
+  .tfdiag text { font-family: var(--mono); fill: var(--ink); font-size: 13px; }
+  .tfdiag text.sub { fill: var(--ink-muted); font-size: 10.5px; }
+  .tfdiag text.tag { fill: var(--ink-muted); font-size: 10.5px; }
+  .tfdiag g.mod { cursor: pointer; }
+  .tfdiag g.mod rect.card { transition: stroke .2s, fill .2s; }
+  .tfdiag g.mod:hover rect.card,
+  .tfdiag g.mod:focus rect.card { stroke: var(--accent); stroke-width: 2; fill: var(--surface-3); }
+  .tfdiag g.mod:focus { outline: none; }
+
+  /* --- attention heatmap: SEQUENTIAL, single hue (--activation) --------- */
+  .hm { display: inline-grid; gap: 2px; margin: 4px 0 2px; }
+  .hm .hh {
+    font-family: var(--mono); font-size: .72rem; color: var(--ink-muted);
+    text-align: center; padding: 2px 4px; align-self: end;
+  }
+  .hm .rh { text-align: right; padding-right: 8px; align-self: center; }
+  .hmcell {
+    min-width: 74px; padding: 9px 8px; border-radius: 4px;
+    font-family: var(--mono); font-size: .82rem; text-align: center;
+    font-variant-numeric: tabular-nums; color: var(--ink);
+    border: 1px solid var(--hairline-2); cursor: crosshair;
+    transition: transform .15s, box-shadow .15s;
+  }
+  .hmcell:hover { transform: scale(1.06); box-shadow: 0 0 0 2px var(--accent); }
+  .hmcell.off {
+    background: var(--surface-3); color: var(--ink-muted);
+    border-style: dashed; border-color: var(--hairline);
+  }
+  .hmramp { display: flex; align-items: center; gap: 8px; margin: 10px 0 2px; flex-wrap: wrap; }
+  .hmramp .strip {
+    display: flex; height: 12px; border-radius: 3px; overflow: hidden;
+    width: 150px; flex: 0 0 auto; border: 1px solid var(--hairline-2);
+  }
+  .hmramp .strip i { flex: 1; }
+  .hmramp span {
+    font-family: var(--mono); font-size: .72rem; color: var(--ink-muted);
+    white-space: nowrap;
+  }
+
+  .rowsum {
+    font-family: var(--mono); font-size: .76rem; color: var(--ink-muted);
+    align-self: center; padding-left: 10px; white-space: nowrap;
+  }
+  .ok { color: var(--good); font-weight: 700; }
+
+  .segbtns { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }
+  .segbtn {
+    background: var(--surface-2); color: var(--ink-2);
+    border: 1px solid var(--hairline); border-radius: 7px;
+    padding: 5px 12px; font-size: .82rem; font-family: var(--mono); cursor: pointer;
+  }
+  .segbtn[aria-pressed="true"] {
+    background: var(--surface-3); color: var(--ink);
+    border-color: var(--accent); font-weight: 700;
+  }
+
+  .headpanel {
+    border: 1px solid var(--hairline); border-radius: 8px;
+    padding: 14px 16px; background: var(--surface-2);
+  }
+  .headpanel h4 { margin: 0 0 10px; font-family: var(--mono); font-size: .86rem; }
+
+  .sliders { display: grid; gap: 10px; margin: 14px 0; }
+  .sliderrow { display: grid; grid-template-columns: 190px 1fr 130px; gap: 12px; align-items: center; }
+  .sliderrow label { font-family: var(--mono); font-size: .8rem; color: var(--ink-2); }
+  .sliderrow output {
+    font-family: var(--mono); font-size: .84rem; text-align: right;
+    font-variant-numeric: tabular-nums; color: var(--ink);
+  }
+  @media (max-width: 720px) { .sliderrow { grid-template-columns: 1fr; } }
+
+  .linelegend { display: flex; gap: 18px; flex-wrap: wrap; margin: 8px 0 2px; }
+  .linelegend span {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: var(--mono); font-size: .78rem; color: var(--ink-2);
+  }
+  .linelegend svg { display: block; }
+
+  .eqn { font-family: var(--mono); font-size: .9rem; }
+</style>
+</head>
+<body>
+
+<noscript>
+  <div class="wrap" style="padding-top:24px">
+    <div class="callout warn"><div class="t">JavaScript required</div>
+    Every number on this page is rendered from the generated traces
+    <code>assets/data/trace.js</code> and <code>assets/data/transformer.js</code>.
+    With JS disabled there is nothing to read.</div>
+  </div>
+</noscript>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 07</div>
+    <h1>The Transformer Block</h1>
+    <p class="lede" id="lede"></p>
+  </div>
+
+  <section class="block" id="bridge"></section>
+  <section class="block" id="anatomy"></section>
+  <section class="block" id="layernorm"></section>
+  <section class="block" id="attention"></section>
+  <section class="block" id="mlpsub"></section>
+  <section class="block" id="params"></section>
+  <section class="block" id="actmem"></section>
+  <section class="block" id="next"></section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/transformer.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T  = NN.T;                 // the 2 -> 3 -> 1 MLP trace (pages 01-06)
+  const TF = window.TFORMER;       // the transformer block trace (this page)
+
+  if (!TF) {
+    document.body.insertBefore(
+      NN.el("div", { class: "wrap" }, [
+        NN.callout("warn", "transformer.js did not load",
+          "Run <code>python3 code/transformer_block.py</code> to regenerate it.")
+      ]), document.body.firstChild);
+    return;
+  }
+
+  /* ===================================================================== */
+  /* helpers                                                                */
+  /* ===================================================================== */
+  const el = NN.el, f = NN.fmt, sv = NN.svg;
+  const M  = TF.meta;
+  const D  = M.d_model, H = M.n_heads, DH = M.d_head, S = M.seq_len, FF = M.d_ff;
+  const TOK = M.tokens;
+
+  function h2(t) { return el("h2", {}, t); }
+  function h3(t) { return el("h3", {}, t); }
+  function p(html) { return el("p", { html: html }); }
+  function mono(x) { return "<code>" + x + "</code>"; }
+  /** A number that is guaranteed to have come out of a trace. */
+  function num(x, d, cls) {
+    return '<span class="num' + (cls ? " v-" + cls : "") + '">' + f(x, d) + "</span>";
+  }
+  function row(kids) { return el("div", { style: { display: "flex", flexWrap: "wrap", gap: "6px", alignItems: "flex-start" } }, kids); }
+  function tokcap(prefix) {
+    return el("div", { class: "small muted mono", style: { marginBottom: "6px" } },
+      (prefix || "rows = tokens: ") + TOK.map(function (t, i) { return i + ' "' + t + '"'; }).join("   "));
+  }
+
+  /* the single-hue sequential ramp used for attention probabilities.
+     One hue (--activation), light -> dark against the card surface. The mix
+     is capped so the ink token stays legible in BOTH themes; the number is
+     printed in every cell, so colour is never the only encoding. */
+  const RAMP_MAX = 60;
+  function rampFill(t) {
+    return "color-mix(in srgb, var(--activation) " +
+           (Math.max(0, Math.min(1, t)) * RAMP_MAX).toFixed(1) +
+           "%, var(--surface-1))";
+  }
+
+  /* ===================================================================== */
+  /* 0. lede                                                                */
+  /* ===================================================================== */
+  NN.$("#lede").innerHTML =
+    "A real transformer block, small enough to print in full: " +
+    mono(M.architecture) + " at d_model " + M.d_model + ", " + M.n_heads +
+    " heads, " + M.seq_len + " tokens. It introduces no new kind of tensor — " +
+    "the same four classes from page 01, just more of them. What it does " +
+    "introduce is one term that grows with the <em>square</em> of the " +
+    "sequence length, and that term is the reason long context is hard.";
+
+  /* ===================================================================== */
+  /* 1. THE BRIDGE                                                          */
+  /* ===================================================================== */
+  (function bridge() {
+    const host = NN.$("#bridge");
+
+    const mlpP = T.memory.n_params;
+    const BC = T.memory.by_class;
+    const per = T.memory.per_tensor;
+    /* The gradient class holds two different things, and the trace tags them
+       with an explicit `role`: `param_grad` persists until the optimizer
+       step and is 1:1 with parameters, `node_grad` is the transient
+       activation gradient the chain rule creates and frees as it walks
+       backwards. Only the first kind is locked to the parameter count, and
+       ground_truth.py asserts that lock, so the claim below is checked at
+       generation rather than trusted here. */
+    const paramGrad = T.memory.param_gradient_elements;
+    const transGrad = T.memory.node_gradient_elements;
+    const transNames = per.filter(function (t) { return t.role === "node_grad"; })
+                          .map(function (t) { return t.name; });
+    const gradPairs = per.filter(function (t) { return t.role === "param_grad"; })
+                         .map(function (t) { return t.name + " ↔ " + t.of; });
+    const sumOf = function (cls) { return BC[cls].elements; };
+    const optTensors = BC.optimizer.tensors;
+
+    const blkP = TF.params.total;
+    const blkA = TF.activations.total_elements;
+
+    host.appendChild(h2("The bridge: nothing new, only bigger"));
+    host.appendChild(p(
+      "Pages 01–06 traced " + mono(T.meta.architecture) + " — " + num(mlpP, 0) +
+      " parameters, hand-checkable end to end. This page swaps that model for " +
+      "a transformer block and changes nothing else about the accounting. " +
+      "There is still no fifth colour on this site."));
+
+    host.appendChild(NN.legend());
+
+    host.appendChild(NN.tiles([
+      { k: "MLP parameters", v: f(mlpP, 0), s: T.meta.architecture, cls: "weight" },
+      { k: "Block parameters", v: f(blkP, 0), s: M.architecture, cls: "weight" },
+      { k: "Growth factor", v: "×" + f(blkP / mlpP, 1), s: "same four classes" },
+      { k: "Tensor classes", v: TF.bridge.n_classes + " → " + TF.bridge.n_classes,
+        s: "weight · gradient · activation · optimizer" }
+    ]));
+
+    const tb = el("table", { class: "data" });
+    tb.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "Tensor class"),
+      el("th", {}, "MLP (elements)"),
+      el("th", {}, "Block (elements)"),
+      el("th", {}, "Ratio"),
+      el("th", { style: { textAlign: "left" } }, "Where it comes from")
+    ])));
+
+    const rows = [
+      ["weight", sumOf("weight"), blkP,
+       "every projection matrix, bias and LayerNorm gain in the block"],
+      ["activation", sumOf("activation"), blkA,
+       "every intermediate the backward pass will need, including the score matrices"],
+      ["gradient", paramGrad, blkP,
+       "parameter gradients: exactly one per parameter element — always"],
+      ["optimizer", sumOf("optimizer"), optTensors * blkP,
+       "Adam keeps " + optTensors + " states (m and v) per parameter — still always"]
+    ];
+    const tbody = el("tbody", {});
+    rows.forEach(function (r) {
+      tbody.appendChild(el("tr", {}, [
+        el("td", {}, NN.chip(r[0])),
+        el("td", { class: "n" }, f(r[1], 0)),
+        el("td", { class: "n" }, f(r[2], 0)),
+        el("td", { class: "n" }, "×" + f(r[2] / r[1], 1)),
+        el("td", { class: "small muted", style: { textAlign: "left" } }, r[3])
+      ]));
+    });
+    tb.appendChild(tbody);
+    host.appendChild(el("div", { class: "scrollx" }, tb));
+
+    host.appendChild(el("div", { class: "small muted", html:
+      "The gradient row counts tensors the trace tags " + mono("role: param_grad") +
+      " — the ones that survive until the optimizer step, paired one-to-one " +
+      "with a parameter (" + gradPairs.join(", ") + "). That pairing is not " +
+      "an assumption: <code>ground_truth.py</code> asserts " +
+      mono("param_gradient_elements == n_params") + " before it emits, so " +
+      num(paramGrad, 0) + " = " + num(mlpP, 0) + " is checked at generation " +
+      "time. The trace <em>also</em> carries " + num(transGrad, 0) +
+      " elements tagged " + mono("role: node_grad") + " (" +
+      transNames.join(", ") + "): gradients with respect to activations, not " +
+      "parameters, created and freed as the chain rule walks backwards. Those " +
+      "are deliberately excluded above, because they are not locked to the " +
+      "parameter count. A transformer block has exactly the same two " +
+      "populations at its own scale — one gradient per weight that persists, " +
+      "plus a moving front of activation gradients that peaks and drains." }));
+
+    host.appendChild(NN.callout("key", "The one row that behaves differently",
+      "Weights, gradients and optimizer state are locked together: " +
+      num(blkP, 0) + " parameters means " + num(blkP, 0) + " gradient elements and " +
+      num(optTensors * blkP, 0) + " optimizer elements, and none of those numbers " +
+      "depend on how much text you feed the model. The activation row is the " +
+      "only one that moves with the input — and inside it, " +
+      num(TF.activations.score_matrix_elements, 0) + " of the " +
+      num(blkA, 0) + " elements (" +
+      num(TF.activations.quadratic_share * 100, 1) + "%) are attention scores, " +
+      "which grow as " + mono("seq²") + ". Hold onto that row; section 7 is about it."));
+  })();
+
+  /* ===================================================================== */
+  /* 2. ANATOMY — clickable SVG                                             */
+  /* ===================================================================== */
+  (function anatomy() {
+    const host = NN.$("#anatomy");
+    host.appendChild(h2("Anatomy of the block"));
+    host.appendChild(p(
+      "Pre-norm layout, which is what every modern LLM uses: normalise, do work, " +
+      "add the result back onto the stream. The stream itself is never " +
+      "overwritten — it runs straight down the left edge at a constant " +
+      mono("(" + TF.input.shape.join(" × ") + ")") + " and every sub-module writes " +
+      "into it by addition. Click any box to jump to its section."));
+
+    const W = 780, HT = 700;
+    const SX = 152;                      // residual stream x (leaves room for
+                                         // the "residual add" labels to its left)
+    const BX = 240, BW = 415;            // module box x / width
+    const CX = BX + BW / 2;
+
+    const s = sv("svg", {
+      class: "tfdiag", viewBox: "0 0 " + W + " " + HT,
+      role: "img",
+      "aria-label": "Transformer block: residual stream with LayerNorm, " +
+                    "multi-head attention, add, LayerNorm, MLP, add."
+    });
+
+    const defs = sv("defs", {});
+    ["arrow-accent", "arrow-act"].forEach(function (id, i) {
+      const mk = sv("marker", {
+        id: id, viewBox: "0 0 10 10", refX: 9, refY: 5,
+        markerWidth: 6, markerHeight: 6, orient: "auto-start-reverse"
+      });
+      mk.appendChild(sv("path", {
+        d: "M 0 0 L 10 5 L 0 10 z",
+        fill: i === 0 ? "var(--accent)" : "var(--activation)"
+      }));
+      defs.appendChild(mk);
+    });
+    s.appendChild(defs);
+
+    function text(x, y, t, cls, anchor) {
+      const e = sv("text", { x: x, y: y, class: cls || null, "text-anchor": anchor || "middle" });
+      e.textContent = t;
+      s.appendChild(e);
+      return e;
+    }
+
+    /* ---- the residual stream: an ACTIVATION, so it wears the activation hue */
+    s.appendChild(sv("line", {
+      x1: SX, y1: 46, x2: SX, y2: 662,
+      stroke: "var(--activation)", "stroke-width": 3, "stroke-linecap": "round",
+      "marker-end": "url(#arrow-act)"
+    }));
+
+    function plus(cy, label) {
+      const g = sv("g", {});
+      g.appendChild(sv("circle", {
+        cx: SX, cy: cy, r: 15, fill: "var(--surface-1)",
+        stroke: "var(--activation)", "stroke-width": 2.5
+      }));
+      const t = sv("text", { x: SX, y: cy + 5, "text-anchor": "middle" });
+      t.setAttribute("fill", "var(--activation)");
+      t.textContent = "+";
+      g.appendChild(t);
+      s.appendChild(g);
+      const l = sv("text", { x: SX - 26, y: cy + 4, "text-anchor": "end", class: "tag" });
+      l.textContent = label;
+      s.appendChild(l);
+    }
+
+    function branch(y) {  /* stream -> module */
+      s.appendChild(sv("path", {
+        d: "M " + SX + " " + y + " H " + (BX - 8),
+        stroke: "var(--accent)", "stroke-width": 1.6, fill: "none",
+        "stroke-dasharray": "4 3", "marker-end": "url(#arrow-accent)"
+      }));
+      s.appendChild(sv("circle", { cx: SX, cy: y, r: 4, fill: "var(--activation)" }));
+    }
+
+    function joinBack(fromY, toY) {  /* module -> stream */
+      s.appendChild(sv("path", {
+        d: "M " + CX + " " + fromY + " V " + toY + " H " + (SX + 20),
+        stroke: "var(--accent)", "stroke-width": 1.6, fill: "none",
+        "marker-end": "url(#arrow-accent)"
+      }));
+    }
+
+    function down(y1, y2) {
+      s.appendChild(sv("path", {
+        d: "M " + CX + " " + y1 + " V " + y2,
+        stroke: "var(--accent)", "stroke-width": 1.6, fill: "none",
+        "marker-end": "url(#arrow-accent)"
+      }));
+    }
+
+    function mod(y, h, title, subs, target, paramNote) {
+      const g = sv("g", {
+        class: "mod", tabindex: "0", role: "link",
+        "aria-label": title + " — jump to section"
+      });
+      g.appendChild(sv("rect", {
+        class: "card", x: BX, y: y, width: BW, height: h, rx: 9,
+        fill: "var(--surface-2)", stroke: "var(--hairline)", "stroke-width": 1
+      }));
+      const t = sv("text", { x: BX + 16, y: y + 24, "text-anchor": "start" });
+      t.textContent = title;
+      g.appendChild(t);
+      subs.forEach(function (line, i) {
+        const st = sv("text", { x: BX + 16, y: y + 44 + i * 15, class: "sub", "text-anchor": "start" });
+        st.textContent = line;
+        g.appendChild(st);
+      });
+      if (paramNote) {
+        const pn = sv("text", { x: BX + BW - 14, y: y + 24, class: "tag", "text-anchor": "end" });
+        pn.textContent = paramNote;
+        g.appendChild(pn);
+      }
+      const ttl = sv("title", {});
+      ttl.textContent = title + " — click to jump";
+      g.appendChild(ttl);
+      const go = function () {
+        const n = document.getElementById(target);
+        if (!n) return;
+        /* Set the hash so the jump is deep-linkable; design.css already sets
+           scroll-behavior:smooth and the sections carry scroll-margin-top.
+           scrollIntoView is only a progressive enhancement. */
+        try { window.location.hash = "#" + target; } catch (e) { /* ignore */ }
+        if (typeof n.scrollIntoView === "function") {
+          n.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      };
+      g.addEventListener("click", go);
+      g.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); }
+      });
+      s.appendChild(g);
+    }
+
+    const pg = TF.params.by_group;
+
+    text(SX, 30, "x  (" + TF.input.shape.join(" × ") + ")", null, "middle");
+
+    branch(88);
+    mod(62, 52, "LayerNorm 1", ["mean and variance per token, then gain · x̂ + bias"],
+        "layernorm", f(pg.layernorm / 2, 0) + " params");
+    down(114, 140);
+
+    mod(140, 150, "Multi-head self-attention", [
+      "Q, K, V  =  LN₁(x) · W_q , W_k , W_v        (" + H + " heads × d_head " + DH + ")",
+      "scores   =  Q · Kᵀ  ×  1/√d_head",
+      "mask     =  causal — position i may only see j ≤ i",
+      "probs    =  softmax(scores) row-wise",
+      "out      =  concat_h( probs · V )  ·  W_o"
+    ], "attention", f(pg.attention, 0) + " params");
+    joinBack(290, 336);
+    plus(336, "residual add 1");
+
+    branch(400);
+    mod(374, 52, "LayerNorm 2", ["same operation, its own gain and bias"],
+        "layernorm", f(pg.layernorm / 2, 0) + " params");
+    down(426, 452);
+
+    mod(452, 108, "MLP sub-layer", [
+      "up    :  d_model " + D + "  →  d_ff " + FF,
+      "act   :  " + M.nonlinearity + ", elementwise",
+      "down  :  d_ff " + FF + "  →  d_model " + D,
+      "no token talks to any other token in here"
+    ], "mlpsub", f(pg.mlp, 0) + " params");
+    joinBack(560, 606);
+    plus(606, "residual add 2");
+
+    text(SX, 690, "y  (" + TF.input.shape.join(" × ") + ")", null, "middle");
+
+    host.appendChild(s);
+
+    host.appendChild(el("div", { class: "legend" }, [
+      NN.chip("activation", "residual stream — activation"),
+      NN.chip("weight", "boxes hold weights"),
+      el("span", { class: "small muted" },
+        "dashed grey = data path, not a tensor class")
+    ]));
+
+    host.appendChild(NN.callout("why", "Why the shape never changes",
+      "Input " + mono("(" + TF.input.shape.join(" × ") + ")") + ", output " +
+      mono("(" + TF.input.shape.join(" × ") + ")") + ". A block is an " +
+      "endomorphism on the residual stream, which is exactly what lets you " +
+      "stack " + f(TF.real.models[TF.real.default_index].config.n_layers, 0) +
+      " of them in " + TF.real.models[TF.real.default_index].name +
+      " without any shape bookkeeping. It also means the " +
+      "gradient reaches the embedding through a chain of additions rather than " +
+      "a chain of multiplications — the same reason the dead ReLU on page 04 " +
+      "killed one row and not the whole network."));
+  })();
+
+  /* ===================================================================== */
+  /* 3. LAYERNORM                                                           */
+  /* ===================================================================== */
+  (function layernorm() {
+    const host = NN.$("#layernorm");
+    host.appendChild(h2("LayerNorm: two scalars per token"));
+    host.appendChild(p(
+      "LayerNorm normalises across the feature axis, independently for every " +
+      "token. No batch statistics, no running averages — token " + mono("t") +
+      " is normalised using only its own " + D + " numbers, which is why it " +
+      "behaves identically at batch 1 and batch 1024."));
+
+    host.appendChild(NN.formula({
+      rule: "x̂ = (x − mean(x)) / √(var(x) + ε)&nbsp;&nbsp;&nbsp;y = gain ⊙ x̂ + bias",
+      sub: "mean and var are taken over the last axis (d_model = " + D +
+           "), ε = " + f(M.eps, 8),
+      cls: "activation"
+    }));
+
+    /* --- interactive token picker ------------------------------------- */
+    const pick = el("div", { class: "segbtns" });
+    const out = el("div", {});
+    const which = el("div", { class: "segbtns" });
+
+    let whichLN = "ln1", tokIdx = 0;
+
+    function render() {
+      const L = TF[whichLN];
+      const r = L.rows[tokIdx];
+      out.innerHTML = "";
+
+      out.appendChild(row([
+        NN.tensor({ name: "x[" + tokIdx + "]", shape: [D], values: [r.x],
+                    cls: "activation", digits: 4, note: "input row" }),
+        NN.tensor({ name: "x − mean", shape: [D], values: [r.centred],
+                    cls: "activation", digits: 4, signed: true }),
+        NN.tensor({ name: "x̂", shape: [D], values: [r.normed],
+                    cls: "activation", digits: 4, signed: true, note: "normalised" })
+      ]));
+      out.appendChild(row([
+        NN.tensor({ name: "gain", shape: [D], values: [L.gain], cls: "weight", digits: 4 }),
+        NN.tensor({ name: "bias", shape: [D], values: [L.bias], cls: "weight",
+                    digits: 4, signed: true }),
+        NN.tensor({ name: "y[" + tokIdx + "]", shape: [D], values: [r.out],
+                    cls: "activation", digits: 4, signed: true, note: "LN output" })
+      ]));
+
+      out.appendChild(NN.formula({
+        rule: "mean = (1/" + D + ") Σ x",
+        sub: "(" + r.x.map(function (v) { return f(v, 4); }).join(" + ") + ") / " + D,
+        result: f(r.mean, 6), cls: "activation"
+      }));
+      out.appendChild(NN.formula({
+        rule: "var = (1/" + D + ") Σ (x − mean)²",
+        sub: "(" + r.centred.map(function (v) { return f(v * v, 4); }).join(" + ") + ") / " + D,
+        result: f(r.var, 6), cls: "activation"
+      }));
+      out.appendChild(NN.formula({
+        rule: "std = √(var + ε)",
+        sub: "√(" + f(r.var, 6) + " + " + f(L.eps, 8) + ")",
+        result: f(r.std, 6), cls: "activation"
+      }));
+
+      out.appendChild(el("div", { class: "small muted", html:
+        "Sanity check, computed in the browser from the emitted x̂: mean(x̂) = " +
+        num(r.normed.reduce(function (a, b) { return a + b; }, 0) / D, 6) +
+        ", and Σx̂²/" + D + " = " +
+        num(r.normed.reduce(function (a, b) { return a + b * b; }, 0) / D, 6) +
+        " — unit variance up to the ε in the denominator." }));
+    }
+
+    [["ln1", "LayerNorm 1 (pre-attention)"], ["ln2", "LayerNorm 2 (pre-MLP)"]]
+      .forEach(function (o) {
+        const b = el("button", { class: "segbtn", "aria-pressed": String(whichLN === o[0]) }, o[1]);
+        b.addEventListener("click", function () {
+          whichLN = o[0];
+          NN.$$(".segbtn", which).forEach(function (x) { x.setAttribute("aria-pressed", "false"); });
+          b.setAttribute("aria-pressed", "true");
+          render();
+        });
+        which.appendChild(b);
+      });
+
+    TOK.forEach(function (t, i) {
+      const b = el("button", { class: "segbtn", "aria-pressed": String(i === 0) },
+                   "token " + i + '  "' + t + '"');
+      b.addEventListener("click", function () {
+        tokIdx = i;
+        NN.$$(".segbtn", pick).forEach(function (x) { x.setAttribute("aria-pressed", "false"); });
+        b.setAttribute("aria-pressed", "true");
+        render();
+      });
+      pick.appendChild(b);
+    });
+
+    host.appendChild(which);
+    host.appendChild(pick);
+    host.appendChild(out);
+    render();
+
+    /* --- per-token summary table -------------------------------------- */
+    const tb = el("table", { class: "data" });
+    tb.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "LayerNorm"), el("th", {}, "token"),
+      el("th", {}, "mean"), el("th", {}, "var"), el("th", {}, "std"),
+      el("th", {}, "1/std (saved)")
+    ])));
+    const tbd = el("tbody", {});
+    ["ln1", "ln2"].forEach(function (k) {
+      TF[k].rows.forEach(function (r) {
+        tbd.appendChild(el("tr", {}, [
+          el("td", {}, k === "ln1" ? "LN1" : "LN2"),
+          el("td", { class: "n" }, r.t + ' "' + TOK[r.t] + '"'),
+          el("td", { class: "n" }, f(r.mean, 6)),
+          el("td", { class: "n" }, f(r.var, 6)),
+          el("td", { class: "n" }, f(r.std, 6)),
+          el("td", { class: "n" }, f(r.saved_for_backward.rstd, 6))
+        ]));
+      });
+    });
+    tb.appendChild(tbd);
+    host.appendChild(el("div", { class: "scrollx" }, tb));
+
+    const lnP = TF.params.per_submodule.filter(function (s) { return s.group === "layernorm"; });
+    host.appendChild(NN.callout("mem", "What LayerNorm costs",
+      "<b>Parameters:</b> a gain and a bias, both length d_model, so " +
+      num(lnP[0].count, 0) + " + " + num(lnP[1].count, 0) + " = " +
+      num(lnP[0].count + lnP[1].count, 0) + " per norm, " +
+      num(TF.params.by_group.layernorm, 0) + " for the two in this block — " +
+      num(TF.params.by_group.layernorm / TF.params.total * 100, 1) +
+      "% of the block. Negligible, and it stays negligible: LayerNorm is " +
+      mono("4·d") + " while everything else is " + mono("d²") + ".<br><br>" +
+      "<b>Activations:</b> this is the interesting part. Backward needs the " +
+      "mean and the reciprocal std it used, so it saves exactly two scalars " +
+      "per token — " + num(2 * S, 0) + " numbers here, not the " +
+      num(S * D, 0) + " of the normalised tensor. Same trick as the ReLU mask " +
+      "on page 04: keep the small thing you need, recompute the rest."));
+  })();
+
+  /* ===================================================================== */
+  /* 4. ATTENTION, STEP BY STEP                                             */
+  /* ===================================================================== */
+  (function attention() {
+    const host = NN.$("#attention");
+    const A = TF.attn;
+
+    host.appendChild(h2("Attention, step by step"));
+    host.appendChild(p(
+      "Seven steps, all of them ordinary linear algebra plus one softmax. " +
+      "The input is " + mono("LN1(x)") + "; the output is the thing added back " +
+      "onto the residual stream. Both heads are shown at once, because the " +
+      "whole point of multi-head is that they compute different things from " +
+      "the same input."));
+    host.appendChild(el("div", { class: "small muted", html:
+      "From step 5 the probabilities are drawn as a heatmap on a " +
+      "<b>single-hue sequential ramp</b> (one hue, light → dark — never a " +
+      "rainbow, which would imply categories where there is only magnitude). " +
+      "The probability is printed in every cell, so the colour is redundant " +
+      "rather than load-bearing, and masked cells are drawn dashed and grey " +
+      "because they are not a low value — they are not a value at all. " +
+      "Hover any cell for the exact number." }));
+
+    const labels = [
+      "project LN₁(x) into Q, K, V",
+      "raw scores = Q · Kᵀ",
+      "scale by 1/√d_head",
+      "apply the causal mask",
+      "softmax each row",
+      "weight the value vectors",
+      "concatenate heads, project with W_o"
+    ];
+
+    const ctrl = el("div", {});
+    const explain = el("div", { class: "callout why" }, [
+      el("div", { class: "t" }, "step"), el("div", { class: "b" })
+    ]);
+    const heads = el("div", { class: "grid2" });
+    const tail = el("div", {});
+
+    host.appendChild(ctrl);
+    host.appendChild(explain);
+    host.appendChild(heads);
+    host.appendChild(tail);
+
+    const panels = A.heads.map(function (hd) {
+      const pnl = el("div", { class: "headpanel" }, [
+        el("h4", {}, "head " + hd.h + "  —  dims " + hd.dims[0] + "…" + hd.dims[1] +
+                     " of the " + D + "-wide projection")
+      ]);
+      const body = el("div", {});
+      pnl.appendChild(body);
+      heads.appendChild(pnl);
+      return body;
+    });
+
+    /* ---------- score grid (signed data: NO sequential ramp) ---------- */
+    function scoreGrid(hd, kind) {
+      const g = el("div", { class: "hm",
+        style: { gridTemplateColumns: "auto repeat(" + S + ", auto)" } });
+      g.appendChild(el("div", { class: "hh" }, ""));
+      TOK.forEach(function (t, j) {
+        g.appendChild(el("div", { class: "hh" }, "k" + j + " " + t));
+      });
+      for (let i = 0; i < S; i++) {
+        g.appendChild(el("div", { class: "hh rh" }, "q" + i + " " + TOK[i]));
+        for (let j = 0; j < S; j++) {
+          const live = hd.mask[i][j] === 1;
+          const masked = kind === "masked";
+          let txt, cls = "hmcell";
+          if (masked && !live) { txt = "−∞"; cls += " off"; }
+          else if (kind === "raw") txt = f(hd.scores_raw[i][j], 4);
+          else txt = f(hd.scores_scaled[i][j], 4);
+          const c = el("div", { class: cls }, txt);
+          if (!(masked && !live)) c.style.background = "var(--surface-2)";
+          c.addEventListener("mousemove", function (e) {
+            NN.tip.show(
+              "<div class='muted'>head " + hd.h + " &nbsp; q" + i + ' "' + TOK[i] +
+              '" · k' + j + ' "' + TOK[j] + '"</div>' +
+              "<div>raw &nbsp;<b>" + f(hd.scores_raw[i][j], 6) + "</b></div>" +
+              "<div>× " + f(hd.scale, 6) + " &nbsp;<b>" +
+              f(hd.scores_scaled[i][j], 6) + "</b></div>" +
+              (masked && !live ? "<div class='muted'>masked → −∞</div>" : ""),
+              e.clientX, e.clientY);
+          });
+          c.addEventListener("mouseleave", NN.tip.hide);
+          g.appendChild(c);
+        }
+      }
+      return g;
+    }
+
+    /* ---------- probability heatmap: SEQUENTIAL single hue ------------ */
+    function probHeat(hd) {
+      const wrap = el("div", {});
+      const g = el("div", { class: "hm",
+        style: { gridTemplateColumns: "auto repeat(" + S + ", auto) auto" } });
+      g.appendChild(el("div", { class: "hh" }, ""));
+      TOK.forEach(function (t, j) {
+        g.appendChild(el("div", { class: "hh" }, "k" + j + " " + t));
+      });
+      g.appendChild(el("div", { class: "hh" }, "Σ"));
+
+      let worst = 0;
+      for (let i = 0; i < S; i++) {
+        g.appendChild(el("div", { class: "hh rh" }, "q" + i + " " + TOK[i]));
+        /* verified HERE, in the browser, from the emitted probabilities */
+        let sum = 0;
+        for (let j = 0; j < S; j++) sum += hd.probs[i][j];
+        worst = Math.max(worst, Math.abs(sum - 1));
+
+        for (let j = 0; j < S; j++) {
+          const pv = hd.probs[i][j];
+          const live = hd.mask[i][j] === 1;
+          const c = el("div", { class: "hmcell" + (live ? "" : " off") },
+                       live ? f(pv, 4) : "0");
+          if (live) c.style.background = rampFill(pv);
+          c.addEventListener("mousemove", function (e) {
+            NN.tip.show(
+              "<div class='muted'>head " + hd.h + " &nbsp; query " + i + ' "' +
+              TOK[i] + '" attends to key ' + j + ' "' + TOK[j] + '"</div>' +
+              (live
+                ? "<div>p &nbsp;<b>" + f(pv, 6) + "</b> &nbsp;(" +
+                  f(pv * 100, 2) + "% of the row)</div>" +
+                  "<div class='muted'>scaled score " + f(hd.scores_scaled[i][j], 6) +
+                  " → exp " + f(hd.softmax_work[i].exps[j], 6) + " / " +
+                  f(hd.softmax_work[i].denom, 6) + "</div>"
+                : "<div class='muted'>masked: j &gt; i, so this is a future " +
+                  "token. Score forced to −∞, probability exactly 0.</div>"),
+              e.clientX, e.clientY);
+          });
+          c.addEventListener("mouseleave", NN.tip.hide);
+          g.appendChild(c);
+        }
+        g.appendChild(el("div", { class: "rowsum", html:
+          f(sum, 6) + ' <span class="ok">✓</span>' }));
+      }
+      wrap.appendChild(g);
+
+      const ramp = el("div", { class: "hmramp" }, [
+        el("span", {}, "p = 0"),
+        (function () {
+          const strip = el("div", { class: "strip" });
+          for (let k = 0; k <= 20; k++) {
+            const i = el("i", {});
+            i.style.background = rampFill(k / 20);
+            strip.appendChild(i);
+          }
+          return strip;
+        })(),
+        el("span", {}, "p = 1")
+      ]);
+      wrap.appendChild(ramp);
+      wrap.dataset.worst = String(worst);
+      return wrap;
+    }
+
+    /* ---------- the check banner -------------------------------------- */
+    function checkBanner() {
+      /* recompute independently in JS rather than trusting the payload */
+      let worst = 0, nrows = 0;
+      A.heads.forEach(function (hd) {
+        hd.probs.forEach(function (r) {
+          let s = 0;
+          r.forEach(function (v) { s += v; });
+          worst = Math.max(worst, Math.abs(s - 1));
+          nrows++;
+        });
+      });
+      const okJs = worst < A.softmax_check.tolerance;
+      const okPy = A.softmax_check.passed;
+      return NN.callout(okJs && okPy ? "why" : "warn",
+        (okJs && okPy ? "✓ " : "✗ ") + "softmax rows verified",
+        "All " + num(nrows, 0) + " rows (" + H + " heads × " + S +
+        " queries) re-summed in the browser: max |Σp − 1| = " +
+        num(worst, 2) + ", against a tolerance of " +
+        num(A.softmax_check.tolerance, 2) + " → <b>" +
+        (okJs ? "PASS" : "FAIL") + "</b>. " +
+        "The generator's own check, run in Python before emitting, reported " +
+        num(A.softmax_check.max_abs_deviation, 2) + " over " +
+        num(A.softmax_check.n_rows_checked, 0) + " rows → <b>" +
+        (okPy ? "PASS" : "FAIL") + "</b>. " +
+        "The residual is pure floating-point rounding: softmax divides by a " +
+        "sum it just computed, so the row sums to 1 by construction, not by " +
+        "luck. Masked entries contribute exactly 0, not a small number.");
+    }
+
+    const EXPLAIN = [
+      "One matmul per projection, over the whole sequence at once. " +
+      "The " + H + " heads are not " + H + " separate matrices — " + mono("W_q") +
+      " is a single " + D + "×" + D + " matrix and head <em>h</em> is just " +
+      "columns " + DH + "h through " + DH + "h+" + (DH - 1) + " of the result. " +
+      "The split is a reshape, and it is free.",
+
+      "Every query dots with every key: " + mono("scores[i][j] = Q[i] · K[j]") +
+      ". This is where the " + mono("seq²") + " comes from — " + S + "×" + S +
+      " numbers per head, " + num(TF.activations.score_matrix_elements, 0) +
+      " for the block, and it is the only tensor here whose size is not " +
+      "linear in the sequence length.",
+
+      "Divide by " + mono("√d_head") + " = " + num(1 / A.scale, 4) + ", i.e. " +
+      "multiply by " + num(A.scale, 6) + ". Without it the dot product of two " +
+      mono("d_head") + "-dimensional vectors grows like " + mono("d_head") +
+      ", softmax saturates, and the gradient through it goes to zero. It is a " +
+      "variance fix, not a heuristic.",
+
+      "Causal masking. A query at position <em>i</em> may only see keys " +
+      mono("j ≤ i") + ", so the strict upper triangle is set to −∞ before the " +
+      "exponential — " + mono("exp(−∞) = 0") + ", which gives probability " +
+      "exactly zero, not merely small. Token 0 can only attend to itself, " +
+      "which is why its row will be a hard 1.",
+
+      "Softmax, row by row: subtract the row max for stability, exponentiate, " +
+      "divide by the sum. Each row is now a probability distribution over the " +
+      "keys that token is allowed to see. Hover any cell for the exact number.",
+
+      "Multiply the probabilities into the value vectors: " +
+      mono("out[i] = Σ_j p[i][j] · V[j]") + ". Each output row is a convex " +
+      "combination of value rows, which is why attention can move information " +
+      "between positions but cannot invent magnitude out of nowhere.",
+
+      "Concatenate the " + H + " head outputs back to width " + D +
+      " and apply " + mono("W_o") + ". Only now do the heads mix. The result " +
+      "is what gets added to the residual stream."
+    ];
+
+    function render(i) {
+      explain.querySelector(".b").innerHTML = EXPLAIN[i];
+      tail.innerHTML = "";
+
+      A.heads.forEach(function (hd, hi) {
+        const b = panels[hi];
+        b.innerHTML = "";
+
+        if (i === 0) {
+          b.appendChild(tokcap());
+          b.appendChild(row([
+            NN.tensor({ name: "Q" + hd.h, shape: [S, DH], values: hd.q,
+                        cls: "activation", digits: 4, signed: true }),
+            NN.tensor({ name: "K" + hd.h, shape: [S, DH], values: hd.k,
+                        cls: "activation", digits: 4, signed: true }),
+            NN.tensor({ name: "V" + hd.h, shape: [S, DH], values: hd.v,
+                        cls: "activation", digits: 4, signed: true })
+          ]));
+          return;
+        }
+        if (i === 1) { b.appendChild(scoreGrid(hd, "raw")); return; }
+        if (i === 2) {
+          b.appendChild(scoreGrid(hd, "scaled"));
+          b.appendChild(el("div", { class: "small muted", html:
+            "every cell above × " + num(hd.scale, 6) }));
+          return;
+        }
+        if (i === 3) { b.appendChild(scoreGrid(hd, "masked")); return; }
+        if (i === 4) { b.appendChild(probHeat(hd)); return; }
+        if (i === 5) {
+          b.appendChild(probHeat(hd));
+          b.appendChild(NN.tensor({
+            name: "out" + hd.h, shape: [S, DH], values: hd.out,
+            cls: "activation", digits: 4, signed: true, note: "probs · V" }));
+          const w = hd.out_work[S - 1][0];
+          b.appendChild(NN.formula({
+            rule: "out[" + (S - 1) + "][0] = Σ_j p[" + (S - 1) + "][j] · V[j][0]",
+            sub: w.terms.map(function (t) {
+              return f(t.p, 4) + "×" + f(t.v, 4);
+            }).join("  +  "),
+            result: f(w.out, 6), cls: "activation"
+          }));
+          return;
+        }
+        if (i === 6) {
+          b.appendChild(NN.tensor({
+            name: "out" + hd.h, shape: [S, DH], values: hd.out,
+            cls: "activation", digits: 4, signed: true }));
+        }
+      });
+
+      if (i === 4 || i === 5) tail.appendChild(checkBanner());
+
+      if (i === 6) {
+        tail.appendChild(row([
+          NN.tensor({ name: "concat", shape: [S, D], values: A.concat,
+                      cls: "activation", digits: 4, signed: true,
+                      note: "heads side by side" }),
+          NN.tensor({ name: "W_o", shape: [D, D], values: A.W_o,
+                      cls: "weight", digits: 4, signed: true }),
+          NN.tensor({ name: "Attn(LN₁(x))", shape: [S, D], values: A.out,
+                      cls: "activation", digits: 4, signed: true,
+                      note: "added to the stream" })
+        ]));
+        const w = A.o_work[0][0];
+        tail.appendChild(NN.formula({
+          rule: "attn_out[0][0] = Σ_i concat[0][i] · W_o[i][0]",
+          sub: w.products.map(function (t) {
+            return f(t.x, 4) + "×" + f(t.w, 4);
+          }).join("  +  ") + "  +  " + f(w.bias, 4),
+          result: f(w.out, 6), cls: "activation"
+        }));
+        tail.appendChild(row([
+          NN.tensor({ name: "x (stream in)", shape: [S, D], values: TF.resid1.stream_in,
+                      cls: "activation", digits: 4, signed: true }),
+          NN.tensor({ name: "+ Attn", shape: [S, D], values: TF.resid1.delta,
+                      cls: "activation", digits: 4, signed: true }),
+          NN.tensor({ name: "= h", shape: [S, D], values: TF.resid1.out,
+                      cls: "activation", digits: 4, signed: true,
+                      note: "residual add 1" })
+        ]));
+      }
+    }
+
+    new NN.Stepper({
+      mount: ctrl, count: labels.length, labels: labels,
+      autoplayMs: 2200, onStep: render
+    });
+
+    host.appendChild(NN.callout("mem", "The tensor that does not scale linearly",
+      "Q, K and V are each " + mono("seq × d_model") + " — " +
+      num(S * D, 0) + " elements here. The score matrix is " +
+      mono("n_heads × seq × seq") + " — " +
+      mono(TF.activations.score_matrix_formula) + ". At " + S +
+      " tokens that is smaller than Q, K and V put together. It stops being " +
+      "smaller quickly: the crossover is at " + mono("seq = d_model / n_heads") +
+      " × a constant, and section 7 puts real numbers on it."));
+  })();
+
+  /* ===================================================================== */
+  /* 5. THE MLP SUB-LAYER                                                   */
+  /* ===================================================================== */
+  (function mlpsub() {
+    const host = NN.$("#mlpsub");
+    const P = TF.mlp;
+
+    host.appendChild(h2("The MLP sub-layer"));
+    host.appendChild(p(
+      "Attention moves information between positions. The MLP does the actual " +
+      "per-position computation, and it does it in a wider space: project up " +
+      "to " + mono("d_ff") + ", apply a pointwise nonlinearity, project back " +
+      "down. Every token goes through it independently — there is no mixing " +
+      "across the sequence axis anywhere in this sub-layer."));
+
+    host.appendChild(NN.formula({
+      rule: "MLP(h) = " + M.nonlinearity.split(" ")[0] + "(h · W_up + b_up) · W_down + b_down",
+      sub: "d_model " + D + " → d_ff " + FF + " → d_model " + D +
+           "  (this toy expands ×" + f(P.expansion, 2) + ")",
+      cls: "weight"
+    }));
+
+    const pick = el("div", { class: "segbtns" });
+    const outEl = el("div", {});
+    let ti = 0;
+
+    function render() {
+      outEl.innerHTML = "";
+      outEl.appendChild(row([
+        NN.tensor({ name: "LN₂(h)[" + ti + "]", shape: [D], values: [P.input[ti]],
+                    cls: "activation", digits: 4, signed: true }),
+        NN.tensor({ name: "h_pre[" + ti + "]", shape: [FF], values: [P.h_pre[ti]],
+                    cls: "activation", digits: 3, signed: true,
+                    note: "after up-proj" })
+      ]));
+      outEl.appendChild(row([
+        NN.tensor({ name: "h_act[" + ti + "]", shape: [FF], values: [P.h_act[ti]],
+                    cls: "activation", digits: 3, signed: true,
+                    note: "after " + M.nonlinearity.split(" ")[0] }),
+        NN.tensor({ name: "MLP out[" + ti + "]", shape: [D], values: [P.out[ti]],
+                    cls: "activation", digits: 4, signed: true })
+      ]));
+
+      const w = P.up_work[ti][0];
+      outEl.appendChild(NN.formula({
+        rule: "h_pre[" + ti + "][0] = Σ_i LN₂(h)[" + ti + "][i] · W_up[i][0] + b_up[0]",
+        sub: w.products.map(function (t) { return f(t.x, 4) + "×" + f(t.w, 4); })
+              .join("  +  ") + "  +  " + f(w.bias, 4),
+        result: f(w.out, 6), cls: "activation"
+      }));
+
+      const gd = P.gelu_detail[ti][0];
+      outEl.appendChild(NN.formula({
+        rule: "GELU(x) = x · Φ(x)",
+        sub: f(gd.pre, 6) + " × " + f(gd.gate, 6) + "   (Φ = standard normal CDF)",
+        result: f(gd.out, 6), cls: "activation"
+      }));
+    }
+
+    TOK.forEach(function (t, i) {
+      const b = el("button", { class: "segbtn", "aria-pressed": String(i === 0) },
+                   "token " + i + '  "' + t + '"');
+      b.addEventListener("click", function () {
+        ti = i;
+        NN.$$(".segbtn", pick).forEach(function (x) { x.setAttribute("aria-pressed", "false"); });
+        b.setAttribute("aria-pressed", "true");
+        render();
+      });
+      pick.appendChild(b);
+    });
+    host.appendChild(pick);
+    host.appendChild(outEl);
+    render();
+
+    /* --- GELU, plotted from the actual activations in this block ------- */
+    const pts = [];
+    P.gelu_detail.forEach(function (r) {
+      r.forEach(function (g) { pts.push([g.pre, g.out]); });
+    });
+    pts.sort(function (a, b) { return a[0] - b[0]; });
+    host.appendChild(h3("GELU, drawn from this block's own " + pts.length + " activations"));
+    host.appendChild(el("div", { class: "small muted", html:
+      "Not a sampled curve — these are the " + pts.length + " real " +
+      mono("(h_pre, h_act)") + " pairs from the " + S + "×" + FF +
+      " hidden tensor, sorted by input. Unlike ReLU, GELU is smooth and " +
+      "slightly negative just below zero, so a unit that lands at " +
+      num(pts[0][0], 3) + " still passes " + num(pts[0][1], 4) +
+      " and a non-zero gradient — no dead units of the kind page 04 found." }));
+    host.appendChild(NN.chart.line({
+      series: [{ name: "GELU(x)", color: "var(--activation)", points: pts }],
+      width: 660, height: 240, xlabel: "h_pre", ylabel: "h_act"
+    }));
+
+    /* --- the 2/3 arithmetic, derived, not asserted --------------------- */
+    const subs = TF.params.per_submodule;
+    const sumc = function (fn) { return subs.filter(fn).reduce(function (a, b) { return a + b.count; }, 0); };
+    const attnW = sumc(function (s) { return s.group === "attention" && s.name.indexOf("W_") === 0; });
+    const attnCoeff = attnW / (D * D);                       // -> 4
+    const ff4 = TF.params.if_4x_expansion.d_ff;              // -> 4*d
+    const mlpCoeff4 = (D * ff4 + ff4 * D) / (D * D);         // -> 8
+    const totCoeff = attnCoeff + mlpCoeff4;                  // -> 12
+
+    host.appendChild(h3("Why the MLP holds roughly two thirds of a block"));
+    host.appendChild(p(
+      "The claim gets made loosely, so here is the arithmetic. Count only the " +
+      "matmul weights, since the biases and norms are " + mono("O(d)") +
+      " and vanish at scale."));
+
+    const tb = el("table", { class: "data" });
+    tb.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", { style: { textAlign: "left" } }, "Sub-module"),
+      el("th", {}, "matrices"),
+      el("th", {}, "each"),
+      el("th", {}, "total"),
+      el("th", {}, "share of matmul weights")
+    ])));
+    const tbd = el("tbody", {});
+    [
+      ["attention", "W_q, W_k, W_v, W_o", "d × d", attnCoeff],
+      ["MLP (4× expansion)", "W_up, W_down", "d × 4d", mlpCoeff4]
+    ].forEach(function (r) {
+      tbd.appendChild(el("tr", {}, [
+        el("td", {}, r[0]),
+        el("td", { class: "n" }, r[1]),
+        el("td", { class: "n" }, r[2]),
+        el("td", { class: "n" }, f(r[3], 0) + "·d²"),
+        el("td", { class: "n" }, f(r[3] / totCoeff * 100, 1) + "%")
+      ]));
+    });
+    tbd.appendChild(el("tr", {}, [
+      el("td", {}, el("b", {}, "block")), el("td", {}, ""), el("td", {}, ""),
+      el("td", { class: "n" }, el("b", {}, f(totCoeff, 0) + "·d²")),
+      el("td", { class: "n" }, "100%")
+    ]));
+    tb.appendChild(tbd);
+    host.appendChild(el("div", { class: "scrollx" }, tb));
+
+    host.appendChild(NN.formula({
+      rule: "MLP share = " + f(mlpCoeff4, 0) + "d² / (" + f(mlpCoeff4, 0) +
+            "d² + " + f(attnCoeff, 0) + "d²)",
+      sub: f(mlpCoeff4, 0) + " / " + f(totCoeff, 0),
+      result: f(mlpCoeff4 / totCoeff * 100, 1) + " %", cls: "weight"
+    }));
+
+    host.appendChild(NN.callout("warn", "Be careful with the toy's own ratio",
+      "This block uses " + mono("d_ff = " + FF) + " = ×" + f(P.expansion, 2) +
+      " expansion, not ×4, purely so the " + S + "×" + FF +
+      " hidden tensor fits on screen. So <em>here</em> the MLP is only " +
+      num(TF.params.by_group.mlp, 0) + " of " + num(TF.params.total, 0) +
+      " parameters (" + num(TF.params.by_group.mlp / TF.params.total * 100, 1) +
+      "%), while attention is " +
+      num(TF.params.attn_share * 100, 1) + "%. Rebuild the same block at ×4 and " +
+      "it becomes " + num(TF.params.if_4x_expansion.mlp, 0) + " of " +
+      num(TF.params.if_4x_expansion.total, 0) + " = " +
+      num(TF.params.if_4x_expansion.mlp_share * 100, 1) +
+      "% — the " + f(mlpCoeff4 / totCoeff * 100, 0) + "% figure, dragged down " +
+      "slightly by the biases and norms that only matter at this size."));
+  })();
+
+  /* ===================================================================== */
+  /* 6. PARAMETER ACCOUNTING                                                */
+  /* ===================================================================== */
+  (function params() {
+    const host = NN.$("#params");
+    const P = TF.params, R = TF.real;
+
+    host.appendChild(h2("Parameter accounting"));
+    host.appendChild(p("Every learnable tensor in this block, nothing rounded."));
+
+    const tb = el("table", { class: "data" });
+    tb.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "Tensor"), el("th", { style: { textAlign: "left" } }, "group"),
+      el("th", {}, "shape"), el("th", {}, "params"),
+      el("th", { style: { textAlign: "left" } }, "formula"),
+      el("th", {}, "% of block")
+    ])));
+    const tbd = el("tbody", {});
+    P.per_submodule.forEach(function (s) {
+      tbd.appendChild(el("tr", {}, [
+        el("td", {}, s.name),
+        el("td", { style: { textAlign: "left" } }, s.group),
+        el("td", { class: "n" }, s.shape.join(" × ")),
+        el("td", { class: "n" }, f(s.count, 0)),
+        el("td", { class: "small muted mono", style: { textAlign: "left" } }, s.formula),
+        el("td", { class: "n" }, f(s.count / P.total * 100, 1) + "%")
+      ]));
+    });
+    ["attention", "mlp", "layernorm"].forEach(function (g) {
+      tbd.appendChild(el("tr", { style: { background: "var(--surface-2)" } }, [
+        el("td", {}, el("b", {}, g + " — subtotal")),
+        el("td", {}, ""), el("td", {}, ""),
+        el("td", { class: "n" }, el("b", {}, f(P.by_group[g], 0))),
+        el("td", {}, ""),
+        el("td", { class: "n" }, el("b", {}, f(P.by_group[g] / P.total * 100, 1) + "%"))
+      ]));
+    });
+    tbd.appendChild(el("tr", {}, [
+      el("td", {}, el("b", {}, "TOTAL")),
+      el("td", {}, ""), el("td", {}, ""),
+      el("td", { class: "n" }, el("b", {}, f(P.total, 0))),
+      el("td", {}, ""), el("td", { class: "n" }, el("b", {}, "100%"))
+    ]));
+    tb.appendChild(tbd);
+    host.appendChild(el("div", { class: "scrollx" }, tb));
+
+    host.appendChild(NN.callout("key", "The formula worth memorising",
+      "<b>attention</b> " + mono(P.general_formula.attention_weights) +
+      " &nbsp;·&nbsp; <b>MLP</b> " + mono(P.general_formula.mlp_weights) +
+      " &nbsp;·&nbsp; <b>norms</b> " + mono(P.general_formula.layernorm) +
+      "<br>→ <b>" + mono(P.general_formula.total_leading) + " per block</b>. " +
+      "It is worth memorising and it is also, for every current frontier " +
+      "model, <em>wrong</em>. The next part is about how wrong, and in which " +
+      "direction."));
+
+    /* ---- a real config, computed live -------------------------------- */
+    host.appendChild(h3("Running the formula on a real config"));
+    host.appendChild(p(
+      "Dimensions come from " + mono("T.reference_configs") + " in the shared " +
+      "trace, so pages 02, 07 and 08 all quote the same architecture numbers. " +
+      "The parameter counts below are then derived from those dimensions term " +
+      "by term."));
+    host.appendChild(el("div", { class: "small muted", html:
+      "<b>Caveat on provenance:</b> " + R._source + ". Unlike every other " +
+      "number on this site, these are not derived from the toy model — they " +
+      "are published figures, quoted. The arithmetic done on top of them is " +
+      "ours and is shown in full." }));
+
+    host.appendChild(NN.callout("warn",
+      "Caveat on method: the architecture family is inferred, not declared",
+      R.family_inference.why + "<br><br>The rule used is " +
+      mono(R.family_inference.rule) + ". " + R.family_inference.caveat));
+
+    const sel = el("select", {
+      class: "segbtn", style: { padding: "6px 10px", minWidth: "180px" }
+    });
+    R.models.forEach(function (m, i) {
+      sel.appendChild(el("option", { value: String(i) }, m.name));
+    });
+    sel.value = String(R.default_index);
+    host.appendChild(el("div", { class: "segbtns" }, [
+      el("label", { class: "small muted", style: { alignSelf: "center" } }, "model:"),
+      sel
+    ]));
+
+    const mHost = el("div", {});
+    host.appendChild(mHost);
+
+    function renderModel(idx) {
+      const m = R.models[idx], C = m.config, X = m.exact, fam = m.family_spec;
+      mHost.innerHTML = "";
+
+      mHost.appendChild(p(
+        mono("d_model " + f(C.d_model, 0)) + " · " +
+        mono(f(C.n_layers, 0) + " layers") + " · " +
+        mono(f(C.n_heads, 0) + " heads") +
+        (C.n_kv_heads < C.n_heads
+          ? " but only " + mono(f(C.n_kv_heads, 0) + " KV heads")
+          : "") +
+        " · " + mono("d_head " + f(C.d_head, 0)) +
+        " · " + mono("d_ff " + f(C.d_ff, 0)) +
+        " (= " + num(C.d_ff / C.d_model, 2) + "×d) · " +
+        mono("vocab " + f(C.vocab, 0)) + " · " +
+        mono("seq " + f(C.seq, 0)) +
+        "<br><span class='small muted'>Family <b>" + m.family +
+        "</b> <em>(inferred — " + fam.detect + ")</em>: " +
+        fam.attention + ". " + fam.mlp + ". " + fam.norm + ". " +
+        fam.pos_embedding + ".</span>"));
+
+      mHost.appendChild(NN.formula({
+        rule: m.naive.total_formula,
+        sub: m.naive.per_layer_formula + " × " + f(C.n_layers, 0),
+        result: NN.count(m.naive.total) + " parameters", cls: "weight"
+      }));
+
+      mHost.appendChild(NN.tiles([
+        { k: "12·d²·L estimate", v: NN.count(m.naive.total),
+          s: "the memorable formula", cls: "weight" },
+        { k: "Exact, from the dims", v: NN.count(X.total),
+          s: "computed term by term", cls: "weight" },
+        { k: "Published", v: NN.count(m.published), s: "the quoted figure" },
+        { k: "Estimate captures", v: f(m.naive.fraction_of_exact * 100, 1) + "%",
+          s: "of the exact count" }
+      ]));
+
+      mHost.appendChild(NN.chart.bars({
+        items: [
+          { label: "12·d²·L estimate", value: m.naive.total / 1e9,
+            color: "var(--weight)", sub: "(" + NN.count(m.naive.total) + ")" },
+          { label: "exact, term by term", value: X.total / 1e9,
+            color: "var(--weight)", sub: "(" + NN.count(X.total) + ")" },
+          { label: "published figure", value: m.published / 1e9,
+            color: "var(--accent)", sub: "(" + NN.count(m.published) + ")" }
+        ],
+        unit: "B params"
+      }));
+      mHost.appendChild(el("div", { class: "legend" }, [
+        NN.chip("weight"),
+        el("span", { class: "small muted" },
+          "grey = a quoted figure, not something we derived")
+      ]));
+
+      const t2 = el("table", { class: "data" });
+      t2.appendChild(el("thead", {}, el("tr", {}, [
+        el("th", {}, "Term"), el("th", {}, "shape"), el("th", {}, "params"),
+        el("th", { style: { textAlign: "left" } }, "formula")
+      ])));
+      const t2b = el("tbody", {});
+      X.attn_terms.concat(X.mlp_terms).forEach(function (t) {
+        t2b.appendChild(el("tr", {}, [
+          el("td", {}, t.name),
+          el("td", { class: "n" }, t.shape.join(" × ")),
+          el("td", { class: "n" }, NN.count(t.count)),
+          el("td", { class: "small muted mono", style: { textAlign: "left" } }, t.formula)
+        ]));
+      });
+      [["attention, per layer", X.attn, X.attn_in_d2, 4],
+       ["MLP, per layer", X.mlp, X.mlp_in_d2, 8],
+       ["whole layer", X.per_layer, X.per_layer_in_d2, 12]
+      ].forEach(function (r) {
+        const delta = (r[2] - r[3]) / r[3] * 100;
+        t2b.appendChild(el("tr", { style: { background: "var(--surface-2)" } }, [
+          el("td", {}, el("b", {}, r[0])), el("td", {}, ""),
+          el("td", { class: "n" }, el("b", {}, NN.count(r[1]))),
+          el("td", { class: "small mono", style: { textAlign: "left" } },
+            f(r[2], 2) + "·d²  vs textbook " + r[3] + "·d²  (" +
+            NN.fmtSigned(delta, 1) + "%)")
+        ]));
+      });
+      t2.appendChild(t2b);
+      mHost.appendChild(el("div", { class: "scrollx" }, t2));
+
+      const ul = el("ul", { class: "small" });
+      m.omissions.forEach(function (o) { ul.appendChild(el("li", { text: o })); });
+      const co = NN.callout("warn", "What 12·d²·L leaves out for " + m.name, "");
+      co.appendChild(ul);
+      mHost.appendChild(co);
+
+      mHost.appendChild(NN.formula({
+        rule: "exact = layers + embedding" +
+              (X.pos_embed ? " + positional" : "") +
+              (X.lm_head ? " + unembedding" : " (unembedding tied, free)") +
+              " + final norm",
+        sub: NN.count(X.layers_total) + " + " + NN.count(X.embed) +
+             (X.pos_embed ? " + " + NN.count(X.pos_embed) : "") +
+             (X.lm_head ? " + " + NN.count(X.lm_head) : "") +
+             " + " + f(X.final_norm, 0),
+        result: X.total.toLocaleString() + " parameters", cls: "weight"
+      }));
+      mHost.appendChild(p(
+        "That is " + num(m.exact_vs_published * 100, 2) +
+        "% of the published figure of " + num(m.published, 0) +
+        " — the residual is the rounding in the published number, not an " +
+        "error in the accounting. Meanwhile the " + mono("12·d²·L") +
+        " shortcut lands at " + num(m.naive.fraction_of_exact * 100, 1) +
+        "% of exact."));
+    }
+
+    sel.addEventListener("change", function () { renderModel(Number(sel.value)); });
+    renderModel(R.default_index);
+
+    /* ---- where the textbook formula diverges, across all models ------- */
+    host.appendChild(h3("Where the textbook formula diverges"));
+    host.appendChild(p(
+      "One row per model, all five computed the same way. The pattern is not " +
+      "noise: GQA pulls attention <em>below</em> " + mono("4·d²") +
+      " and SwiGLU pushes the MLP <em>above</em> " + mono("8·d²") +
+      ", and on the Llama configs those two errors partly cancel — which is " +
+      "the only reason the shortcut survives at all."));
+
+    const t3 = el("table", { class: "data" });
+    t3.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", { style: { textAlign: "left" } }, "Model"),
+      el("th", {}, "family"),
+      el("th", {}, "attention"), el("th", {}, "MLP"), el("th", {}, "per layer"),
+      el("th", {}, "12·d²·L vs exact")
+    ])));
+    const t3b = el("tbody", {});
+    R.models.forEach(function (m) {
+      const X = m.exact;
+      t3b.appendChild(el("tr", {}, [
+        el("td", { style: { textAlign: "left" } }, m.name),
+        el("td", {}, m.family),
+        el("td", { class: "n" }, f(X.attn_in_d2, 2) + "·d²"),
+        el("td", { class: "n" }, f(X.mlp_in_d2, 2) + "·d²"),
+        el("td", { class: "n" }, f(X.per_layer_in_d2, 2) + "·d²"),
+        el("td", { class: "n" }, f(m.naive.fraction_of_exact * 100, 1) + "%")
+      ]));
+    });
+    t3b.appendChild(el("tr", { style: { background: "var(--surface-2)" } }, [
+      el("td", { style: { textAlign: "left" } }, el("b", {}, "textbook")),
+      el("td", {}, "—"),
+      el("td", { class: "n" }, el("b", {}, "4·d²")),
+      el("td", { class: "n" }, el("b", {}, "8·d²")),
+      el("td", { class: "n" }, el("b", {}, "12·d²")),
+      el("td", { class: "n" }, "—")
+    ]));
+    t3.appendChild(t3b);
+    host.appendChild(el("div", { class: "scrollx" }, t3));
+
+    host.appendChild(NN.chart.bars({
+      items: R.models.map(function (m) {
+        return { label: m.name, value: m.exact.per_layer_in_d2,
+                 color: "var(--weight)",
+                 sub: "(" + f(m.exact.attn_in_d2, 2) + " attn + " +
+                      f(m.exact.mlp_in_d2, 2) + " mlp)" };
+      }),
+      unit: "· d² per layer",
+      limit: { value: 12, label: "textbook 12·d²" }
+    }));
+
+    host.appendChild(NN.callout("why", "Read the error, not just the total",
+      "For " + R.models[0].name + " the shortcut captures only " +
+      num(R.models[0].naive.fraction_of_exact * 100, 1) +
+      "% — not because its layers are unusual (they are almost exactly " +
+      mono("12·d²") + ") but because at " + NN.count(R.models[0].published) +
+      " parameters the embedding table is a large fraction of the whole " +
+      "model. For " + R.models[R.models.length - 1].name + " it captures " +
+      num(R.models[R.models.length - 1].naive.fraction_of_exact * 100, 1) +
+      "%. Same formula, same direction of error in the layers, completely " +
+      "different accuracy — because the term it omits scales with " +
+      mono("vocab · d") + " while the term it keeps scales with " +
+      mono("d² · L") + ". The shortcut gets better as models get deeper, and " +
+      "worse as vocabularies get bigger."));
+  })();
+
+  /* ===================================================================== */
+  /* 7. ACTIVATION MEMORY AND THE seq² TERM                                 */
+  /* ===================================================================== */
+  (function actmem() {
+    const host = NN.$("#actmem");
+    const AM = TF.actmem, SR = AM.slider_ranges;
+    const DTB = T.memory.dtype_bytes;
+
+    host.appendChild(h2("Activation memory and the seq² term"));
+    host.appendChild(p(
+      "Parameters do not care how long your context is. Activations do. " +
+      "For a standard (non-Flash) block, the saved activations per layer come " +
+      "to " + mono(AM.formula) + " bytes at 2-byte activations, where " +
+      mono("s") + " is sequence length, " + mono("b") + " batch, " +
+      mono("h") + " d_model and " + mono("a") + " the number of heads. " +
+      "Two terms, and only one of them contains " + mono("s²") + "."));
+
+    host.appendChild(el("div", { class: "legend" }, [
+      NN.chip("activation"),
+      el("span", { class: "small muted" },
+        "everything in this section is one tensor class — the split is by how it scales, not by what it is")
+    ]));
+
+    /* --- where the coefficients come from ----------------------------- */
+    const coeffHost = el("div", {});
+    host.appendChild(coeffHost);
+
+    function coeffTable(dt) {
+      const cw = AM.coeff_by_dtype[dt];
+      const wide = { act: cw.act_bytes, mask: 1, fp32: 4 };
+      const tt = el("table", { class: "data" });
+      tt.appendChild(el("thead", {}, el("tr", {}, [
+        el("th", { style: { textAlign: "left" } }, "Saved tensor"),
+        el("th", {}, "sub-module"), el("th", {}, "tensors"),
+        el("th", {}, "B/elem"), el("th", {}, "bytes"), el("th", {}, "scales as")
+      ])));
+      const ttb = el("tbody", {});
+      const push = function (t, unit) {
+        ttb.appendChild(el("tr", {}, [
+          el("td", { style: { textAlign: "left" } }, t.name),
+          el("td", {}, t.sub),
+          el("td", { class: "n" }, f(t.elems, 0)),
+          el("td", { class: "n" }, f(wide[t.dtype], 0) +
+            (t.dtype === "mask" ? " (bool)" : t.dtype === "fp32" ? " (fp32)" : "")),
+          el("td", { class: "n" }, f(t.elems * wide[t.dtype], 0) + " · " + unit),
+          el("td", { class: "n muted" }, unit === "s·b·h" ? "linear" : "QUADRATIC")
+        ]));
+      };
+      AM.linear_terms.forEach(function (t) { push(t, "s·b·h"); });
+      ttb.appendChild(el("tr", { style: { background: "var(--surface-2)" } }, [
+        el("td", { style: { textAlign: "left" } }, el("b", {}, "linear subtotal")),
+        el("td", {}, ""), el("td", {}, ""), el("td", {}, ""),
+        el("td", { class: "n" }, el("b", {}, f(cw.linear, 0) + " · s·b·h")),
+        el("td", {}, "")
+      ]));
+      AM.quad_terms.forEach(function (t) { push(t, "a·s²·b"); });
+      ttb.appendChild(el("tr", { style: { background: "var(--surface-2)" } }, [
+        el("td", { style: { textAlign: "left" } }, el("b", {}, "quadratic subtotal")),
+        el("td", {}, ""), el("td", {}, ""), el("td", {}, ""),
+        el("td", { class: "n v-activation" },
+          el("b", {}, f(cw.quad, 0) + " · a·s²·b")),
+        el("td", {}, "")
+      ]));
+      tt.appendChild(ttb);
+      return el("div", { class: "scrollx" }, tt);
+    }
+
+    /* --- the calculator ------------------------------------------------ */
+    host.appendChild(h3("Calculator"));
+
+    const SEQS = SR.seq.choices, DMS = SR.d_model.choices;
+    const state = {
+      batch: SR.batch.default, seqI: SR.seq.default_index,
+      heads: SR.heads.default, layers: SR.layers.default,
+      dmI: SR.d_model.default_index, flash: false,
+      dtype: SR.dtype_default
+    };
+
+    /* presets come from the SAME reference configs section 6 uses */
+    const presets = el("div", { class: "segbtns" });
+    presets.appendChild(el("label", { class: "small muted",
+      style: { alignSelf: "center" } }, "load a real config:"));
+
+    const sliders = el("div", { class: "sliders" });
+    const outs = {};
+
+    function mkSlider(key, label, min, max, step, get, set, fmtv) {
+      const inp = el("input", { type: "range", min: min, max: max, step: step, value: get() });
+      const o = el("output", {}, fmtv(get()));
+      outs[key] = o;
+      inp.addEventListener("input", function () {
+        set(Number(inp.value));
+        o.textContent = fmtv(Number(inp.value));
+        update();
+      });
+      sliders.appendChild(el("div", { class: "sliderrow" }, [
+        el("label", {}, label), inp, o
+      ]));
+      return inp;
+    }
+
+    const sBatch = mkSlider("batch", "batch  b", SR.batch.min, SR.batch.max, SR.batch.step,
+      function () { return state.batch; }, function (v) { state.batch = v; },
+      function (v) { return f(v, 0); });
+
+    const sSeq = mkSlider("seq", "sequence length  s", 0, SEQS.length - 1, 1,
+      function () { return state.seqI; }, function (v) { state.seqI = v; },
+      function (v) { return f(SEQS[v], 0) + " tok"; });
+
+    const sHeads = mkSlider("heads", "heads  a", SR.heads.min, SR.heads.max, SR.heads.step,
+      function () { return state.heads; }, function (v) { state.heads = v; },
+      function (v) { return f(v, 0); });
+
+    const sLayers = mkSlider("layers", "layers  L", SR.layers.min, SR.layers.max, SR.layers.step,
+      function () { return state.layers; }, function (v) { state.layers = v; },
+      function (v) { return f(v, 0); });
+
+    const sDm = mkSlider("dm", "d_model  h", 0, DMS.length - 1, 1,
+      function () { return state.dmI; }, function (v) { state.dmI = v; },
+      function (v) { return f(DMS[v], 0); });
+
+    /* activation dtype, straight off T.memory.dtype_bytes */
+    const dtRow = el("div", { class: "segbtns" });
+    Object.keys(DTB).forEach(function (dt) {
+      if (!AM.coeff_by_dtype[dt]) return;
+      const b = el("button", { class: "segbtn", "aria-pressed": String(dt === state.dtype) },
+                   dt + " (" + DTB[dt] + " B)");
+      b.addEventListener("click", function () {
+        state.dtype = dt;
+        NN.$$(".segbtn", dtRow).forEach(function (x) { x.setAttribute("aria-pressed", "false"); });
+        b.setAttribute("aria-pressed", "true");
+        update();
+      });
+      dtRow.appendChild(b);
+    });
+    sliders.appendChild(el("div", { class: "sliderrow" }, [
+      el("label", {}, "activation dtype"), dtRow, el("output", {}, "")
+    ]));
+
+    const flashBox = el("input", { type: "checkbox" });
+    sliders.appendChild(el("div", { class: "sliderrow" }, [
+      el("label", {}, "FlashAttention"),
+      el("div", { style: { display: "flex", alignItems: "center", gap: "9px" } }, [
+        flashBox,
+        el("span", { class: "small muted" },
+          "never materialise the a·s² matrix; keep only the softmax statistics")
+      ]),
+      el("output", {}, "")
+    ]));
+    flashBox.addEventListener("change", function () {
+      state.flash = flashBox.checked; update();
+    });
+
+    TF.real.models.forEach(function (m) {
+      const C = m.config;
+      const b = el("button", { class: "segbtn" }, m.name);
+      b.addEventListener("click", function () {
+        const si = SEQS.indexOf(C.seq), di = DMS.indexOf(C.d_model);
+        if (si >= 0) state.seqI = si;
+        if (di >= 0) state.dmI = di;
+        state.heads = NN.clamp(C.n_heads, SR.heads.min, SR.heads.max);
+        state.layers = NN.clamp(C.n_layers, SR.layers.min, SR.layers.max);
+        sSeq.value = state.seqI; sDm.value = state.dmI;
+        sHeads.value = state.heads; sLayers.value = state.layers;
+        outs.seq.textContent = f(SEQS[state.seqI], 0) + " tok";
+        outs.dm.textContent = f(DMS[state.dmI], 0);
+        outs.heads.textContent = f(state.heads, 0);
+        outs.layers.textContent = f(state.layers, 0);
+        update();
+      });
+      presets.appendChild(b);
+    });
+
+    host.appendChild(presets);
+    host.appendChild(sliders);
+
+    const tilesHost = el("div", {});
+    const barsHost  = el("div", {});
+    const chartHost = el("div", {});
+    const noteHost  = el("div", {});
+    host.appendChild(tilesHost);
+    host.appendChild(barsHost);
+    host.appendChild(h3("Watch the quadratic term take over"));
+    host.appendChild(el("div", { class: "linelegend" }, [
+      (function () {
+        const s1 = sv("svg", { width: 30, height: 10, viewBox: "0 0 30 10" });
+        s1.appendChild(sv("line", { x1: 0, y1: 5, x2: 30, y2: 5,
+          stroke: "var(--activation)", "stroke-width": 2.5 }));
+        return el("span", {}, [s1, "seq² part — the a·s²·b·L term"]);
+      })(),
+      (function () {
+        const s2 = sv("svg", { width: 30, height: 10, viewBox: "0 0 30 10" });
+        s2.appendChild(sv("line", { x1: 0, y1: 5, x2: 30, y2: 5,
+          stroke: "var(--accent)", "stroke-width": 2.5, "stroke-dasharray": "5 3" }));
+        return el("span", {}, [s2, "linear part — the s·b·h·L term"]);
+      })()
+    ]));
+    host.appendChild(chartHost);
+    host.appendChild(noteHost);
+
+    function calc(b, s, a, L, h, flash, dt) {
+      const cw = AM.coeff_by_dtype[dt];
+      const lin = cw.linear * s * b * h;
+      const extra = flash ? cw.flash_extra * a * s * b : 0;
+      const quad = flash ? 0 : cw.quad * a * s * s * b;
+      return {
+        lin: (lin + extra) * L, quad: quad * L,
+        total: (lin + extra + quad) * L,
+        perLayer: lin + extra + quad, cw: cw
+      };
+    }
+
+    function update() {
+      const b = state.batch, s = SEQS[state.seqI], a = state.heads;
+      const L = state.layers, h = DMS[state.dmI], dt = state.dtype;
+      const cw = AM.coeff_by_dtype[dt];
+      const r  = calc(b, s, a, L, h, state.flash, dt);
+      const rn = calc(b, s, a, L, h, false, dt);
+      const rf = calc(b, s, a, L, h, true, dt);
+
+      coeffHost.innerHTML = "";
+      coeffHost.appendChild(coeffTable(dt));
+      coeffHost.appendChild(el("div", { class: "small muted", html:
+        "Accounting from " + AM.source + " Assumes: " + AM.assumes +
+        "<br>Coefficients shown for <b>" + dt + "</b> at " + DTB[dt] +
+        " bytes per element, from " + mono("T.memory.dtype_bytes") + ": " +
+        "linear " + num(cw.linear, 0) + ", quadratic " + num(cw.quad, 0) +
+        ". " + AM.formula_note }));
+
+      /* crossover: quad·a·s²·b == lin·s·b·h  =>  s = lin·h / (quad·a) */
+      const cross = cw.linear * h / (cw.quad * a);
+
+      tilesHost.innerHTML = "";
+      tilesHost.appendChild(NN.tiles([
+        { k: "Activation memory", v: NN.bytes(r.total),
+          s: f(L, 0) + " layers · " + f(s, 0) + " tok · batch " + f(b, 0) +
+             " · " + dt, cls: "activation" },
+        { k: "Per layer", v: NN.bytes(r.perLayer), s: "one block's saved tensors",
+          cls: "activation" },
+        { k: "Quadratic share", v: f(r.quad / r.total * 100, 1) + "%",
+          s: state.flash ? "FlashAttention: term removed" : "the a·s²·b term" },
+        { k: "Crossover", v: f(cross, 0) + " tok",
+          s: "beyond this, seq² dominates" }
+      ]));
+
+      barsHost.innerHTML = "";
+      barsHost.appendChild(NN.chart.bars({
+        items: [
+          { label: cw.linear + "·s·b·h·L  (linear in seq)",
+            value: r.lin / 1e9, color: "var(--accent)",
+            sub: "(" + NN.bytes(r.lin) + ")" },
+          { label: cw.quad + "·a·s²·b·L  (quadratic in seq)",
+            value: r.quad / 1e9, color: "var(--activation)",
+            sub: "(" + NN.bytes(r.quad) + ")" }
+        ],
+        unit: "GB"
+      }));
+
+      const linPts = [], quadPts = [];
+      SEQS.forEach(function (s2) {
+        const rr = calc(b, s2, a, L, h, state.flash, dt);
+        linPts.push([Math.log2(s2), Math.max(rr.lin, 1)]);
+        quadPts.push([Math.log2(s2), Math.max(rr.quad, 1)]);
+      });
+      chartHost.innerHTML = "";
+      chartHost.appendChild(NN.chart.line({
+        series: [
+          { name: "seq² part", color: "var(--activation)", points: quadPts },
+          { name: "linear part", color: "var(--accent)", points: linPts, dash: "5 3" }
+        ],
+        width: 720, height: 300, logY: true,
+        xlabel: "sequence length (log₂ tokens)", ylabel: "bytes"
+      }));
+      chartHost.appendChild(el("div", { class: "small muted", html:
+        "x runs " + f(SEQS[0], 0) + " → " + f(SEQS[SEQS.length - 1], 0) +
+        " tokens (log₂ " + f(Math.log2(SEQS[0]), 0) + " → " +
+        f(Math.log2(SEQS[SEQS.length - 1]), 0) + "); y is log scale. " +
+        "The dashed line has slope 1 in log-log, the solid one slope 2 — that " +
+        "gap is the whole problem." }));
+
+      noteHost.innerHTML = "";
+      noteHost.appendChild(NN.formula({
+        rule: "crossover: " + cw.quad + "·a·s²·b = " + cw.linear +
+              "·s·b·h  ⟹  s = " + cw.linear + "·h / (" + cw.quad + "·a)",
+        sub: cw.linear + " × " + f(h, 0) + " / (" + cw.quad + " × " + f(a, 0) + ")",
+        result: f(cross, 0) + " tokens", cls: "activation"
+      }));
+      noteHost.appendChild(p(
+        "At d_model " + num(h, 0) + " with " + num(a, 0) + " heads, the score " +
+        "matrices overtake <em>everything else in the block combined</em> at " +
+        "about " + num(cross, 0) + " tokens. Note what is <b>not</b> in that " +
+        "expression: layers and batch cancel, and so does the activation " +
+        "dtype almost entirely. Note what is: more heads makes the crossover " +
+        "come <em>sooner</em>, and a wider model pushes it later. Attention " +
+        "memory is driven by head count, not by model width."));
+
+      const saved = Math.max(rn.total - rf.total, 0);
+      noteHost.appendChild(NN.callout("key", "What FlashAttention actually changes",
+        AM.flash.what + "<br><br>At the current setting: " +
+        NN.bytes(rn.total) + " naive → " + NN.bytes(rf.total) +
+        " with Flash, a saving of <b>" + NN.bytes(saved) + "</b> (" +
+        num(saved / rn.total * 100, 1) + "% of the naive figure)." +
+        "<br><br><b>The honest caveat:</b> " + AM.flash.caveat +
+        " So the naive number above <em>overstates</em> the memory any modern " +
+        "stack actually uses — it is the right number for understanding the " +
+        "scaling, and the wrong number for sizing a GPU."));
+
+      noteHost.appendChild(NN.callout("warn", "Why the score matrix is also the precision problem",
+        AM.precision_note.replace("T.formats.fp16.max_finite",
+          "<b>" + f(T.formats.fp16.max_finite, 0) + "</b>")
+          .replace("T.formats.bf16.max_finite",
+          "<b>" + f(T.formats.bf16.max_finite, 2) + "</b>") +
+        "<br><br>fp16 carries " + num(T.formats.fp16.mantissa_bits, 0) +
+        " mantissa bits and " + num(T.formats.fp16.decades_of_range, 1) +
+        " decades of range; bf16 trades down to " +
+        num(T.formats.bf16.mantissa_bits, 0) + " mantissa bits to buy " +
+        num(T.formats.bf16.decades_of_range, 1) +
+        " decades. For a tensor you are about to exponentiate, range is worth " +
+        "more than precision — which is why bf16 won."));
+    }
+
+    update();
+  })();
+
+  /* ===================================================================== */
+  /* 8. FORWARD LINK                                                        */
+  /* ===================================================================== */
+  (function next() {
+    const host = NN.$("#next");
+    const nxt = NN.PAGES.filter(function (x) { return x.id === "scaling"; })[0];
+    const R = TF.real;
+    const m = R.models[R.default_index], C = m.config, X = m.exact;
+    const RC = T.reference_configs;
+
+    /* the standard mixed-precision recipe from page 05's accounting */
+    const rec = T.memory.recipes.filter(function (r) {
+      return /fp32 master/.test(r.name) && /bf16 grads/.test(r.name);
+    })[0] || T.memory.recipes[T.memory.recipes.length - 1];
+    const perParam = Object.keys(rec.components).reduce(function (a, k) {
+      return a + rec.components[k];
+    }, 0);
+    const stateBytes = X.total * perParam;
+
+    const gpu = RC.gpus.filter(function (g) { return g.name === RC.default_gpu; })[0];
+    const nGpu = Math.ceil(stateBytes / gpu.hbm_bytes);
+
+    host.appendChild(h2("Where this goes next"));
+    host.appendChild(p(
+      "One block is " + num(TF.params.total, 0) + " parameters here and " +
+      NN.count(X.per_layer) + " in " + m.name + ". Stack " +
+      num(C.n_layers, 0) + " of them, add the embeddings, and you get " +
+      num(X.total, 0) + " parameters — which is where the arithmetic stops " +
+      "being about transformers and starts being about hardware."));
+
+    host.appendChild(NN.callout("mem", "The number page 08 starts from",
+      "Page 05's recipe <b>" + rec.name + "</b> costs " +
+      Object.keys(rec.components).map(function (k) {
+        return num(rec.components[k], 0) + " B " + k;
+      }).join(" + ") + " = <b>" + num(perParam, 0) +
+      " bytes per parameter</b>" + (rec.note ? " (" + rec.note + ")" : "") +
+      ". For " + m.name + ":<br><br>" +
+      mono(NN.count(X.total) + " × " + perParam + " B = " + NN.bytes(stateBytes)) +
+      "<br><br>before a single activation. A " + gpu.name + " holds " +
+      NN.gibytes(gpu.hbm_bytes) + " = " + NN.bytes(gpu.hbm_bytes) +
+      ", so that is <b>" + num(nGpu, 0) +
+      " GPUs</b> of persistent state before you have run a forward pass — and " +
+      "then section 7's activation term lands on top of it. That gap is the " +
+      "entire reason ZeRO, FSDP, tensor parallelism and pipeline parallelism " +
+      "exist, and it is what <a href='" + nxt.file + "'>08 " + nxt.title +
+      "</a> is about."));
+
+    host.appendChild(el("p", { html:
+      "→ <a href='" + nxt.file + "'><b>" + nxt.n + " " + nxt.title +
+      "</b></a> — " + nxt.blurb }));
+  })();
+
+  NN.page("transformer");
+})();
+</script>
+</body>
+</html>

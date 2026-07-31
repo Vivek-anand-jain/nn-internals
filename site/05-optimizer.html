@@ -1,0 +1,1419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 05 The Optimizer: SGD, Momentum, Adam</title>
+<link rel="stylesheet" href="../assets/css/design.css">
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 05</div>
+    <h1>The Optimizer: SGD, Momentum, Adam</h1>
+    <p class="lede">The backward pass handed us one number per parameter. This page is
+      about the line that turns that number into a changed weight — and about why the
+      three most common ways of writing that line cost two, three and four tensors
+      the size of the model.</p>
+    <noscript><p class="callout warn">This page builds every table, chart and number
+      from <code>assets/data/trace.js</code> at runtime. It needs JavaScript.</p></noscript>
+  </div>
+
+  <section class="block" id="sgd">
+    <h2>1 · The simplest possible update</h2>
+    <div id="sgd-body"></div>
+  </section>
+
+  <section class="block" id="momentum">
+    <h2>2 · Momentum: one extra tensor</h2>
+    <div id="mom-body"></div>
+  </section>
+
+  <section class="block" id="adam">
+    <h2>3 · Adam, fully unpacked</h2>
+    <div id="adam-body"></div>
+  </section>
+
+  <section class="block" id="compare">
+    <h2>4 · All three, on this model</h2>
+    <div id="cmp-body"></div>
+  </section>
+
+  <section class="block" id="memory">
+    <h2>5 · The memory bill</h2>
+    <div id="mem-body"></div>
+  </section>
+
+  <section class="block" id="master">
+    <h2>6 · Why the fp32 master copy exists</h2>
+    <div id="master-body"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T   = NN.T;
+  const el  = NN.el;
+  const fmt = NN.fmt;
+  const fs  = NN.fmtSigned;
+
+  const HP    = T.meta.hyperparams;
+  const LR    = HP.lr, B1 = HP.beta1, B2 = HP.beta2, EPS = HP.eps;
+  const NAMES = T.param_names;
+  const NP    = NAMES.length;
+  const RUNS  = T.runs;
+
+  /* Optimiser identity colours. These are the same four hues the site uses for
+     tensor classes; in sections 4 they identify an OPTIMISER, not a tensor.
+     Every use is accompanied by a text label. */
+  const OPT = [
+    { key: "sgd",      label: "SGD",      color: "var(--weight)" },
+    { key: "momentum", label: "Momentum", color: "var(--activation)" },
+    { key: "adam",     label: "Adam",     color: "var(--optimizer)" }
+  ];
+
+  /* ------------------------------------------------------------ helpers */
+
+  function p(html)   { return el("p", { html: html }); }
+  function small(h)  { return el("p", { class: "small muted", html: h }); }
+  function num(v, c, d) {
+    return '<span class="num' + (c ? " v-" + c : "") + '">' + fmt(v, d) + "</span>";
+  }
+  function snum(v, c, d) {
+    return '<span class="num' + (c ? " v-" + c : "") + '">' + fs(v, d) + "</span>";
+  }
+  /** A pass/fail line. Colour is backed by the words PASS / FAIL. */
+  function check(ok, html) {
+    return el("div", {
+      class: "small mono",
+      style: { color: ok ? "var(--good)" : "var(--critical)", margin: "8px 0" },
+      html: (ok ? "✓ PASS — " : "✗ FAIL — ") + html
+    });
+  }
+  function swatchLegend(items, note) {
+    const row = el("div", { class: "legend" }, items.map(function (i) {
+      return el("span", {
+        class: "mono small",
+        style: {
+          display: "inline-flex", alignItems: "center", gap: "7px",
+          border: "1px solid var(--hairline)", borderRadius: "999px",
+          padding: "2px 11px 2px 8px", background: "var(--surface-2)"
+        }
+      }, [
+        el("span", { style: {
+          width: "16px", height: "3px", borderRadius: "2px", background: i.color,
+          borderTop: i.dash ? "3px dashed " + i.color : null
+        } }),
+        i.label
+      ]);
+    }));
+    const box = el("div", {}, [row]);
+    if (note) box.appendChild(small(note));
+    return box;
+  }
+
+  /* ---------------------------------------------------- float helpers */
+  const _buf = new ArrayBuffer(4);
+  const _f32 = new Float32Array(_buf);
+  const _u32 = new Uint32Array(_buf);
+  function f32bits(x) { _f32[0] = x; return _u32[0] >>> 0; }
+  function bitsToF32(u) { _u32[0] = u >>> 0; return _f32[0]; }
+  function bitstr(u, n) { let s = ""; for (let i = n - 1; i >= 0; i--) s += ((u >>> i) & 1); return s; }
+  function decodeF32(x) {
+    const s = bitstr(f32bits(x), 32);
+    return { dtype: "fp32", bytes: 4, bits: s, sign: s[0],
+             exponent: s.slice(1, 9), mantissa: s.slice(9), exact: bitsToF32(f32bits(x)) };
+  }
+  /** fp32 -> bf16 with round-to-nearest-even, returned as an fp32 double. */
+  function toBf16(x) {
+    const u = f32bits(x);
+    const lsb = (u >>> 16) & 1;
+    const r = (u + 0x7fff + lsb) >>> 0;
+    return bitsToF32(r & 0xffff0000);
+  }
+  function decodeBf16(x) {
+    const b = toBf16(x);
+    const s = bitstr(f32bits(b) >>> 16, 16);
+    return { dtype: "bf16", bytes: 2, bits: s, sign: s[0],
+             exponent: s.slice(1, 9), mantissa: s.slice(9), exact: b };
+  }
+  function bf16Ulp(x) {
+    const b = toBf16(x);
+    const up = bitsToF32((((f32bits(b) >>> 16) + 1) >>> 0) << 16);
+    return up - b;
+  }
+  /** Smallest positive u such that bf16(w+u) != bf16(w). Found by bisection. */
+  function minVisibleUpdate(w) {
+    let hi = Math.abs(w) || 1;
+    while (toBf16(w + hi) === toBf16(w)) hi *= 2;
+    let lo = 0;
+    for (let k = 0; k < 200; k++) {
+      const mid = (lo + hi) / 2;
+      if (toBf16(w + mid) === toBf16(w)) lo = mid; else hi = mid;
+    }
+    return hi;
+  }
+
+  /* ------------------------------------------- the one-parameter slice */
+  /* Everything below is recomputed in JS from T.init / T.forward. Only
+     W2[0][0] moves; the other twelve parameters are held at their initial
+     values, which makes the loss an exact parabola in this one weight. */
+  const PIDX  = NAMES.indexOf("W2[0][0]");
+  const W0    = T.init.W2[0][0];
+  const G0    = T.backward.dL_dW2[0][0];
+  const A1    = T.forward.a1;
+  const Y     = T.forward.y;
+  const W2ROW = T.init.W2[0];
+  const B2V   = T.init.b2[0];
+  /* yhat(w) = w*a1[0] + (fixed rest) */
+  const REST  = W2ROW[1] * A1[1] + W2ROW[2] * A1[2] + B2V;
+  function yhatOf(w) { return w * A1[0] + REST; }
+  function lossOf(w) { const e = yhatOf(w) - Y; return e * e; }
+  /* bottom of the parabola along this slice */
+  const WMIN  = (Y - REST) / A1[0];
+  const LROPT = (WMIN - W0) / (-G0);     /* lr that lands exactly on WMIN */
+  const LRDIV = 2 * LROPT;               /* beyond this, one step increases the loss */
+
+  /* ==================================================================== */
+  /* 1 — SGD                                                              */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#sgd-body");
+
+    host.appendChild(p(
+      "One parameter, one gradient, one line of arithmetic. The gradient says " +
+      "which way the loss goes <em>up</em>, so the update walks the other way, " +
+      "scaled by the learning rate."));
+
+    host.appendChild(NN.formula({
+      rule: "w &larr; w &minus; lr &middot; g",
+      cls: "weight"
+    }));
+
+    host.appendChild(p(
+      "Take the single weight <span class='mono v-weight'>W2[0][0]</span> — the " +
+      "output layer's connection to hidden unit 0. Its starting value is " +
+      num(W0, "weight") + " and the backward pass gave it " +
+      "<span class='mono'>dL/dW2[0][0]</span> = " + snum(G0, "gradient") + "."));
+
+    host.appendChild(NN.legend(["weight", "gradient"]));
+
+    const w1 = W0 - LR * G0;
+    host.appendChild(NN.formula({
+      rule: "W2[0][0] &larr; W2[0][0] &minus; lr &middot; dL/dW2[0][0]",
+      sub: fmt(W0, 4) + " &minus; " + fmt(LR, 4) + " &times; (" + fs(G0, 4) + ")",
+      result: fmt(w1, 6),
+      cls: "weight"
+    }));
+
+    const traced = RUNS.sgd.history[0].theta_after[PIDX];
+    host.appendChild(check(Math.abs(w1 - traced) < 1e-12,
+      "recomputed " + fmt(w1, 6) + " equals T.runs.sgd.history[0].theta_after[" +
+      PIDX + "] = " + fmt(traced, 6) + " (|diff| = " +
+      fmt(Math.abs(w1 - traced), 1) + ")"));
+
+    host.appendChild(p(
+      "The gradient is negative, so subtracting it <em>increases</em> the weight. " +
+      "That is the whole of stochastic gradient descent. Everything that follows " +
+      "is an attempt to choose a better number to subtract."));
+
+    /* --------------------------------------------------- the lr slider */
+    host.appendChild(el("h3", {}, "Drag the learning rate"));
+    host.appendChild(p(
+      "Only <span class='mono v-weight'>W2[0][0]</span> moves; the other " +
+      (NP - 1) + " parameters stay at their values in <code>T.init</code>. With " +
+      "one weight free the loss is an exact parabola, so we can see the whole " +
+      "landscape this step is walking on. The forward pass is recomputed in JS: " +
+      "<span class='mono'>&#375; = w &middot; a1[0] + " + fmt(REST, 4) +
+      "</span>, <span class='mono'>L = (&#375; &minus; " + fmt(Y, 2) + ")&sup2;</span>."));
+
+    host.appendChild(check(Math.abs(lossOf(W0) - T.forward.loss) < 1e-12,
+      "the JS forward pass at w = " + fmt(W0, 4) + " reproduces T.forward.loss = " +
+      fmt(T.forward.loss, 6)));
+
+    const slider = el("input", {
+      type: "range", min: "0", max: String(LRDIV * 1.1),
+      step: String(LROPT / 200), value: String(LR),
+      style: { flex: "1", minWidth: "240px" }
+    });
+    const lrOut = el("span", { class: "mono", style: { minWidth: "9ch" } });
+
+    function presetBtn(label, value) {
+      return el("button", { class: "btn", onclick: function () {
+        slider.value = String(value); paint();
+      } }, label);
+    }
+
+    const controls = el("div", { class: "controls" }, [
+      el("span", { class: "mono small muted" }, "lr"),
+      slider, lrOut
+    ]);
+    host.appendChild(controls);
+
+    const presets = el("div", { class: "controls" }, [
+      el("span", { class: "mono small muted" }, "presets"),
+      presetBtn("too small (lr = " + fmt(LROPT / 200, 4) + ")", LROPT / 200),
+      presetBtn("configured (lr = " + fmt(LR, 4) + ")", LR),
+      presetBtn("lands on the minimum (lr = " + fmt(LROPT, 4) + ")", LROPT),
+      presetBtn("overshoots (lr = " + fmt(LRDIV * 1.05, 4) + ")", LRDIV * 1.05)
+    ]);
+    host.appendChild(presets);
+
+    const tileHost = el("div");
+    const chartHost = el("div");
+    const verdict = el("div", { class: "callout key" }, [
+      el("div", { class: "t" }, "verdict"),
+      el("div", { id: "lr-verdict" })
+    ]);
+    host.appendChild(tileHost);
+    host.appendChild(chartHost);
+    host.appendChild(swatchLegend([
+      { label: "loss after one step, as a function of lr", color: "var(--accent)" },
+      { label: "lr that lands exactly on the minimum", color: "var(--accent)", dash: true },
+      { label: "current slider position", color: "var(--critical)" }
+    ]));
+    host.appendChild(verdict);
+
+    /* the curve is fixed; only the marker moves */
+    const CURVE = [];
+    const NPTS = 160;
+    for (let k = 0; k <= NPTS; k++) {
+      const lr = LRDIV * 1.1 * k / NPTS;
+      CURVE.push([lr, lossOf(W0 - lr * G0)]);
+    }
+
+    function paint() {
+      const lr = parseFloat(slider.value);
+      const w  = W0 - lr * G0;
+      const L  = lossOf(w);
+      const L0 = lossOf(W0);
+      lrOut.textContent = fmt(lr, 4);
+
+      tileHost.replaceChildren(NN.tiles([
+        { k: "learning rate", v: fmt(lr, 4) },
+        { k: "step size |lr·g|", v: fmt(Math.abs(lr * G0), 4), cls: "gradient" },
+        { k: "W2[0][0] lands at", v: fmt(w, 4), cls: "weight",
+          s: "minimum of this slice: " + fmt(WMIN, 4) },
+        { k: "prediction ŷ", v: fmt(yhatOf(w), 4), cls: "activation",
+          s: "target y = " + fmt(Y, 2) },
+        { k: "loss after the step", v: fmt(L, 5),
+          s: "was " + fmt(L0, 5) }
+      ]));
+
+      chartHost.replaceChildren(NN.chart.line({
+        series: [
+          { name: "loss after one step", color: "var(--accent)", points: CURVE, dots: false },
+          { name: "lr* (bottom of the parabola)", color: "var(--accent)", dash: "4 4",
+            points: [[LROPT, 0], [LROPT, lossOf(W0)]], dots: false },
+          { name: "current lr", color: "var(--critical)", points: [[lr, L]] }
+        ],
+        width: 720, height: 250, xlabel: "learning rate", ylabel: "loss after the step"
+      }));
+
+      const frac = Math.abs(w - W0) / Math.abs(WMIN - W0);
+      let msg;
+      if (lr < LROPT * 0.1) {
+        msg = "The step covers " + fmt(frac * 100, 2) + "% of the distance to the " +
+          "bottom of this slice. The loss falls from " + num(L0) + " to " + num(L) +
+          " — a change of " + snum(L - L0) + ". Right direction, small progress. " +
+          "This is what a conservative lr looks like from inside one step: nothing " +
+          "appears broken, you just need many more steps. (The page's configured " +
+          "lr = " + fmt(LR, 4) + " sits here, and over " + HP.n_steps +
+          " compounding steps it does fine — see section 4. One-step optimality is " +
+          "not the goal.)";
+      } else if (Math.abs(lr - LROPT) < LROPT * 0.02) {
+        msg = "The step lands within " + fmt(Math.abs(w - WMIN), 1) + " of the exact " +
+          "minimum of this slice and the loss is " + num(L) + ". This only exists " +
+          "because we froze twelve of the thirteen parameters — the true 13-dimensional " +
+          "problem has no single lr that solves it in one step.";
+      } else if (lr < LRDIV) {
+        msg = "The step overshoots the bottom but still ends closer than it started: " +
+          "loss " + num(L0) + " → " + num(L) + ". Any lr strictly between 0 and " +
+          fmt(LRDIV, 4) + " reduces the loss on this slice.";
+      } else {
+        msg = "The step jumps past the minimum and comes down the far side <em>higher</em> " +
+          "than it started: loss " + num(L0) + " → " + num(L) + ", a change of " +
+          snum(L - L0) + ". On a quadratic the divergence threshold is exactly " +
+          "lr = 2·lr* = " + fmt(LRDIV, 4) + "; past it, every step makes " +
+          "things worse and the run explodes.";
+      }
+      NN.$("#lr-verdict").innerHTML = msg;
+    }
+
+    slider.addEventListener("input", paint);
+    paint();
+
+    host.appendChild(NN.callout("why", "why lr* is not a free lunch",
+      "The optimal step on this slice is lr = " + fmt(LROPT, 4) + " because the " +
+      "curvature here is small (one weight, one active input of size " + fmt(A1[0], 4) +
+      "). A different parameter has different curvature and would want a different lr. " +
+      "One scalar learning rate has to serve all " + NP + " of them — and in a real " +
+      "model, all 70 billion. That mismatch is the entire motivation for the two " +
+      "algorithms below."));
+  })();
+
+  /* ==================================================================== */
+  /* 2 — Momentum                                                         */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#mom-body");
+    const H = RUNS.momentum.history;
+
+    /* Recover beta from the trace rather than asserting it:
+       v_t = beta * v_{t-1} + g_t  =>  beta = (v_t - g_t) / v_{t-1}          */
+    let acc = 0, n = 0;
+    for (let t = 1; t < H.length; t++) {
+      for (let i = 0; i < NP; i++) {
+        const vp = H[t - 1].velocity[i];
+        if (Math.abs(vp) > 1e-9) { acc += (H[t].velocity[i] - H[t].grad[i]) / vp; n++; }
+      }
+    }
+    const BETA = acc / n;
+
+    host.appendChild(p(
+      "SGD has no memory: each step looks only at the current gradient. Momentum " +
+      "keeps a running sum of past gradients — a velocity — and steps along that " +
+      "instead. A ball rolling downhill does not stop and re-derive the slope at " +
+      "every point; it carries speed through the flat parts and averages out the " +
+      "wobble on the walls of a narrow valley."));
+
+    host.appendChild(NN.formula({
+      rule: "v &larr; &beta; &middot; v &nbsp;+&nbsp; g",
+      cls: "optimizer"
+    }));
+    host.appendChild(NN.formula({
+      rule: "w &larr; w &minus; lr &middot; v",
+      cls: "weight"
+    }));
+
+    host.appendChild(small(
+      "This is the form PyTorch's <code>SGD(momentum=&beta;)</code> uses: the raw " +
+      "gradient is added, not a (1&minus;&beta;)-weighted one. &beta; is not stored " +
+      "in <code>T.meta.hyperparams</code>, so it is recovered from the run itself by " +
+      "solving v<sub>t</sub> = &beta;v<sub>t&minus;1</sub> + g<sub>t</sub> across all " +
+      n + " usable (parameter, step) pairs: <b class='mono'>&beta; = " + fmt(BETA, 6) +
+      "</b>."));
+
+    host.appendChild(NN.callout("mem", "the cost: one extra tensor",
+      "<code>v</code> has exactly the same shape as the parameters. For this model " +
+      "that is " + NP + " extra numbers; for a model with N parameters it is N extra " +
+      "numbers, live for the entire run. SGD holds weights and gradients — two " +
+      "tensors. Momentum holds three. That is a 50% increase in the persistent " +
+      "state before a single activation is allocated."));
+
+    /* velocity vs gradient for W2[0][0] */
+    const gp = [], vp = [];
+    H.forEach(function (s) {
+      gp.push([s.t, s.grad[PIDX]]);
+      vp.push([s.t, s.velocity[PIDX]]);
+    });
+
+    host.appendChild(el("h3", {}, "Velocity outlives the gradient"));
+    host.appendChild(p(
+      "Both series below are for the same parameter, " +
+      "<span class='mono v-weight'>W2[0][0]</span>, across the " + H.length +
+      "-step momentum run. Same units, one axis."));
+    host.appendChild(NN.chart.line({
+      series: [
+        { name: "gradient g", color: "var(--gradient)", points: gp },
+        { name: "velocity v", color: "var(--optimizer)", points: vp }
+      ],
+      width: 720, height: 250, xlabel: "step", ylabel: "value for W2[0][0]"
+    }));
+    host.appendChild(NN.legend(["gradient", "optimizer"]));
+
+    /* first step from which the gradient for this weight is zero and stays zero */
+    const firstZeroGradStep = (function () {
+      for (let t = 0; t < H.length; t++) {
+        let allZero = true;
+        for (let u = t; u < H.length; u++) if (H[u].grad[PIDX] !== 0) { allZero = false; break; }
+        if (allZero) return H[t].t;
+      }
+      return null;
+    })();
+    host.appendChild(p(
+      "Read the orange line: from step " + firstZeroGradStep + " onward the gradient " +
+      "for this weight is exactly " + num(0, "gradient") + " and stays there — the " +
+      "hidden unit it reads from has died (a1[0] = " +
+      fmt(H[firstZeroGradStep - 1].a1[0], 4) + "), so no signal reaches it. " +
+      "SGD would freeze the weight there. " +
+      "Momentum does not: the velocity is still " +
+      snum(H[H.length - 1].velocity[PIDX], "optimizer") + " at the last step and the " +
+      "weight keeps sliding, from " + num(H[0].theta[PIDX], "weight") + " down to " +
+      num(H[H.length - 1].theta_after[PIDX], "weight") + ". Memory is not free: it " +
+      "carries you through noise, and it also carries you off a cliff."));
+  })();
+
+  /* ==================================================================== */
+  /* 3 — Adam                                                             */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#adam-body");
+    const H = RUNS.adam.history;
+
+    host.appendChild(p(
+      "Adam keeps two running averages per parameter instead of one, and uses the " +
+      "second to rescale the first. Four lines of arithmetic, executed independently " +
+      "for every parameter in the model."));
+
+    host.appendChild(NN.formula({
+      rule: "m &larr; &beta;<sub>1</sub>&middot;m + (1&minus;&beta;<sub>1</sub>)&middot;g" +
+            " &nbsp;&nbsp;<span class='muted'>&beta;<sub>1</sub> = " + fmt(B1, 4) + "</span>",
+      cls: "optimizer"
+    }));
+    host.appendChild(small(
+      "A running mean of the gradient: <b>which way have we been going.</b> " +
+      "It smooths the direction the same way momentum does."));
+
+    host.appendChild(NN.formula({
+      rule: "v &larr; &beta;<sub>2</sub>&middot;v + (1&minus;&beta;<sub>2</sub>)&middot;g&sup2;" +
+            " &nbsp;&nbsp;<span class='muted'>&beta;<sub>2</sub> = " + fmt(B2, 4) + "</span>",
+      cls: "optimizer"
+    }));
+    host.appendChild(small(
+      "A running mean of the <b>squared</b> gradient: <b>how big have the steps been.</b> " +
+      "It has no sign — it is a magnitude estimate, and it is the part that makes Adam " +
+      "adaptive."));
+
+    host.appendChild(NN.formula({
+      rule: "m&#770; = m / (1 &minus; &beta;<sub>1</sub><sup>t</sup>) &nbsp;&nbsp;&nbsp; " +
+            "v&#770; = v / (1 &minus; &beta;<sub>2</sub><sup>t</sup>)",
+      cls: "optimizer"
+    }));
+    host.appendChild(small(
+      "Bias correction. Both averages start at zero, so early on they are pulled " +
+      "toward zero by exactly the factor (1&minus;&beta;<sup>t</sup>) — at t = 1 that " +
+      "factor is " + fmt(1 - B1, 4) + " for m and " + fmt(1 - B2, 4) + " for v. " +
+      "Dividing it back out makes m&#770; and v&#770; unbiased estimates from the very " +
+      "first step. As t grows, &beta;<sup>t</sup> &rarr; 0 and the correction fades away."));
+
+    host.appendChild(NN.formula({
+      rule: "update = lr &middot; m&#770; / (&radic;v&#770; + &epsilon;)" +
+            " &nbsp;&nbsp;<span class='muted'>&epsilon; = " + fmt(EPS, 1) + "</span>",
+      cls: "optimizer"
+    }));
+    host.appendChild(NN.formula({
+      rule: "w &larr; w &minus; update",
+      cls: "weight"
+    }));
+
+    /* ------------------------------------- reproduce the whole run in JS */
+    (function () {
+      let m = new Array(NP).fill(0), v = new Array(NP).fill(0);
+      let worst = 0, rows = 0;
+      for (let t = 0; t < H.length; t++) {
+        const step = H[t].t;
+        for (let i = 0; i < NP; i++) {
+          const g = H[t].adam_detail[i].g;
+          m[i] = B1 * m[i] + (1 - B1) * g;
+          v[i] = B2 * v[i] + (1 - B2) * g * g;
+          const mh = m[i] / (1 - Math.pow(B1, step));
+          const vh = v[i] / (1 - Math.pow(B2, step));
+          const up = LR * mh / (Math.sqrt(vh) + EPS);
+          const d = H[t].adam_detail[i];
+          worst = Math.max(worst,
+            Math.abs(m[i] - d.m), Math.abs(v[i] - d.v),
+            Math.abs(mh - d.m_hat), Math.abs(vh - d.v_hat),
+            Math.abs(up - d.update));
+          rows++;
+        }
+      }
+      host.appendChild(check(worst < 1e-9,
+        "the four lines above, run in JS from g alone, reproduce all " + rows +
+        " rows of T.runs.adam.history[].adam_detail (" + H.length + " steps × " +
+        NP + " parameters) to " + fmt(worst, 1) + " max absolute error"));
+    })();
+
+    /* ------------------------------------------------ the t = 1 insight */
+    host.appendChild(el("h3", {}, "The first step is sign(g), not g"));
+    host.appendChild(p(
+      "At t = 1 both averages start from zero, so m = (1&minus;&beta;<sub>1</sub>)g " +
+      "and v = (1&minus;&beta;<sub>2</sub>)g&sup2;. Bias correction divides by exactly " +
+      "those same factors. The corrections cancel completely:"));
+
+    const d0 = H[0].adam_detail[PIDX];
+    host.appendChild(NN.formula({
+      rule: "m&#770;<sub>1</sub> = (1&minus;&beta;<sub>1</sub>)g / (1&minus;&beta;<sub>1</sub>) = g",
+      sub: fmt(1 - B1, 4) + " &times; (" + fs(d0.g, 4) + ") / " + fmt(1 - B1, 4),
+      result: fmt(d0.m_hat, 6) + "   (g = " + fmt(d0.g, 6) + ")",
+      cls: "optimizer"
+    }));
+    host.appendChild(NN.formula({
+      rule: "v&#770;<sub>1</sub> = (1&minus;&beta;<sub>2</sub>)g&sup2; / (1&minus;&beta;<sub>2</sub>) = g&sup2;",
+      sub: fmt(1 - B2, 4) + " &times; " + fmt(d0.g * d0.g, 6) + " / " + fmt(1 - B2, 4),
+      result: fmt(d0.v_hat, 6) + "   (g&sup2; = " + fmt(d0.g * d0.g, 6) + ")",
+      cls: "optimizer"
+    }));
+    host.appendChild(NN.formula({
+      rule: "update<sub>1</sub> = lr &middot; g / (&radic;(g&sup2;) + &epsilon;) " +
+            "&asymp; lr &middot; g / |g| = lr &middot; sign(g)",
+      sub: fmt(LR, 4) + " &times; (" + fs(d0.g, 4) + ") / (" + fmt(Math.abs(d0.g), 4) +
+           " + " + fmt(EPS, 1) + ")",
+      result: fs(d0.update, 8),
+      cls: "optimizer"
+    }));
+
+    /* verify across every parameter */
+    const live = H[0].adam_detail.filter(function (d) { return d.g !== 0; });
+    let maxDev = 0, minAbsG = Infinity, maxAbsG = 0;
+    live.forEach(function (d) {
+      maxDev = Math.max(maxDev, Math.abs(Math.abs(d.update) - LR));
+      minAbsG = Math.min(minAbsG, Math.abs(d.g));
+      maxAbsG = Math.max(maxAbsG, Math.abs(d.g));
+      if (Math.sign(d.update) !== Math.sign(d.g)) maxDev = Infinity;
+    });
+    const predictedDev = LR * EPS / (minAbsG + EPS);
+
+    host.appendChild(NN.callout("key", "adam's first step ignores the gradient's size",
+      "Every parameter with a non-zero gradient moves by <b>exactly the learning " +
+      "rate</b> on step 1, in the direction of &minus;sign(g). Gradient magnitude " +
+      "does not enter. Across the " + live.length + " parameters with non-zero " +
+      "gradients here, |g| ranges from " + num(minAbsG, "gradient") + " to " +
+      num(maxAbsG, "gradient") + " — a factor of " + fmt(maxAbsG / minAbsG, 2) +
+      " — and all " + live.length + " of them move by " + fmt(LR, 4) + "."));
+
+    host.appendChild(check(maxDev < 1e-8,
+      "max |&thinsp;|update| &minus; lr&thinsp;| over all " + live.length +
+      " live parameters at t = 1 is " + fmt(maxDev, 2) +
+      ", and every sign matches &minus;sign(g)"));
+    host.appendChild(small(
+      "That residual is not noise: &epsilon; sits in the denominator, so the exact " +
+      "deviation is lr&middot;&epsilon;/(|g|+&epsilon;), largest for the smallest " +
+      "|g| = " + fmt(minAbsG, 4) + ", which predicts " + fmt(predictedDev, 2) +
+      " against the measured " + fmt(maxDev, 2) + "."));
+
+    host.appendChild(NN.callout("warn", "adam does not resurrect a dead relu",
+      "Hidden unit 2 is dead — its pre-activation is negative, so the ReLU mask is " +
+      "zero and " + H[0].adam_detail.filter(function (d) { return d.g === 0; }).length +
+      " of the " + NP + " parameters get an exactly zero gradient. Zero g gives " +
+      "zero m, zero v, and an update of 0/(0+&epsilon;) = 0. Those parameters have " +
+      "identical <code>before</code> and <code>after</code> in every row of the table " +
+      "below, for all " + H.length + " steps. Adaptive scaling amplifies small " +
+      "gradients; it cannot amplify no gradient."));
+
+    /* ------------------------------------------------------- the table */
+    host.appendChild(el("h3", {}, "Every parameter, every step"));
+    host.appendChild(p(
+      "All " + NP + " parameters at one Adam step. <code>before</code> and " +
+      "<code>after</code> are the weight either side of the update; m and v are the " +
+      "optimizer state that persists into the next step."));
+    host.appendChild(NN.legend(["weight", "gradient", "optimizer"]));
+
+    const stepHost = el("div");
+    host.appendChild(stepHost);
+
+    const caption = el("div", { class: "callout why" }, [
+      el("div", { class: "t" }, "what changed"),
+      el("div", { id: "adam-caption" })
+    ]);
+    host.appendChild(caption);
+
+    const COLS = ["parameter", "g", "m", "v", "m̂", "v̂", "update", "before", "after"];
+    const table = el("table", { class: "data" });
+    const thead = el("thead", {}, el("tr", {}, COLS.map(function (c) {
+      return el("th", {}, c);
+    })));
+    const tbody = el("tbody");
+    table.appendChild(thead); table.appendChild(tbody);
+
+    const cells = [];
+    for (let i = 0; i < NP; i++) {
+      const tr = el("tr");
+      tr.appendChild(el("td", {}, NAMES[i]));
+      const row = [];
+      const spec = [
+        ["gradient", 4], ["optimizer", 4], ["optimizer", 5],
+        ["optimizer", 4], ["optimizer", 5], ["optimizer", 5],
+        ["weight", 5], ["weight", 5]
+      ];
+      spec.forEach(function (s) {
+        const td = el("td", { class: "n v-" + s[0] });
+        tr.appendChild(td); row.push({ td: td, digits: s[1] });
+      });
+      tbody.appendChild(tr);
+      cells.push({ tr: tr, row: row });
+    }
+    host.appendChild(el("div", { class: "scrollx" }, table));
+
+    const labels = H.map(function (s) { return "t = " + s.t + ", loss " + fmt(s.loss, 5); });
+
+    function renderStep(k) {
+      const st = H[k];
+      const det = st.adam_detail;
+      for (let i = 0; i < NP; i++) {
+        const d = det[i];
+        const vals = [d.g, d.m, d.v, d.m_hat, d.v_hat, d.update, d.before, d.after];
+        cells[i].row.forEach(function (c, j) {
+          const isSigned = j === 0 || j === 3 || j === 5;
+          c.td.textContent = isSigned ? fs(vals[j], c.digits) : fmt(vals[j], c.digits);
+        });
+        cells[i].tr.style.opacity = d.g === 0 ? "0.42" : "1";
+        cells[i].tr.title = d.g === 0 ? "zero gradient (dead ReLU path) — nothing moves" : "";
+      }
+      const t = st.t;
+      const corr1 = 1 - Math.pow(B1, t), corr2 = 1 - Math.pow(B2, t);
+      const biggest = det.reduce(function (a, b) {
+        return Math.abs(b.update) > Math.abs(a.update) ? b : a;
+      }, det[0]);
+      NN.$("#adam-caption").innerHTML =
+        "Step t = " + t + ". Bias-correction divisors: " +
+        "1&minus;&beta;<sub>1</sub><sup>t</sup> = " + num(corr1) +
+        ", 1&minus;&beta;<sub>2</sub><sup>t</sup> = " + num(corr2) + ". " +
+        "Loss at this step " + num(st.loss) + ", prediction &#375; = " +
+        num(st.yhat, "activation") + ". Largest update this step: " +
+        snum(biggest.update, "optimizer") + " — " +
+        fmt(Math.abs(biggest.update) / LR * 100, 1) + "% of the learning rate. " +
+        (t === 1
+          ? "Every live parameter moves by exactly lr."
+          : "Once t &gt; 1, v&#770; is a genuine magnitude estimate and the step sizes " +
+            "separate.");
+    }
+
+    new NN.Stepper({
+      mount: stepHost, count: H.length, labels: labels,
+      onStep: function (i) { renderStep(i); }, autoplayMs: 1400
+    });
+
+    /* --------------------------------- per-parameter adaptive scaling */
+    host.appendChild(el("h3", {}, "Why dividing by √v̂ helps"));
+
+    /* find, at the last step, the live params with the largest and smallest v_hat */
+    const lastDet = H[H.length - 1].adam_detail;
+    let hi = null, lo = null;
+    for (let i = 0; i < NP; i++) {
+      const d = lastDet[i];
+      if (d.v_hat === 0) continue;
+      if (!hi || d.v_hat > lastDet[hi].v_hat) hi = i;
+      if (!lo || d.v_hat < lastDet[lo].v_hat) lo = i;
+    }
+    host.appendChild(p(
+      "&radic;v&#770; is a per-parameter estimate of recent gradient magnitude, and it " +
+      "sits in the denominator. A parameter whose gradients have been consistently " +
+      "large gets a large &radic;v&#770; and therefore a <em>small</em> step; a " +
+      "parameter whose gradients have been small gets a small &radic;v&#770; and a " +
+      "proportionally larger step. The ratio m&#770;/&radic;v&#770; is dimensionless — " +
+      "it does not care what units the loss is in, or whether one layer's gradients " +
+      "happen to be a thousand times bigger than another's."));
+
+    if (hi !== null && lo !== null && hi !== lo) {
+      const dh = lastDet[hi], dl = lastDet[lo];
+      host.appendChild(el("div", { class: "scrollx" }, (function () {
+        const t2 = el("table", { class: "data" });
+        t2.appendChild(el("thead", {}, el("tr", {}, ["parameter", "m̂", "√v̂", "update", "|update| / lr"].map(function (c) {
+          return el("th", {}, c);
+        }))));
+        const tb = el("tbody");
+        [hi, lo].forEach(function (i) {
+          const d = lastDet[i];
+          tb.appendChild(el("tr", {}, [
+            el("td", {}, NAMES[i]),
+            el("td", { class: "n v-optimizer" }, fs(d.m_hat, 5)),
+            el("td", { class: "n v-optimizer" }, fmt(Math.sqrt(d.v_hat), 5)),
+            el("td", { class: "n v-optimizer" }, fs(d.update, 6)),
+            el("td", { class: "n" }, fmt(Math.abs(d.update) / LR, 4))
+          ]));
+        });
+        t2.appendChild(tb);
+        return t2;
+      })()));
+      host.appendChild(small(
+        "At the final step of the Adam run, <span class='mono'>" + NAMES[hi] +
+        "</span> has the largest &radic;v&#770; (" + fmt(Math.sqrt(dh.v_hat), 5) +
+        ") and <span class='mono'>" + NAMES[lo] + "</span> the smallest (" +
+        fmt(Math.sqrt(dl.v_hat), 5) + "), a ratio of " +
+        fmt(Math.sqrt(dh.v_hat) / Math.sqrt(dl.v_hat), 2) +
+        ". Their raw gradient signals differ by that much, and Adam still moves them " +
+        "by comparable fractions of lr."));
+    }
+
+    host.appendChild(NN.callout("why", "what this buys you at LLM scale",
+      "In a transformer, an embedding row that fires on a rare token and a LayerNorm " +
+      "gain sitting in the residual stream see gradients that differ by orders of " +
+      "magnitude. Plain SGD needs a learning rate small enough for the largest of " +
+      "them, which means the smallest ones barely train. Adam's division by " +
+      "&radic;v&#770; normalises this away per parameter, which is why it is the " +
+      "default for language models and why nobody tunes 70 billion separate learning " +
+      "rates. The price is the two extra full-size tensors, m and v — section 5."));
+  })();
+
+  /* ==================================================================== */
+  /* 4 — Comparison                                                       */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#cmp-body");
+
+    host.appendChild(p(
+      "Same model, same initial weights, same learning rate (" + fmt(LR, 4) + "), " +
+      "same single training example, " + HP.n_steps + " steps each. " +
+      "<code>history[t].loss</code> is the loss measured <em>before</em> the update at " +
+      "step t; the point after the last step is <code>final_loss</code>."));
+
+    const series = OPT.map(function (o) {
+      const r = RUNS[o.key];
+      const pts = r.history.map(function (s) { return [s.t, s.loss]; });
+      pts.push([r.history.length + 1, r.final_loss]);
+      return { name: o.label, color: o.color, points: pts };
+    });
+
+    host.appendChild(NN.chart.line({
+      series: series, width: 860, height: 300,
+      xlabel: "step", ylabel: "loss (log₁₀)", logY: true
+    }));
+    host.appendChild(swatchLegend(
+      OPT.map(function (o) { return { label: o.label, color: o.color }; }),
+      "In this section three of the four site hues identify an <b>optimiser</b>, not a " +
+      "tensor class — every line is also named in text and in the hover tooltip. Vertical " +
+      "axis is log₁₀(loss)."));
+
+    host.appendChild(NN.tiles(OPT.map(function (o) {
+      const r = RUNS[o.key];
+      const best = Math.min.apply(null, r.history.map(function (s) { return s.loss; }).concat([r.final_loss]));
+      return {
+        k: o.label + " final loss",
+        v: fmt(r.final_loss, 5),
+        s: "ŷ = " + fmt(r.final_yhat, 4) + " · best seen " + fmt(best, 5)
+      };
+    })));
+
+    const ranked = OPT.slice().sort(function (a, b) {
+      return RUNS[a.key].final_loss - RUNS[b.key].final_loss;
+    });
+    host.appendChild(p(
+      "The honest ranking after " + HP.n_steps + " steps is " +
+      ranked.map(function (o) {
+        return "<b>" + o.label + "</b> " + fmt(RUNS[o.key].final_loss, 5);
+      }).join(" &lt; ") + ". <b>SGD wins and Adam comes last.</b> Anyone selling you " +
+      "Adam on the strength of a plot like this is selling you the wrong plot."));
+
+    /* --- why: the dead-unit story, all derived from relu_mask ---------- */
+    const liveSeries = OPT.map(function (o) {
+      const r = RUNS[o.key];
+      return {
+        name: o.label + " live ReLU units",
+        color: o.color,
+        points: r.history.map(function (s) {
+          return [s.t, s.relu_mask.reduce(function (a, b) { return a + b; }, 0)];
+        })
+      };
+    });
+
+    host.appendChild(el("h3", {}, "What SGD actually did"));
+    host.appendChild(NN.chart.line({
+      series: liveSeries, width: 860, height: 210,
+      xlabel: "step", ylabel: "hidden units still alive", yMin: 0, yMax: 3
+    }));
+    host.appendChild(swatchLegend(
+      OPT.map(function (o) { return { label: o.label, color: o.color }; }),
+      "Count of non-zero entries in <code>history[t].relu_mask</code>. The model has " +
+      "3 hidden units and starts with " +
+      RUNS.sgd.history[0].relu_mask.reduce(function (a, b) { return a + b; }, 0) +
+      " alive — unit 2 was already dead at initialisation."));
+
+    /* derive the SGD collapse facts */
+    const sgdH = RUNS.sgd.history;
+    let collapseStep = null;
+    for (let t = 0; t < sgdH.length; t++) {
+      if (sgdH[t].relu_mask.every(function (m) { return m === 0; })) { collapseStep = sgdH[t].t; break; }
+    }
+    const sgdL = sgdH.map(function (s) { return s.loss; }).concat([RUNS.sgd.final_loss]);
+    let ratios = [];
+    for (let t = collapseStep - 1; t < sgdL.length - 1; t++) ratios.push(sgdL[t + 1] / sgdL[t]);
+    const meanRatio = ratios.reduce(function (a, b) { return a + b; }, 0) / ratios.length;
+    const predicted = Math.pow(1 - 2 * LR, 2);
+    const adamAlive = RUNS.adam.history.every(function (s) {
+      return s.relu_mask.reduce(function (a, b) { return a + b; }, 0) === 2;
+    });
+
+    host.appendChild(p(
+      "By step " + collapseStep + ", SGD has driven <b>all three</b> hidden units " +
+      "negative. The ReLU output is the zero vector, every gradient into the first " +
+      "layer is zero, and the only parameter still learning is the output bias " +
+      "<span class='mono v-weight'>b2</span>. From that point the network is a " +
+      "constant predictor &#375; = b2, the loss is (b2 &minus; y)&sup2;, and one SGD " +
+      "step multiplies the loss by exactly (1 &minus; 2&middot;lr)&sup2;."));
+
+    host.appendChild(NN.formula({
+      rule: "L<sub>t+1</sub> / L<sub>t</sub> = (1 &minus; 2&middot;lr)&sup2;",
+      sub: "(1 &minus; 2 &times; " + fmt(LR, 4) + ")&sup2;",
+      result: fmt(predicted, 6),
+      cls: "weight"
+    }));
+    host.appendChild(check(Math.abs(meanRatio - predicted) < 1e-9,
+      "the measured ratio of consecutive SGD losses from step " + collapseStep +
+      " onward is " + fmt(meanRatio, 9) + " across all " + ratios.length +
+      " intervals, matching the closed form to " +
+      fmt(Math.abs(meanRatio - predicted), 1)));
+
+    host.appendChild(NN.callout("warn", "sgd's smooth curve is a collapsed network",
+      "That clean geometric descent is not the model learning. It is a single scalar " +
+      "bias converging on a single target, at a rate you can write down in closed " +
+      "form, with the entire hidden layer switched off. Adam, by contrast, keeps " +
+      (adamAlive ? "both surviving units alive for every one of the " + HP.n_steps + " steps"
+                 : "more of the hidden layer alive") +
+      " and ends with a higher loss. Lower loss, deader network. Final loss is a bad " +
+      "summary of a " + NP + "-parameter run and a worse one of a real training run."));
+
+    /* per-run best, and which run got closest at any point */
+    const bests = {};
+    OPT.forEach(function (o) {
+      bests[o.key] = RUNS[o.key].history.reduce(function (a, b) {
+        return b.loss < a.loss ? b : a;
+      }, RUNS[o.key].history[0]);
+    });
+    const adamBest = bests.adam;
+    const bestRun = OPT.reduce(function (a, b) {
+      return bests[b.key].loss < bests[a.key].loss ? b : a;
+    }, OPT[0]);
+
+    host.appendChild(p(
+      "One more honest wrinkle before the explanation: the lowest loss any of the " +
+      "three runs ever reaches is <b>" + bestRun.label + "</b>'s " +
+      fmt(bests[bestRun.key].loss, 6) + " at step " + bests[bestRun.key].t +
+      " — and it does not end there, finishing at " +
+      fmt(RUNS[bestRun.key].final_loss, 5) + ". Whichever number you quote — final " +
+      "loss, best loss, loss at step 5 — you get a different winner. That is what a " +
+      "12-step run on one example is worth."));
+
+    host.appendChild(p(
+      "The rest of the explanation is in Adam's design. Its first step is " +
+      "&plusmn;lr for every parameter regardless of gradient size — deliberate " +
+      "insurance against gradients whose scale you do not know in advance. On a " +
+      "problem where you <em>do</em> know the scale, that insurance is pure cost: " +
+      "Adam takes a fixed-size " + fmt(LR, 4) + " step in " + NP + " directions at " +
+      "once, overshoots (its loss reaches " + fmt(adamBest.loss, 5) +
+      " at step " + adamBest.t + ", then climbs back to " +
+      fmt(RUNS.adam.final_loss, 5) + "), and oscillates because &radic;v&#770; " +
+      "keeps the step near lr instead of letting it shrink. Adam is engineered for " +
+      "huge, badly conditioned, noisy-gradient problems where gradient magnitudes " +
+      "vary by orders of magnitude across layers and no single lr works. This is a " +
+      NP + "-parameter noiseless problem with one training example. It is exactly " +
+      "the regime where Adam has nothing to offer and still charges you two extra " +
+      "tensors for it."));
+
+    host.appendChild(NN.callout("key", "what this experiment does and does not show",
+      "One example, no minibatch noise, " + HP.n_steps + " steps, one learning rate, " +
+      "one initialisation, " + NP + " parameters. It shows the <b>mechanics</b> of the " +
+      "three update rules exactly. It shows nothing about which optimiser to use at " +
+      "scale — the properties Adam is built for (stochastic gradients, ill " +
+      "conditioning, wildly varying per-layer scale) are all absent here by " +
+      "construction."));
+  })();
+
+  /* ==================================================================== */
+  /* 5 — Memory bill                                                      */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#mem-body");
+
+    const DB      = T.memory.dtype_bytes;          /* {fp32:4, bf16:2, int8:1, ...} */
+    const B32     = DB.fp32, B16 = DB.bf16, B8 = DB.int8;
+    const RECIPES = T.memory.recipes;
+    const CLS     = ["weight", "gradient", "optimizer"];
+    const totalOf = function (r) {
+      return CLS.reduce(function (a, c) { return a + (r.components[c] || 0); }, 0);
+    };
+    const maxTotal = Math.max.apply(null, RECIPES.map(totalOf));
+
+    host.appendChild(p(
+      "Every optimiser above needs its state to survive from one step to the next, " +
+      "so it lives in memory for the entire run, at full model size. " +
+      "<code>T.memory.recipes</code> holds six real configurations; the whole of this " +
+      "section is that table multiplied out. Start with the pure-fp32 ones, where " +
+      "every tensor is " + B32 + " bytes per element and the bill is just a count of " +
+      "tensors:"));
+
+    const fp32Recipes = RECIPES.filter(function (r) { return r.components.weight === B32; });
+    const ct = el("table", { class: "data" });
+    ct.appendChild(el("thead", {}, el("tr", {}, [
+      "recipe", "tensors of size N", "which ones", "bytes / param", "vs plain SGD"
+    ].map(function (c) { return el("th", {}, c); }))));
+    const ctb = el("tbody");
+    const baseTotal = totalOf(fp32Recipes[0]);
+    fp32Recipes.forEach(function (r) {
+      const nOpt = (r.components.optimizer || 0) / B32;
+      const tensors = 1 + 1 + nOpt;
+      ctb.appendChild(el("tr", {}, [
+        el("td", {}, r.name),
+        el("td", { class: "n" }, String(tensors)),
+        el("td", { style: { textAlign: "left" }, class: "mono small" },
+          "w, g" + (nOpt === 1 ? ", v" : nOpt === 2 ? ", m, v" : "")),
+        el("td", { class: "n" }, tensors + " × " + B32 + " = " + totalOf(r)),
+        el("td", { class: "n" }, fmt(totalOf(r) / baseTotal, 2) + "×")
+      ]));
+    });
+    ct.appendChild(ctb);
+    host.appendChild(el("div", { class: "scrollx" }, ct));
+
+    host.appendChild(check(
+      fp32Recipes.every(function (r) { return totalOf(r) % B32 === 0; }),
+      "each fp32 recipe's bytes/param is an exact multiple of the fp32 itemsize " +
+      B32 + " — SGD " + totalOf(fp32Recipes[0]) + ", momentum " +
+      totalOf(fp32Recipes[1]) + ", Adam " + totalOf(fp32Recipes[2]) +
+      " bytes/param, i.e. 2, 3 and 4 full-size tensors"));
+
+    host.appendChild(NN.callout("mem", "adam's 2× is the part people forget",
+      "Going from SGD to Adam does not add a little overhead. It doubles the " +
+      "persistent state, from " + totalOf(fp32Recipes[0]) + " to " +
+      totalOf(fp32Recipes[2]) + " bytes per parameter, because m and v are each " +
+      "exactly as large as the model. For this " + T.memory.n_params +
+      "-parameter model that is " + NN.bytes(T.memory.n_params * totalOf(fp32Recipes[2])) +
+      " against " + NN.bytes(T.memory.n_params * totalOf(fp32Recipes[0])) +
+      " — irrelevant. Multiply by 10<sup>10</sup> and it decides how many GPUs you need."));
+
+    /* ------------------------------------------ mixed precision reality */
+    host.appendChild(el("h3", {}, "What a real mixed-precision run holds"));
+    host.appendChild(p(
+      "Nobody trains a large model in pure fp32 any more, and nobody trains it in " +
+      "pure bf16 either. The standard arrangement keeps the compute in bf16 and the " +
+      "optimiser arithmetic in fp32, which means the weights exist <b>twice</b>. " +
+      "Here are all " + RECIPES.length + " recipes side by side, split by tensor class:"));
+    host.appendChild(NN.legend(CLS));
+
+    const rt = el("table", { class: "data" });
+    rt.appendChild(el("thead", {}, el("tr", {}, [
+      "recipe", "weight", "gradient", "optimizer", "total bytes / param"
+    ].map(function (c) { return el("th", {}, c); }))));
+    const rtb = el("tbody");
+    RECIPES.forEach(function (r) {
+      rtb.appendChild(el("tr", {}, [
+        el("td", {}, [
+          el("div", {}, r.name),
+          r.note ? el("div", { class: "small muted", style: { fontFamily: "var(--sans)" } }, r.note) : null
+        ]),
+        el("td", { class: "n v-weight" }, String(r.components.weight || 0)),
+        el("td", { class: "n v-gradient" }, String(r.components.gradient || 0)),
+        el("td", { class: "n v-optimizer" }, String(r.components.optimizer || 0)),
+        el("td", { class: "n", style: { fontWeight: "700" } }, String(totalOf(r)))
+      ]));
+    });
+    rt.appendChild(rtb);
+    host.appendChild(el("div", { class: "scrollx" }, rt));
+
+    RECIPES.forEach(function (r) {
+      host.appendChild(el("div", { class: "small mono muted", style: { marginTop: "12px" } },
+        r.name + " — " + totalOf(r) + " bytes/param"));
+      host.appendChild(NN.memstrip(CLS.filter(function (c) { return r.components[c]; })
+        .map(function (c) {
+          return { cls: c, bytes: r.components[c], label: c + " " + r.components[c] + "B" };
+        }), maxTotal));
+    });
+    host.appendChild(small(
+      "All strips are drawn against the same " + maxTotal +
+      " bytes/param scale, the largest recipe, so they are directly comparable. " +
+      "Itemsizes come from <code>T.memory.dtype_bytes</code>: fp32 " + B32 +
+      ", bf16 " + B16 + ", int8 " + B8 + " bytes."));
+
+    /* --------------------------------- unpack the famous 16 bytes/param */
+    const mixBf = RECIPES.filter(function (r) {
+      return r.components.weight === B16 && r.components.gradient === B16 &&
+             r.components.optimizer === 3 * B32;
+    })[0];
+    const mixFp = RECIPES.filter(function (r) {
+      return r.components.weight === B16 && r.components.gradient === B32 &&
+             r.components.optimizer === 3 * B32;
+    })[0];
+    const mix8  = RECIPES.filter(function (r) {
+      return r.components.optimizer === B32 + 2 * B8;
+    })[0];
+
+    host.appendChild(el("h3", {}, "Unpacking the “16 bytes per parameter”"));
+    host.appendChild(p(
+      "The <span class='tclass tclass-optimizer'>Optimizer state</span> column above " +
+      "is a bucket, and the whole honesty problem lives inside it. For " +
+      "<span class='mono'>" + mixBf.name + "</span> the trace says the bucket is " +
+      num(mixBf.components.optimizer, "optimizer") + " bytes and states what is in it: " +
+      "<em>" + mixBf.note + "</em>. The fp32 master copy is counted as optimizer state, " +
+      "not as a weight, because that is what it is — the weight the optimizer owns."));
+
+    host.appendChild(NN.formula({
+      rule: "optimizer bucket = fp32 master + m + v",
+      sub: B32 + " + " + B32 + " + " + B32,
+      result: (3 * B32) + " bytes/param",
+      cls: "optimizer"
+    }));
+    host.appendChild(check(3 * B32 === mixBf.components.optimizer,
+      "3 × fp32 (" + B32 + " bytes) = " + (3 * B32) +
+      " matches T.memory.recipes[\"" + mixBf.name + "\"].components.optimizer = " +
+      mixBf.components.optimizer));
+
+    host.appendChild(NN.formula({
+      rule: "bf16 weight + bf16 gradient + optimizer bucket",
+      sub: mixBf.components.weight + " + " + mixBf.components.gradient + " + " +
+           mixBf.components.optimizer,
+      result: totalOf(mixBf) + " bytes/param",
+      cls: "optimizer"
+    }));
+    host.appendChild(NN.formula({
+      rule: "same, but gradients in fp32",
+      sub: mixFp.components.weight + " + " + mixFp.components.gradient + " + " +
+           mixFp.components.optimizer,
+      result: totalOf(mixFp) + " bytes/param",
+      cls: "optimizer"
+    }));
+    host.appendChild(NN.formula({
+      rule: "same, but m and v quantised to 8 bits",
+      sub: mix8.components.weight + " + " + mix8.components.gradient + " + (" +
+           B32 + " + " + B8 + " + " + B8 + ")",
+      result: totalOf(mix8) + " bytes/param",
+      cls: "optimizer"
+    }));
+
+    host.appendChild(NN.callout("mem", "be precise about the number you quote",
+      "<b>" + totalOf(mixBf) + " bytes/param</b> is the figure you will see quoted for " +
+      "Adam mixed-precision training, and it is correct only under a specific set of " +
+      "choices: bf16 compute weights, an fp32 master copy, fp32 m and v, and " +
+      "<b>bf16 gradients</b>. Keep gradients in fp32 — which some frameworks do, and " +
+      "which gradient accumulation often pushes you toward — and it is " +
+      totalOf(mixFp) + " (" + mixFp.note + "). Quantise the optimiser states to 8 bits " +
+      "and it is " + totalOf(mix8) + ". The spread across these three rows is " +
+      fmt(totalOf(mixFp) / totalOf(mix8), 2) + "×, all of them honestly describable " +
+      "as “Adam mixed precision”. There is no single true number; there is an " +
+      "arithmetic, and the only useful question is which line items someone included. " +
+      "None of these include activations, which depend on batch size and sequence " +
+      "length and are the subject of part 06."));
+
+    host.appendChild(NN.chart.bars({
+      items: RECIPES.map(function (r) {
+        return { label: r.name, value: totalOf(r), color: "var(--accent)",
+                 sub: "w " + (r.components.weight || 0) +
+                      " · g " + (r.components.gradient || 0) +
+                      " · opt " + (r.components.optimizer || 0) };
+      }),
+      unit: "bytes/param", max: maxTotal
+    }));
+    host.appendChild(small(
+      "Bars are neutral <code>--accent</code> on purpose: a bar here is a whole " +
+      "configuration, not a tensor class. The class breakdown is in the strips above."));
+
+    /* ---------------------------------------------- scale it up */
+    host.appendChild(el("h3", {}, "Multiply through"));
+    const sizes = [
+      { label: "this model (" + T.memory.n_params + " parameters)", n: T.memory.n_params },
+      { label: "125M", n: 125e6 },
+      { label: "1.3B",  n: 1.3e9 },
+      { label: "7B",    n: 7e9 },
+      { label: "70B",   n: 70e9 }
+    ];
+    const sel = el("select", {
+      class: "btn", style: { fontFamily: "var(--mono)" }
+    }, sizes.map(function (s, i) {
+      return el("option", { value: String(i) }, s.label);
+    }));
+    sel.value = "0";
+    const out = el("div");
+    host.appendChild(el("div", { class: "controls" }, [
+      el("span", { class: "mono small muted" }, "parameter count N"), sel
+    ]));
+    host.appendChild(out);
+
+    function paintScale() {
+      const s = sizes[parseInt(sel.value, 10)];
+      out.replaceChildren(
+        NN.tiles(RECIPES.map(function (r) {
+          return {
+            k: r.name,
+            v: NN.bytes(s.n * totalOf(r)),
+            s: NN.count(s.n) + " × " + totalOf(r) + " bytes",
+            cls: r.components.optimizer ? "optimizer" : "weight"
+          };
+        })),
+        small("Model states only — no activations, no gradient-accumulation " +
+              "buffers, no communication buffers, no allocator fragmentation, and no " +
+              "sharding across devices. Part 08 puts the sharding back.")
+      );
+    }
+    sel.addEventListener("change", paintScale);
+    paintScale();
+  })();
+
+  /* ==================================================================== */
+  /* 6 — The fp32 master copy                                             */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#master-body");
+
+    const F32 = T.formats.fp32, F16 = T.formats.bf16, H16 = T.formats.fp16;
+
+    /* Self-check the JS float helpers against the trace's own bit patterns.
+       Entries the trace marks with a status (fp16 overflow / underflow /
+       subnormal) are skipped for that dtype; fp32 and bf16 are always normal
+       for the values in T.bitviews. */
+    let matched = 0, checked = 0;
+    T.bitviews.forEach(function (bv) {
+      if (bv.fp32.status || bv.bf16.status) return;
+      checked++;
+      const a = decodeF32(bv.value), b = decodeBf16(bv.value);
+      if (a.bits === bv.fp32.bits && b.bits === bv.bf16.bits &&
+          a.exact === bv.fp32.exact && b.exact === bv.bf16.exact) matched++;
+    });
+
+    host.appendChild(p(
+      "The last section counted an fp32 master copy inside Adam's optimizer bucket, " +
+      "on top of the bf16 weight the forward pass actually reads. " + F32.bytes +
+      " extra bytes per parameter, duplicating something you already have. Here is " +
+      "why it is not waste."));
+
+    host.appendChild(check(matched === checked && checked > 0,
+      "the fp32 and bf16 encoders written in JS on this page reproduce all " +
+      matched + " of the " + checked + " bit patterns in " +
+      "<code>T.bitviews</code> exactly — every rounding result below is a real " +
+      "IEEE round-to-nearest-even, not a description of one"));
+
+    host.appendChild(p(
+      "bf16 keeps fp32's " + F32.exponent_bits + " exponent bits — that is the whole " +
+      "point of the format; it spans the same " + fmt(F16.decades_of_range, 1) +
+      " decades of range as fp32, against fp16's " + fmt(H16.decades_of_range, 1) +
+      " — and pays for it by cutting the stored mantissa from " + F32.mantissa_bits +
+      " bits to " + F16.mantissa_bits + "."));
+
+    host.appendChild(NN.formula({
+      rule: "&epsilon;<sub>machine</sub> = 2<sup>&minus;mantissa bits</sup>" +
+            " &nbsp;&nbsp;&rarr;&nbsp;&nbsp; decimal digits = log&#8321;&#8320;(1/&epsilon;)",
+      sub: "bf16: 2<sup>&minus;" + F16.mantissa_bits + "</sup> = " + fmt(F16.epsilon, 7) +
+           " &nbsp;&nbsp; fp32: 2<sup>&minus;" + F32.mantissa_bits + "</sup> = " +
+           fmt(F32.epsilon, 2),
+      result: "bf16 " + fmt(F16.decimal_digits, 2) + " decimal digits  ·  fp32 " +
+              fmt(F32.decimal_digits, 2),
+      cls: "weight"
+    }));
+    host.appendChild(small(
+      "<code>T.formats.*.decimal_digits</code> counts stored mantissa bits. Add the " +
+      "implicit leading 1 and bf16 has " + (F16.mantissa_bits + 1) +
+      " bits of significand, log&#8321;&#8320;(2<sup>" + (F16.mantissa_bits + 1) +
+      "</sup>) = " + fmt(Math.log10(Math.pow(2, F16.mantissa_bits + 1)), 2) +
+      " digits — which is where the usual “bf16 holds about 3 significant decimal " +
+      "digits” comes from. Either way it is two or three digits, and that is the " +
+      "number that matters below. &epsilon; = " + fmt(F16.epsilon, 7) +
+      " is the relative gap between consecutive bf16 values: " +
+      fmt(F16.epsilon * 100, 3) + "%."));
+
+    /* the range/precision trade, straight from the traced bitviews */
+    (function () {
+      const tiny = T.bitviews.filter(function (b) {
+        return b.fp16 && b.fp16.status === "underflow";
+      })[0];
+      const big = T.bitviews.filter(function (b) {
+        return b.fp16 && b.fp16.status === "overflow";
+      })[0];
+      if (!tiny && !big) return;
+      host.appendChild(NN.callout("why", "why bf16 and not fp16",
+        "The trace carries the two failure cases. " +
+        (tiny ? "<span class='mono'>" + tiny.label + "</span> = " + fmt(tiny.value, 2) +
+          " survives in bf16 as " + fmt(tiny.bf16.exact, 3) +
+          " and <b>underflows to " + fmt(tiny.fp16.exact, 2) + " in fp16</b>. " : "") +
+        (big ? "<span class='mono'>" + big.label + "</span> = " + fmt(big.value, 0) +
+          " survives in bf16 as " + fmt(big.bf16.exact, 0) +
+          " and <b>overflows to infinity in fp16</b> (fp16 tops out at " +
+          fmt(H16.max_finite, 0) + "). " : "") +
+        "fp16 has more mantissa bits than bf16 (" + H16.mantissa_bits + " vs " +
+        F16.mantissa_bits + ") and is therefore <em>more</em> precise — it is the " +
+        "range that kills it, which is why fp16 training needs loss scaling and bf16 " +
+        "does not. bf16 chose range over precision, and this whole section is the " +
+        "bill for that choice."));
+    })();
+
+    /* ------------------------------------------ the disappearing update */
+    const W  = T.init.W2[0][0];
+    const BW = toBf16(W);
+    const ULP = bf16Ulp(BW);
+    const THRESH = minVisibleUpdate(BW);
+
+    host.appendChild(el("h3", {}, "Adding a small number to a big one"));
+    host.appendChild(p(
+      "Take the same weight as section 1, <span class='mono v-weight'>W2[0][0]</span> " +
+      "= " + num(W, "weight") + ". Rounded to bf16 it is already not quite that " +
+      "value — it becomes " + num(BW, "weight", 8) + ". The gap to the next " +
+      "representable bf16 number is one ulp:"));
+
+    const SCALE = Math.pow(2, Math.floor(Math.log2(Math.abs(BW))));
+    host.appendChild(NN.formula({
+      rule: "ulp<sub>bf16</sub>(w) = 2<sup>&lfloor;log&#8322;w&rfloor;</sup> &middot; &epsilon;",
+      sub: fmt(SCALE, 4) + " &times; " + fmt(F16.epsilon, 7) +
+           " &nbsp;&nbsp;(next representable bf16 above " + fmt(BW, 8) + " is " +
+           fmt(BW + ULP, 8) + ")",
+      result: fmt(ULP, 8),
+      cls: "weight"
+    }));
+    host.appendChild(check(Math.abs(SCALE * F16.epsilon - ULP) < 1e-15,
+      "the closed form 2<sup>&lfloor;log&#8322;w&rfloor;</sup>&middot;&epsilon; = " +
+      fmt(SCALE * F16.epsilon, 8) + " matches the ulp found by stepping the stored " +
+      "bit pattern by one, " + fmt(ULP, 8)));
+
+    host.appendChild(p(
+      "Round-to-nearest means an update has to move the value at least half an ulp " +
+      "before anything changes. Bisecting for the smallest update that alters the " +
+      "stored bits gives " + num(THRESH, null, 8) + ", which is " +
+      fmt(THRESH / BW * 100, 3) + "% of the weight. <b>Any update smaller than that " +
+      "is added and then rounded straight back off.</b> The weight does not move a " +
+      "little; it does not move at all."));
+
+    const rels = [1e-1, 1e-2, 1e-3, 1e-4];
+    const rt = el("table", { class: "data" });
+    rt.appendChild(el("thead", {}, el("tr", {}, [
+      "update, relative to w", "update, absolute", "bf16(w + update)", "did the weight move?"
+    ].map(function (c) { return el("th", {}, c); }))));
+    const rtb = el("tbody");
+    rels.forEach(function (r) {
+      const u = BW * r;
+      const after = toBf16(BW + u);
+      const moved = after !== BW;
+      rtb.appendChild(el("tr", {}, [
+        el("td", {}, fmt(r, 6) + " × w"),
+        el("td", { class: "n v-optimizer" }, fmt(u, 8)),
+        el("td", { class: "n v-weight" }, fmt(after, 8)),
+        el("td", { class: "n", style: { color: moved ? "var(--good)" : "var(--critical)" } },
+          moved ? "yes, +" + fmt(after - BW, 8) : "NO — rounded away")
+      ]));
+    });
+    rt.appendChild(rtb);
+    host.appendChild(el("div", { class: "scrollx" }, rt));
+    host.appendChild(small(
+      "The relative sizes in the first column are chosen powers of ten, not values " +
+      "from this trace; everything else in the table is computed by the verified " +
+      "bf16 rounding function above. A typical Adam update in a real run is around " +
+      "1e-3 relative to the weight — the third row."));
+
+    /* bit ribbons */
+    const rows = [
+      { t: "fp32 master, w = " + fmt(W, 6), dec: decodeF32(W), drop: null },
+      { t: "cast to bf16: the greyed bits are discarded", dec: decodeF32(W), drop: 1 + F32.exponent_bits + F16.mantissa_bits },
+      { t: "the bf16 weight that survives, = " + fmt(BW, 8), dec: decodeBf16(W), drop: null }
+    ];
+    rows.forEach(function (r) {
+      host.appendChild(el("div", { class: "small muted mono", style: { marginTop: "12px" } }, r.t));
+      host.appendChild(NN.bitribbon(r.dec, r.drop === null ? undefined : r.drop));
+    });
+    host.appendChild(small(
+      "Sign, exponent, mantissa. bf16 is literally fp32 with the bottom " +
+      (F32.mantissa_bits - F16.mantissa_bits) +
+      " mantissa bits removed — which is why the cast is a shift and a rounding " +
+      "add, and why the exponent range is identical."));
+
+    /* --------------------------------- what lr would vanish on this run */
+    const d0 = RUNS.adam.history[0].adam_detail[PIDX];
+    const ratio = Math.abs(d0.m_hat / (Math.sqrt(d0.v_hat) + EPS));   /* ~1 at t=1 */
+    const lrVanish = THRESH / ratio;
+
+    host.appendChild(NN.callout("key", "this toy is saved only by its absurd learning rate",
+      "Adam's step-1 update for this weight is " + snum(d0.update, "optimizer") +
+      " — " + fmt(Math.abs(d0.update) / BW * 100, 1) + "% of the weight, because " +
+      "lr here is " + fmt(LR, 4) + ", a value nobody would use on a real model. " +
+      "Holding this gradient fixed, the update is lr &times; " + fmt(ratio, 9) + ", so " +
+      "it stops being visible to a bf16 weight below lr = " + fmt(lrVanish, 6) + ". " +
+      "Real language models train an order of magnitude below that. Without an fp32 " +
+      "master copy, the weights of a real model would " +
+      "sit still while the loss curve did nothing and every tensor looked finite and " +
+      "healthy."));
+
+    /* ---------------------------------------------------- the round trip */
+    host.appendChild(el("h3", {}, "The round trip, one stage at a time"));
+    host.appendChild(p(
+      "So the fp32 copy is the one that is <em>authoritative</em>. The bf16 copy is a " +
+      "derived artefact, regenerated after every step. Two tracks below: the real " +
+      "arrangement, and what happens if you delete the master copy and try to keep " +
+      "the weight in bf16 alone. The second track uses a learning rate " +
+      "100&times; smaller than this page's, which is still larger than a real one."));
+
+    const LR_REAL = LR / 100;
+    const upBig = d0.update;
+    const upSmall = LR_REAL * ratio * Math.sign(d0.m_hat);
+
+    const stageHost = el("div");
+    host.appendChild(stageHost);
+
+    const board = el("div", { class: "grid2", style: { marginTop: "14px" } });
+    const trackA = el("div", { class: "callout why" });
+    const trackB = el("div", { class: "callout warn" });
+    board.appendChild(trackA); board.appendChild(trackB);
+    host.appendChild(board);
+
+    const STAGES = [
+      "fp32 master copy holds the weight",
+      "cast down to bf16 for the forward pass",
+      "forward and backward run in bf16 → gradient",
+      "optimizer math in fp32 → update",
+      "apply the update to the fp32 master",
+      "cast down again for the next forward pass"
+    ];
+
+    function line(label, value, cls, extra) {
+      return "<div class='mono small' style='display:flex;gap:10px;justify-content:space-between'>" +
+        "<span class='muted'>" + label + "</span>" +
+        "<span class='" + (cls ? "v-" + cls : "") + "'>" + value + "</span></div>" +
+        (extra ? "<div class='small muted'>" + extra + "</div>" : "");
+    }
+
+    function renderStage(k) {
+      /* Track A: fp32 master + bf16 compute copy, this page's lr.
+         The trace's convention is  after = before - update.               */
+      const masterA  = (k >= 4) ? W - upBig : W;
+      const computeA = (k >= 5) ? toBf16(masterA) : toBf16(W);
+      /* Track B: no master copy, bf16 weight updated in place, smaller lr */
+      const weightB0 = toBf16(W);
+      const weightB  = (k >= 4) ? toBf16(weightB0 - upSmall) : weightB0;
+
+      let htmlA = "<div class='t'>with an fp32 master copy</div>";
+      htmlA += line("fp32 master w", fmt(masterA, 8), "weight",
+        k >= 4 ? null : "authoritative; never used by the forward pass");
+      htmlA += line("bf16 compute w", k >= 1 ? fmt(computeA, 8) : "—", "weight",
+        k >= 1 ? null : "not cast yet");
+      htmlA += line("gradient g (bf16 compute)", k >= 2 ? fs(d0.g, 6) : "—", "gradient");
+      htmlA += line("update = lr·m̂/(√v̂+ε)", k >= 3 ? fs(upBig, 8) : "—", "optimizer",
+        k >= 3 ? "lr = " + fmt(LR, 4) + ", computed in fp32" : null);
+      if (k >= 4) htmlA += line("master moved by", fs(masterA - W, 8), "weight");
+      if (k >= 5) htmlA += line("new bf16 weight", fmt(computeA, 8), "weight",
+        computeA !== weightB0
+          ? "different from the old bf16 weight " + fmt(weightB0, 8) +
+            " — the step reached the forward pass"
+          : "unchanged");
+
+      let htmlB = "<div class='t'>bf16 only, lr = " + fmt(LR_REAL, 6) + "</div>";
+      htmlB += line("bf16 w", fmt(weightB, 8), "weight");
+      htmlB += line("gradient g", k >= 2 ? fs(d0.g, 6) : "—", "gradient");
+      htmlB += line("update", k >= 3 ? fs(upSmall, 10) : "—", "optimizer");
+      htmlB += line("smallest visible update", fmt(THRESH, 8), null,
+        Math.abs(upSmall) < THRESH
+          ? "the update is " + fmt(Math.abs(upSmall), 8) + ", below this threshold"
+          : null);
+      if (k >= 4) {
+        const moved = weightB !== weightB0;
+        htmlB += line("weight moved by", fs(weightB - weightB0, 8), "weight",
+          moved ? null
+                : "<b>nothing happened.</b> w + update rounded back to w. Repeat for " +
+                  "a million steps and the weight is still " + fmt(weightB0, 8) + ".");
+      }
+
+      trackA.innerHTML = htmlA;
+      trackB.innerHTML = htmlB;
+    }
+
+    new NN.Stepper({
+      mount: stageHost, count: STAGES.length, labels: STAGES,
+      onStep: function (i) { renderStage(i); }, autoplayMs: 1600, spaceToPlay: false
+    });
+
+    host.appendChild(NN.callout("mem", "the master copy is the cheapest of the four",
+      "This is the trade the framework makes for you: " + F32.bytes +
+      " extra bytes per parameter so that small updates accumulate instead of " +
+      "evaporating. It is the same reason m and v are kept in fp32 — v is a running " +
+      "mean of squared gradients, and squaring a small number in bf16 is a fast route " +
+      "to zero. Every alternative (pure bf16 weights with stochastic rounding, 8-bit " +
+      "optimiser states, fp8 training) is an attempt to buy those bytes back while " +
+      "keeping the accumulation correct, and each one has to prove it does not " +
+      "silently stall training in exactly the way the right-hand column above does."));
+  })();
+
+  NN.page("optimizer");
+})();
+</script>
+</body>
+</html>

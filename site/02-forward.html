@@ -1,0 +1,1063 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 02 The Forward Pass</title>
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* ---------------------------------------------------------------- page 02
+   Everything here is layout and motion for the network diagram. No colour
+   is invented: edges are var(--weight), signals are var(--activation),
+   everything structural is var(--accent) / var(--ink-muted).             */
+
+.netcard {
+  background: var(--surface-2);
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  padding: 10px 6px 4px;
+  margin: 6px 0 4px;
+}
+svg.net { width: 100%; height: auto; display: block; overflow: visible; }
+
+/* ---- column headers ---- */
+svg.net .colhead {
+  fill: var(--ink-muted); font-family: var(--mono); font-size: 11px;
+  letter-spacing: .09em; text-transform: uppercase;
+}
+
+/* ---- edges ---- */
+svg.net .edge {
+  fill: none; stroke: var(--weight); stroke-linecap: round;
+  opacity: .30;
+  transition: opacity .35s ease, stroke-width .35s ease, stroke .35s ease;
+}
+svg.net .edge.neg { stroke-dasharray: 7 5; }      /* sign, not hue */
+svg.net .edge.on    { opacity: 1; }
+svg.net .edge.used  { opacity: .62; }
+svg.net .edge.nullified { stroke: var(--ink-muted); opacity: .16; }
+
+/* ---- travelling signal ---- */
+svg.net .pulse {
+  fill: none; stroke: var(--activation); stroke-width: 6;
+  stroke-linecap: round; opacity: 0;
+  stroke-dasharray: 13 100; stroke-dashoffset: 113;
+}
+svg.net .pulse.fire { animation: nn-travel .62s cubic-bezier(.35,.05,.35,1) forwards; }
+@keyframes nn-travel {
+  0%   { stroke-dashoffset: 113; opacity: 0; }
+  14%  { opacity: 1; }
+  82%  { opacity: 1; }
+  100% { stroke-dashoffset: 0;   opacity: 0; }
+}
+
+/* ---- edge weight labels ---- */
+svg.net .elabel {
+  font-family: var(--mono); font-size: 10.5px; fill: var(--weight);
+  text-anchor: middle; opacity: 0;
+  stroke: var(--surface-2); stroke-width: 3.5px; paint-order: stroke;
+  transition: opacity .3s ease;
+}
+svg.net .elabel.on { opacity: 1; }
+svg.net .elabel.used { opacity: .5; }
+
+/* ---- nodes ---- */
+svg.net .nodec {
+  fill: var(--surface-1); stroke: var(--hairline); stroke-width: 1.5;
+  transition: stroke .35s ease, stroke-width .35s ease, fill .35s ease;
+}
+svg.net .node.done .nodec { stroke: var(--activation); stroke-width: 2; fill: var(--activation-w); }
+svg.net .node.lit  .nodec { stroke: var(--activation); stroke-width: 3.5; fill: var(--activation-w); }
+svg.net .node.lit  { animation: nn-pop .5s cubic-bezier(.2,1.4,.4,1); transform-box: fill-box; transform-origin: center; }
+@keyframes nn-pop { 0% { transform: scale(1); } 45% { transform: scale(1.10); } 100% { transform: scale(1); } }
+svg.net .node.dead .nodec {
+  stroke: var(--critical); stroke-width: 2; stroke-dasharray: 5 4;
+  fill: color-mix(in srgb, var(--critical) 9%, var(--surface-1));
+}
+svg.net .nodev {
+  font-family: var(--mono); font-size: 15px; font-weight: 700;
+  fill: var(--ink-muted); text-anchor: middle;
+  transition: fill .35s ease;
+}
+svg.net .node.done .nodev, svg.net .node.lit .nodev { fill: var(--activation); }
+svg.net .node.dead .nodev { fill: var(--critical); }
+svg.net .nodename {
+  font-family: var(--mono); font-size: 11.5px; fill: var(--ink-2);
+  text-anchor: middle; font-weight: 600;
+}
+svg.net .nodesub {
+  font-family: var(--mono); font-size: 10px; fill: var(--ink-muted);
+  text-anchor: middle;
+}
+svg.net .deadtag {
+  font-family: var(--mono); font-size: 9.5px; font-weight: 700;
+  fill: var(--critical); text-anchor: middle; letter-spacing: .12em;
+  opacity: 0; transition: opacity .4s ease;
+}
+svg.net .node.dead .deadtag { opacity: 1; }
+
+/* ---- the arithmetic ledger ---- */
+.ledger {
+  font-family: var(--mono); font-size: .86rem;
+  background: var(--surface-2); border: 1px solid var(--hairline);
+  border-radius: 8px; padding: 10px 4px; min-height: 214px;
+}
+.wrow {
+  display: grid; grid-template-columns: 1fr auto; gap: 10px;
+  align-items: baseline; padding: 5px 14px;
+  border-left: 3px solid transparent;
+  animation: nn-in .34s cubic-bezier(.2,.8,.3,1) both;
+}
+@keyframes nn-in { from { opacity: 0; transform: translateX(-9px); } to { opacity: 1; transform: none; } }
+.wrow .op   { color: var(--ink-2); }
+.wrow .acc  { color: var(--ink-muted); font-size: .8rem; white-space: nowrap; }
+.wrow.prod  { border-left-color: var(--weight); }
+.wrow.sum   { border-left-color: var(--accent); background: var(--surface-3); }
+.wrow.bias  { border-left-color: var(--weight); }
+.wrow.res   { border-left-color: var(--activation); background: var(--activation-w); }
+.wrow.res .op { color: var(--activation); font-weight: 700; font-size: .96rem; }
+.wrow.dead  { border-left-color: var(--critical); }
+.wrow.dead .op { color: var(--critical); }
+.wrow.note  { border-left-color: var(--hairline); }
+.wrow.note .op { color: var(--ink-muted); font-size: .82rem; }
+.wnum { color: var(--ink); }
+
+.acccard {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  font-family: var(--mono); padding: 10px 14px; margin-bottom: 8px;
+  background: var(--surface-3); border-radius: 8px;
+}
+.acccard .k { font-size: .72rem; letter-spacing: .09em; text-transform: uppercase; color: var(--ink-muted); }
+.acccard .val { font-size: 1.45rem; font-weight: 700; color: var(--activation); line-height: 1.1; }
+.acccard .val.idle { color: var(--ink-muted); }
+
+.narr { min-height: 84px; }
+.narr h3 { margin: 0 0 6px; font-size: 1.05rem; }
+.narr p  { margin: 0; color: var(--ink-2); font-size: .95rem; }
+
+.tpanel { display: flex; flex-wrap: wrap; gap: 0; align-items: flex-start; }
+.tgroup {
+  border: 1px dashed var(--hairline); border-radius: 10px;
+  padding: 12px 14px 2px; margin: 0 14px 14px 0;
+}
+.tgroup .gh {
+  font-family: var(--mono); font-size: .72rem; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--ink-muted); margin-bottom: 9px;
+}
+.cell.pend { opacity: .3; }
+
+.mmrow {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  font-family: var(--mono); font-size: 1.55rem; color: var(--ink-2);
+  padding-bottom: 4px;
+}
+.mmrow .tensor { margin-bottom: 0; }
+
+.stepgrid { display: grid; grid-template-columns: 1.05fr 1fr; gap: 20px; align-items: start; }
+@media (max-width: 900px) { .stepgrid { grid-template-columns: 1fr; } }
+
+.livemem { display: flex; flex-wrap: wrap; gap: 8px 18px; font-family: var(--mono); font-size: .8rem; color: var(--ink-muted); }
+
+/* ---- reference-model picker ---- */
+.pickrow {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 18px 0 8px; padding: 12px 14px;
+  background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 8px;
+}
+.pickrow .pk {
+  font-family: var(--mono); font-size: .72rem; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--ink-muted);
+}
+.pickrow .src { flex-basis: 100%; font-size: .78rem; color: var(--ink-muted); }
+select.picker {
+  background: var(--surface-3); color: var(--ink);
+  border: 1px solid var(--hairline); border-radius: 7px;
+  padding: 6px 10px; font-family: var(--mono); font-size: .85rem; cursor: pointer;
+}
+select.picker:hover { border-color: var(--ink-muted); }
+select.picker:focus-visible { outline: 2px solid var(--weight); outline-offset: 1px; }
+</style>
+</head>
+<body>
+
+<noscript>
+  <div class="wrap" style="padding-top:30px">
+    <div class="callout warn"><div class="t">JavaScript required</div>
+    This page renders every number live from <code>assets/data/trace.js</code>
+    and animates the forward pass step by step. With JS off there is nothing to read.</div>
+  </div>
+</noscript>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 02</div>
+    <h1>The Forward Pass</h1>
+    <p class="lede">A neural network's forward pass is not magic and it is not
+    even complicated. It is a fixed number of multiplies, a fixed number of
+    adds, and one comparison against zero. Here is every single one of them,
+    in order, for a network small enough to hold in your head.</p>
+  </div>
+
+  <section class="block" id="walk">
+    <h2 style="margin-top:0">Every multiply, one at a time</h2>
+    <p>The model is <span class="mono" id="archline"></span>. Step through it
+    below, or press <b>Play</b>. Each hidden unit is a dot product of one row
+    of <span class="mono">W1</span> with the input vector, plus a bias. The
+    diagram lights the exact wire being used; the ledger shows the exact
+    arithmetic; the tensors on the right fill in as the values become real.</p>
+
+    <div id="legendhost"></div>
+    <div class="netcard"><div id="nethost"></div></div>
+    <div id="stephost"></div>
+
+    <div class="stepgrid">
+      <div>
+        <div class="narr" id="narrhost"></div>
+        <div class="acccard" id="acchost"></div>
+        <div class="ledger" id="ledgerhost"></div>
+      </div>
+      <div>
+        <div class="tpanel" id="tpanelhost"></div>
+      </div>
+    </div>
+
+    <div id="resulttiles"></div>
+    <div id="deadcallout"></div>
+  </section>
+
+  <section class="block" id="gemm">
+    <h2 style="margin-top:0">The same thing as one matrix multiply</h2>
+    <p>Three separate dot products is how you explain it. It is not how you
+    compute it. All three rows read the same input vector, and none of them
+    depends on the others, so all three can run at once. Stack them and the
+    whole layer is a single matrix–vector product:</p>
+
+    <div id="mmhost"></div>
+    <div id="mmexpand"></div>
+    <div id="refpicker"></div>
+    <div id="gemmnote"></div>
+    <div id="gemmcallout"></div>
+  </section>
+
+  <section class="block" id="saved">
+    <h2 style="margin-top:0">What got saved</h2>
+    <p>Here is the part that people skip, and it is the part that decides how
+    much GPU memory your training run needs. The forward pass did not just
+    produce a prediction and throw away its scratch work. Specific
+    intermediate values were <em>kept</em>, because the backward pass on
+    page 04 cannot run without them.</p>
+
+    <div id="savedhost"></div>
+
+    <h3>The strip fills as the forward pass runs</h3>
+    <p id="stripintro"></p>
+    <div id="striphost"></div>
+    <div class="livemem" id="striplegend"></div>
+
+    <div id="savedcallout"></div>
+    <div id="refpicker2"></div>
+    <div id="scalecallout"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T   = NN.T;
+  const F   = T.forward;
+  const I   = T.init;
+  const el  = NN.el;
+  const svg = NN.svg;
+  const fmt = function (v) { return NN.fmt(v, 4); };
+
+  /* ------------------------------------------------------------ the data */
+  const W1 = I.W1, b1 = I.b1, W2 = I.W2, b2 = I.b2;
+  const X  = F.x;
+  const NH = W1.length;         // hidden units
+  const NI = W1[0].length;      // inputs
+  const Z1 = F.z1_work.map(function (w) { return w.out; });
+  const A1 = F.a1;
+  const Z2 = F.z2[0];
+  const YHAT = F.yhat;
+  const Y = F.y;
+  const MASK = F.relu_mask;
+  const XM = T.meta.input.x_meaning;
+  const DT    = T.memory.dtype_bytes;
+  const BPE   = DT.fp32;                     // bytes per fp32 element
+  const BPE16 = DT.bf16;                     // bytes per bf16 element
+
+  /* per-tensor memory facts, by name, straight from the trace */
+  const PT = {};
+  T.memory.per_tensor.forEach(function (t) { PT[t.name] = t; });
+  const ACT = T.memory.by_class.activation;
+
+  const REDUCED = window.matchMedia &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  NN.$("#archline").textContent = T.meta.architecture;
+  NN.$("#legendhost").appendChild(NN.legend(["weight", "activation"]));
+
+  /* ================================================================= SVG */
+  const VW = 720, VH = 372;
+  const CX_IN = 92, CX_H = 356, CX_OUT = 632, R = 30;
+  const IN_Y  = [130, 258];
+  const H_Y   = [92, 190, 288];
+  const OUT_Y = 190;
+
+  const net = svg("svg", {
+    class: "net", viewBox: "0 0 " + VW + " " + VH,
+    role: "img", "aria-label": "Network diagram: " + T.meta.architecture
+  });
+
+  function bez(x1, y1, x2, y2) {
+    const c = 74;
+    return { d: "M " + x1 + " " + y1 + " C " + (x1 + c) + " " + y1 + ", " +
+                 (x2 - c) + " " + y2 + ", " + x2 + " " + y2,
+             p0: [x1, y1], p1: [x1 + c, y1], p2: [x2 - c, y2], p3: [x2, y2] };
+  }
+  function at(b, t) {
+    const u = 1 - t;
+    const f = function (a, bb, cc, d) {
+      return u * u * u * a + 3 * u * u * t * bb + 3 * u * t * t * cc + t * t * t * d;
+    };
+    return [f(b.p0[0], b.p1[0], b.p2[0], b.p3[0]),
+            f(b.p0[1], b.p1[1], b.p2[1], b.p3[1])];
+  }
+
+  const gEdge  = svg("g", {});
+  const gPulse = svg("g", {});
+  const gLabel = svg("g", {});
+  const gNode  = svg("g", {});
+  net.appendChild(gEdge); net.appendChild(gPulse);
+  net.appendChild(gLabel); net.appendChild(gNode);
+
+  [["input  x", CX_IN], ["hidden  z1 → a1", CX_H], ["output  ŷ", CX_OUT]]
+    .forEach(function (c) {
+      const t = svg("text", { class: "colhead", x: c[1], y: 22, "text-anchor": "middle" });
+      t.textContent = c[0];
+      net.appendChild(t);
+    });
+
+  const EDGES = {};
+  function mkEdge(key, x1, y1, x2, y2, w, labelText, tpos) {
+    const b = bez(x1, y1, x2, y2);
+    const base = svg("path", {
+      class: "edge" + (w < 0 ? " neg" : ""), d: b.d,
+      "stroke-width": (1.1 + 3.4 * Math.abs(w)).toFixed(2)
+    });
+    const pulse = svg("path", { class: "pulse", d: b.d, pathLength: 100 });
+    const p = at(b, tpos);
+    const lab = svg("text", { class: "elabel", x: p[0].toFixed(1), y: (p[1] - 6).toFixed(1) });
+    lab.textContent = labelText;
+    gEdge.appendChild(base); gPulse.appendChild(pulse); gLabel.appendChild(lab);
+    EDGES[key] = { base: base, pulse: pulse, lab: lab, w: w };
+  }
+
+  let lane = 0;
+  for (let j = 0; j < NI; j++) {
+    for (let i = 0; i < NH; i++) {
+      mkEdge("w1_" + i + "_" + j, CX_IN + R, IN_Y[j], CX_H - R, H_Y[i],
+             W1[i][j], fmt(W1[i][j]), 0.20 + 0.11 * (lane++));
+    }
+  }
+  for (let k = 0; k < NH; k++) {
+    mkEdge("w2_" + k, CX_H + R, H_Y[k], CX_OUT - R, OUT_Y,
+           W2[0][k], fmt(W2[0][k]), 0.28 + 0.13 * k);
+  }
+
+  /* nudge any two edge labels that landed on top of each other */
+  (function delabel() {
+    const L = Object.keys(EDGES).map(function (k) {
+      return { k: k, x: +EDGES[k].lab.getAttribute("x"), y: +EDGES[k].lab.getAttribute("y") };
+    });
+    L.sort(function (a, b) { return a.x - b.x || a.y - b.y; });
+    for (let i = 1; i < L.length; i++) {
+      for (let j = 0; j < i; j++) {
+        if (Math.abs(L[i].x - L[j].x) < 50 && Math.abs(L[i].y - L[j].y) < 15) {
+          L[i].y = L[j].y + 15;
+          j = -1;
+        }
+      }
+    }
+    L.forEach(function (l) { EDGES[l.k].lab.setAttribute("y", l.y.toFixed(1)); });
+  })();
+
+  const NODES = {};
+  function mkNode(key, cx, cy, name, sub) {
+    const g = svg("g", { class: "node" });
+    g.appendChild(svg("circle", { class: "nodec", cx: cx, cy: cy, r: R }));
+    const nm = svg("text", { class: "nodename", x: cx, y: cy - R - 11 });
+    nm.textContent = name; g.appendChild(nm);
+    const val = svg("text", { class: "nodev", x: cx, y: cy + 5.5 });
+    val.textContent = "·"; g.appendChild(val);
+    if (sub) {
+      const s = svg("text", { class: "nodesub", x: cx, y: cy + R + 16 });
+      s.textContent = sub; g.appendChild(s);
+    }
+    const dt = svg("text", { class: "deadtag", x: cx, y: cy + R + (sub ? 30 : 17) });
+    dt.textContent = "DEAD  ·  ReLU CLAMPED"; g.appendChild(dt);
+    gNode.appendChild(g);
+    NODES[key] = { g: g, val: val };
+  }
+
+  for (let j = 0; j < NI; j++) mkNode("x" + j, CX_IN, IN_Y[j], "x[" + j + "]", XM[j]);
+  for (let i = 0; i < NH; i++) mkNode("h" + i, CX_H, H_Y[i], "unit " + i, null);
+  mkNode("out", CX_OUT, OUT_Y, "ŷ", T.meta.input.y_meaning);
+
+  NN.$("#nethost").appendChild(net);
+
+  function setNode(key, state, value) {
+    const n = NODES[key];
+    n.g.classList.remove("lit", "done", "dead");
+    if (state) n.g.classList.add(state);
+    n.val.textContent = value === undefined || value === null ? "·" : fmt(value);
+  }
+  function setEdge(key, state) {
+    const e = EDGES[key];
+    e.base.classList.remove("on", "used", "nullified");
+    e.lab.classList.remove("on", "used");
+    if (state === "on")   { e.base.classList.add("on");   e.lab.classList.add("on"); }
+    if (state === "used") { e.base.classList.add("used"); e.lab.classList.add("used"); }
+    if (state === "null") { e.base.classList.add("nullified"); e.lab.classList.add("used"); }
+  }
+  function firePulse(key) {
+    const p = EDGES[key].pulse;
+    p.classList.remove("fire");
+    void p.getBoundingClientRect();       /* force restart */
+    p.classList.add("fire");
+  }
+
+  /* ============================================================= tensors */
+  function grp(title, kids) {
+    return el("div", { class: "tgroup" },
+      [el("div", { class: "gh" }, title)].concat(kids));
+  }
+
+  const tW1 = NN.tensor({ name: "W1", shape: [NH, NI], values: W1, cls: "weight", digits: 3, note: "row i · x" });
+  const tb1 = NN.tensor({ name: "b1", shape: [NH],     values: b1, cls: "weight", digits: 3 });
+  const tW2 = NN.tensor({ name: "W2", shape: [1, NH],  values: W2, cls: "weight", digits: 3 });
+  const tb2 = NN.tensor({ name: "b2", shape: [1],      values: b2, cls: "weight", digits: 3 });
+
+  const tX  = NN.tensor({ name: "x",  shape: [NI], values: X,               cls: "activation", digits: 3 });
+  const tZ1 = NN.tensor({ name: "z1", shape: [NH], values: Z1.map(function(){return 0;}), cls: "activation", digits: 3 });
+  const tA1 = NN.tensor({ name: "a1", shape: [NH], values: A1.map(function(){return 0;}), cls: "activation", digits: 3 });
+  const tZ2 = NN.tensor({ name: "z2", shape: [1],  values: [0],             cls: "activation", digits: 3 });
+
+  NN.$("#tpanelhost").appendChild(grp("Parameters — read every step, never change", [tW1, tb1, tW2, tb2]));
+  NN.$("#tpanelhost").appendChild(grp("Activations — written this step, kept for backward", [tX, tZ1, tA1, tZ2]));
+
+  /* paint a tensor where only some entries exist yet */
+  function paint(tEl, vals, ready) {
+    tEl.update(vals);
+    tEl.cells.forEach(function (row, i) {
+      row.forEach(function (c) {
+        const ok = ready[i];
+        c.classList.toggle("pend", !ok);
+        if (!ok) { c.textContent = "·"; c.classList.remove("is-zero"); }
+      });
+    });
+  }
+
+  /* ============================================================== memory */
+  /* the five activation tensors, in the order the forward pass produces them.
+     Sizes and notes come from T.memory.per_tensor; only the order is ours. */
+  const ACT_ORDER = ["x", "z1", "a1", "relu_mask", "z2"];
+  const MEMSEGS = ACT_ORDER.filter(function (n) { return PT[n]; })
+    .map(function (n) { return { key: n, label: n, max: PT[n].elements }; });
+  const MEM_TOTAL_ELEMS = ACT.elements;
+
+  const strip = el("div", { class: "memstrip" });
+  MEMSEGS.forEach(function (s) {
+    s.el = el("div", {
+      class: "memseg a",
+      style: { flex: "0 1 0px", opacity: "0", transition: "flex-grow .5s cubic-bezier(.4,0,.2,1), opacity .4s" }
+    }, s.label);
+    strip.appendChild(s.el);
+  });
+  const freeSeg = el("div", {
+    class: "memseg free",
+    style: { flex: String(MEM_TOTAL_ELEMS) + " 1 0px", transition: "flex-grow .5s cubic-bezier(.4,0,.2,1)" }
+  }, "free");
+  strip.appendChild(freeSeg);
+  NN.$("#striphost").appendChild(strip);
+
+  const stripReadout = el("span", {});
+  NN.$("#striplegend").appendChild(stripReadout);
+  NN.$("#stripintro").innerHTML =
+    "Counting everything as fp32 at " + BPE + " bytes an element, this model's forward " +
+    "pass materialises " + ACT.tensors + " activation tensors (<span class='mono'>" +
+    MEMSEGS.map(function (s) { return s.key; }).join("</span>, <span class='mono'>") +
+    "</span>, in that order) totalling " +
+    ACT.elements + " elements — " + ACT.elements + " × " + BPE + " B = <b>" +
+    NN.bytes(ACT.bytes_fp32) + "</b>, which is " +
+    NN.fmt(ACT.bytes_fp32 / T.memory.total_bytes_fp32 * 100, 1) + "% of the " +
+    NN.bytes(T.memory.total_bytes_fp32) + " this model touches in total. " +
+    "Trivial at this size. The point is the shape of the curve, not the number.";
+
+  function setMem(counts) {
+    let live = 0;
+    MEMSEGS.forEach(function (s) {
+      const n = counts[s.key] || 0;
+      live += n;
+      s.el.style.flexGrow = String(n);
+      s.el.style.opacity = n > 0 ? "1" : "0";
+    });
+    freeSeg.style.flexGrow = String(MEM_TOTAL_ELEMS - live);
+    stripReadout.innerHTML =
+      "live activations: <b class='v-activation'>" + live + " / " + MEM_TOTAL_ELEMS +
+      " elements</b> &nbsp;=&nbsp; " + NN.bytes(live * BPE) +
+      " &nbsp;·&nbsp; nothing here is freed until the backward pass has used it";
+  }
+
+  /* ============================================================== ledger */
+  const ledger  = NN.$("#ledgerhost");
+  const narr    = NN.$("#narrhost");
+  const accHost = NN.$("#acchost");
+
+  function row(cls, opHtml, numHtml, accHtml, delay) {
+    const r = el("div", { class: "wrow " + cls }, [
+      el("span", { class: "op", html: opHtml }),
+      el("span", { class: "acc", html: accHtml || "" })
+    ]);
+    if (numHtml) {
+      r.querySelector(".op").innerHTML = opHtml +
+        " &nbsp;<span class='wnum'>" + numHtml + "</span>";
+    }
+    if (delay) r.style.animationDelay = delay + "ms";
+    ledger.appendChild(r);
+    return r;
+  }
+
+  function setAcc(label, value, idle) {
+    accHost.innerHTML = "";
+    accHost.appendChild(el("span", { class: "k" }, label));
+    accHost.appendChild(el("span", { class: "val" + (idle ? " idle" : "") },
+      value === null ? "—" : fmt(value)));
+  }
+
+  function setNarr(title, html) {
+    narr.innerHTML = "";
+    narr.appendChild(el("h3", {}, title));
+    narr.appendChild(el("p", { html: html }));
+  }
+
+  /* ========================================================== scheduling */
+  let timers = [];
+  function clearTimers() { timers.forEach(clearTimeout); timers = []; }
+  function later(ms, fn) {
+    if (REDUCED) { fn(); return; }
+    timers.push(setTimeout(fn, ms));
+  }
+
+  const P_GAP = 620, SUM_GAP = 660, BIAS_GAP = 560, OUT_GAP = 600;
+
+  /* ============================================================== steps  */
+  const LABELS = [
+    "x arrives",
+    "z1[0] = W1 row 0 · x + b1[0]",
+    "z1[1] = W1 row 1 · x + b1[1]",
+    "z1[2] = W1 row 2 · x + b1[2]  (this one goes negative)",
+    "a1 = relu(z1) — unit 2 dies",
+    "z2 = W2 · a1 + b2",
+    "ŷ = z2, and it is badly wrong"
+  ];
+
+  /* reset all visual state to "nothing computed past step k" */
+  function baseState(k) {
+    Object.keys(EDGES).forEach(function (key) { setEdge(key, null); });
+
+    for (let j = 0; j < NI; j++) setNode("x" + j, k >= 0 ? "done" : null, k >= 0 ? X[j] : null);
+
+    /* state BEFORE this step's animation runs */
+    const z1done = NN.clamp(k - 1, 0, NH);   /* steps 1..3 finish units 0..2 */
+    const relu   = k >= 5;
+    const zdone  = [];
+    for (let i = 0; i < NH; i++) {
+      const done = i < z1done;
+      zdone.push(done);
+      if (!done) { setNode("h" + i, null, null); continue; }
+      if (relu && MASK[i] === 0) setNode("h" + i, "dead", A1[i]);
+      else setNode("h" + i, "done", relu ? A1[i] : Z1[i]);
+    }
+    setNode("out", k >= 6 ? "done" : null, k >= 6 ? Z2 : null);
+
+    paint(tZ1, Z1, zdone);
+    paint(tA1, A1, zdone.map(function (d) { return d && relu; }));
+    paint(tZ2, [Z2], [k >= 6]);
+    [tW1, tb1, tW2, tb2, tX, tZ1, tA1, tZ2].forEach(function (t) { t.highlight(null); });
+
+    /* edges already consumed stay faintly lit */
+    for (let i = 0; i < z1done; i++)
+      for (let j = 0; j < NI; j++) setEdge("w1_" + i + "_" + j, "used");
+    if (k >= 6) for (let kk = 0; kk < NH; kk++)
+      setEdge("w2_" + kk, MASK[kk] === 0 ? "null" : "used");
+
+    /* memory */
+    const counts = { x: PT.x.elements, z1: z1done, a1: 0, relu_mask: 0, z2: 0 };
+    if (relu) { counts.a1 = PT.a1.elements; counts.relu_mask = PT.relu_mask.elements; }
+    if (k >= 6) counts.z2 = PT.z2.elements;
+    setMem(counts);
+
+    ledger.innerHTML = "";
+  }
+
+  /* ---- step 1: the input ---- */
+  function stepInput() {
+    setNarr("The input vector arrives",
+      "One house, described by " + NI + " numbers: <b class='v-activation'>" +
+      fmt(X[0]) + "</b> " + XM[0] + " and <b class='v-activation'>" + fmt(X[1]) +
+      "</b> " + XM[1] + ". Nothing has been multiplied yet. <span class='mono'>x</span> " +
+      "is written into memory and it stays there, because the backward pass needs it " +
+      "to compute <span class='mono'>dL/dW1</span>.");
+    setAcc("accumulator", null, true);
+    tX.highlight([[0, 0], [1, 0]]);
+    for (let j = 0; j < NI; j++) {
+      later(j * 220, function () {
+        setNode("x" + j, "lit", X[j]);
+        later(420, function () { setNode("x" + j, "done", X[j]); });
+      });
+    }
+    row("note", "x = [" + X.map(fmt).join(", ") + "]", "",
+        X.length + " × " + BPE + " B");
+    row("note", "target y = " + fmt(Y), "", T.meta.input.y_meaning);
+    row("note", T.param_names.length + " parameters are already in memory", "",
+        T.param_layout.map(function (p) { return p.name; }).join(" "));
+  }
+
+  /* ---- steps 2-4: one hidden unit ---- */
+  function stepZ1(i) {
+    const work = F.z1_work[i];
+    const neg  = work.out < 0;
+    setNarr("Hidden unit " + i + ": " + work.products.length +
+      " multiplies, " + work.products.length + " adds",
+      "Take row " + i + " of <span class='mono'>W1</span>, pair it element-by-element " +
+      "with <span class='mono'>x</span>, multiply, add the products together, add " +
+      "<span class='mono'>b1[" + i + "]</span>. That is the entire computation of one " +
+      "neuron." + (neg ? " Watch the sign — this one lands <b class='v-gradient'>below zero</b>." : ""));
+    setAcc("running sum", 0, true);
+
+    let acc = 0;
+    work.products.forEach(function (p, j) {
+      later(j * P_GAP, function () {
+        acc += p.prod;
+        setEdge("w1_" + i + "_" + j, "on");
+        firePulse("w1_" + i + "_" + j);
+        tW1.highlight([[i, j]], true);
+        tX.highlight([[j, 0]], true);
+        row("prod",
+            "W1[" + i + "][" + j + "] × x[" + j + "]",
+            fmt(p.w) + " × " + fmt(p.x) + " = <b>" + fmt(p.prod) + "</b>",
+            "acc = " + fmt(acc));
+        setAcc("running sum", acc, false);
+        setNode("h" + i, "lit", acc);
+      });
+    });
+
+    const tSum = work.products.length * P_GAP;
+    later(tSum, function () {
+      tW1.highlight(work.products.map(function (_, j) { return [i, j]; }), true);
+      tX.highlight(X.map(function (_, j) { return [j, 0]; }), true);
+      row("sum", "sum of products",
+          work.products.map(function (p) { return fmt(p.prod); }).join("  +  ") +
+          " = <b>" + fmt(work.sum_of_products) + "</b>", "");
+      setAcc("running sum", work.sum_of_products, false);
+    });
+
+    later(tSum + SUM_GAP, function () {
+      tW1.highlight(null); tX.highlight(null);
+      tb1.highlight([[i, 0]], true);
+      row("bias", "+ bias b1[" + i + "]",
+          fmt(work.sum_of_products) + " + " + fmt(work.bias), "");
+      setNode("h" + i, "lit", work.out);
+    });
+
+    later(tSum + SUM_GAP + BIAS_GAP, function () {
+      tb1.highlight(null);
+      row(neg ? "dead" : "res", "z1[" + i + "] =", "<b>" + fmt(work.out) + "</b>",
+          neg ? "negative — ReLU will kill it" : "");
+      setAcc("z1[" + i + "]", work.out, false);
+      const zdone = Z1.map(function (_, k) { return k <= i; });
+      paint(tZ1, Z1, zdone);
+      tZ1.highlight([[i, 0]], true);
+      setNode("h" + i, "done", work.out);
+      for (let j = 0; j < NI; j++) setEdge("w1_" + i + "_" + j, "used");
+      setMem({ x: PT.x.elements, z1: i + 1, a1: 0, relu_mask: 0, z2: 0 });
+    });
+  }
+
+  /* ---- step 5: ReLU ---- */
+  function stepRelu() {
+    const deadIdx = MASK.indexOf(0);
+    setNarr("ReLU: max(0, z) — and unit " + deadIdx + " dies",
+      "ReLU is one comparison per element. Positive stays, negative becomes zero. " +
+      "Two units pass through untouched. <b class='v-gradient'>Unit " + deadIdx +
+      "</b> computed <span class='mono'>" + fmt(Z1[deadIdx]) + "</span>, which is below " +
+      "zero, so it is clamped to <span class='mono'>0</span>. From here on that unit " +
+      "contributes <em>nothing</em> to the prediction.");
+    setAcc("a1", null, true);
+    paint(tA1, A1, [false, false, false]);
+
+    Z1.forEach(function (z, i) {
+      later(i * 380, function () {
+        const alive = MASK[i] !== 0;
+        row(alive ? "res" : "dead",
+            "a1[" + i + "] = max(0, " + fmt(z) + ")",
+            "= <b>" + fmt(A1[i]) + "</b>",
+            alive ? "passes through" : "CLAMPED — unit is dead");
+        const done = A1.map(function (_, k) { return k <= i; });
+        paint(tA1, A1, done);
+        tA1.highlight([[i, 0]], true);
+        tZ1.highlight([[i, 0]], true);
+        setNode("h" + i, alive ? "lit" : "dead", A1[i]);
+        if (alive) later(430, function () { setNode("h" + i, "done", A1[i]); });
+      });
+    });
+
+    later(Z1.length * 380 + 260, function () {
+      row("note", "relu_mask =", "[" + MASK.map(fmt).join(", ") + "]",
+          "saved for backward");
+      setMem({ x: PT.x.elements, z1: PT.z1.elements, a1: PT.a1.elements,
+               relu_mask: PT.relu_mask.elements, z2: 0 });
+      setAcc("dead units", MASK.filter(function (m) { return m === 0; }).length, false);
+    });
+  }
+
+  /* ---- step 6: the output layer ---- */
+  function stepZ2() {
+    const work = F.z2_work[0];
+    const dI = MASK.indexOf(0);
+    setNarr("Output layer: " + work.products.length + " multiplies into one number",
+      "Same operation, different shape. <span class='mono'>W2</span> is a " +
+      "1×" + NH + " row, so the output is a single scalar. Watch the term for the dead " +
+      "unit: <span class='mono'>W2[0][" + dI + "]</span> is " + fmt(W2[0][dI]) +
+      ", a perfectly good weight, but it is multiplied by " +
+      "<span class='mono'>a1[" + dI + "] = " + fmt(A1[dI]) + "</span>. It contributes " +
+      "exactly " + fmt(W2[0][dI] * A1[dI]) + ". The dead unit is invisible to the output.");
+    setAcc("running sum", 0, true);
+
+    let acc = 0;
+    work.products.forEach(function (p, k) {
+      later(k * P_GAP, function () {
+        acc += p.prod;
+        const nullified = MASK[k] === 0;
+        setEdge("w2_" + k, nullified ? "null" : "on");
+        if (!nullified) firePulse("w2_" + k);
+        tW2.highlight([[0, k]], true);
+        tA1.highlight([[k, 0]], true);
+        row(nullified ? "dead" : "prod",
+            "W2[0][" + k + "] × a1[" + k + "]",
+            fmt(p.w) + " × " + fmt(p.x) + " = <b>" + fmt(p.prod) + "</b>",
+            nullified ? "dead unit → contributes nothing" : "acc = " + fmt(acc));
+        setAcc("running sum", acc, false);
+        setNode("out", "lit", acc);
+      });
+    });
+
+    const tSum = work.products.length * P_GAP;
+    later(tSum, function () {
+      tW2.highlight(W2[0].map(function (_, kk) { return [0, kk]; }), true);
+      tA1.highlight(A1.map(function (_, k) { return [k, 0]; }), true);
+      row("sum", "sum of products",
+          work.products.map(function (p) { return fmt(p.prod); }).join("  +  ") +
+          " = <b>" + fmt(work.sum_of_products) + "</b>", "");
+      setAcc("running sum", work.sum_of_products, false);
+    });
+    later(tSum + SUM_GAP, function () {
+      tW2.highlight(null); tA1.highlight(null);
+      tb2.highlight([[0, 0]], true);
+      row("bias", "+ bias b2[0]",
+          fmt(work.sum_of_products) + " + " + fmt(work.bias), "");
+      setNode("out", "lit", work.out);
+    });
+    later(tSum + SUM_GAP + BIAS_GAP, function () {
+      tb2.highlight(null);
+      row("res", "z2[0] =", "<b>" + fmt(work.out) + "</b>", "");
+      setAcc("z2", work.out, false);
+      paint(tZ2, [Z2], [true]);
+      tZ2.highlight([[0, 0]], true);
+      setNode("out", "done", work.out);
+      for (let k = 0; k < NH; k++) setEdge("w2_" + k, MASK[k] === 0 ? "null" : "used");
+      setMem({ x: PT.x.elements, z1: PT.z1.elements, a1: PT.a1.elements,
+               relu_mask: PT.relu_mask.elements, z2: PT.z2.elements });
+    });
+  }
+
+  /* ---- step 7: the prediction ---- */
+  function stepOut() {
+    setNarr("ŷ = " + fmt(YHAT) + " — the network's guess",
+      "There is no activation on the output layer, so the prediction is just " +
+      "<span class='mono'>z2</span>. The target was <b class='v-activation'>" + fmt(Y) +
+      "</b> " + T.meta.input.y_meaning + "; the network said <b class='v-gradient'>" +
+      fmt(YHAT) + "</b>. It predicted a negative house price. Nothing is broken — the " +
+      "weights were initialised arbitrarily and have never been trained. Turning that " +
+      "gap into a single number to minimise is page 03.");
+    setAcc("ŷ", YHAT, false);
+    setNode("out", "lit", YHAT);
+    later(500, function () { setNode("out", "done", YHAT); });
+    tZ2.highlight([[0, 0]], true);
+
+    row("res", "ŷ = z2[0]", "<b>" + fmt(YHAT) + "</b>", "prediction");
+    row("note", "y (target)", fmt(Y), T.meta.input.y_meaning);
+    row("dead", "ŷ − y", "<b>" + NN.fmtSigned(F.error, 4) + "</b>", "the error, page 03");
+    row("note", "total multiplies, whole forward pass",
+        String(NH * NI + W2[0].length),
+        "+ " + (NH + W2.length) + " bias adds, " + NH + " ReLU compares");
+  }
+
+  /* ------------------------------------------------------------- driver */
+  function onStep(k) {
+    clearTimers();
+    baseState(k);
+    if (k === 0) stepInput();
+    else if (k >= 1 && k <= 3) stepZ1(k - 1);
+    else if (k === 4) stepRelu();
+    else if (k === 5) stepZ2();
+    else stepOut();
+  }
+
+  new NN.Stepper({
+    mount: NN.$("#stephost"),
+    count: LABELS.length,
+    labels: LABELS,
+    onStep: onStep,
+    autoplayMs: 3400
+  });
+
+  /* ------------------------------------------------- static result tiles */
+  NN.$("#resulttiles").appendChild(NN.tiles([
+    { k: "prediction ŷ", v: fmt(YHAT), cls: "activation", s: T.meta.input.y_meaning },
+    { k: "target y",     v: fmt(Y),    s: "what we wanted" },
+    { k: "error ŷ − y",  v: NN.fmtSigned(F.error, 4), cls: "gradient", s: "page 03 squares this" },
+    { k: "dead units",   v: MASK.filter(function (m) { return m === 0; }).length + " of " + NH,
+      s: "ReLU output exactly 0" }
+  ]));
+
+  NN.$("#deadcallout").appendChild(NN.callout("why", "Remember unit " + MASK.indexOf(0),
+    "It is not a bug and it is not rare — roughly half of a freshly initialised ReLU " +
+    "layer's units are off for any given input, and that sparsity is most of why ReLU " +
+    "works. But it has a consequence the forward pass does not show you. Because " +
+    "<span class='mono'>a1[" + MASK.indexOf(0) + "]</span> is exactly " +
+    fmt(A1[MASK.indexOf(0)]) + ", the derivative of ReLU there is also " +
+    fmt(MASK[MASK.indexOf(0)]) + ", and on page 04 the entire gradient row " +
+    "<span class='mono'>dL/dW1[" + MASK.indexOf(0) + "]</span> comes out as " +
+    "<span class='mono'>[" + T.backward.dL_dW1[MASK.indexOf(0)].map(fmt).join(", ") +
+    "]</span>. Those two weights get no update at all this step. A unit that is dead " +
+    "for every input in your dataset never learns again."));
+
+  /* ================================================== matrix-multiply bit */
+  const mmW1 = NN.tensor({ name: "W1", shape: [NH, NI], values: W1, cls: "weight", digits: 3 });
+  const mmX  = NN.tensor({ name: "x",  shape: [NI],     values: X,  cls: "activation", digits: 3 });
+  const mmB1 = NN.tensor({ name: "b1", shape: [NH],     values: b1, cls: "weight", digits: 3 });
+  const mmZ1 = NN.tensor({ name: "z1", shape: [NH],     values: Z1, cls: "activation", digits: 3 });
+
+  NN.$("#mmhost").appendChild(el("div", { class: "mmrow scrollx" }, [
+    mmW1, el("span", {}, "·"), mmX, el("span", {}, "+"), mmB1, el("span", {}, "="), mmZ1
+  ]));
+
+  /* hovering a z1 cell highlights the row of W1 and all of x that produced it */
+  mmZ1.cells.forEach(function (rowCells, i) {
+    rowCells[0].addEventListener("mouseenter", function () {
+      mmW1.highlight(W1[i].map(function (_, j) { return [i, j]; }), true);
+      mmX.highlight(X.map(function (_, j) { return [j, 0]; }), true);
+      mmB1.highlight([[i, 0]], true);
+      mmZ1.highlight([[i, 0]], true);
+    });
+    rowCells[0].addEventListener("mouseleave", function () {
+      [mmW1, mmX, mmB1, mmZ1].forEach(function (t) { t.highlight(null); });
+    });
+  });
+
+  const expand = el("div", {});
+  expand.appendChild(el("p", { class: "small muted" },
+    "Hover a cell of z1 above to see which row it came from. Written out, the " +
+    "matrix product is exactly the three dot products you just stepped through:"));
+  F.z1_work.forEach(function (w) {
+    expand.appendChild(NN.formula({
+      rule: "z1[" + w.index + "] = " +
+        w.products.map(function (p, j) {
+          return "W1[" + w.index + "][" + j + "]·x[" + j + "]";
+        }).join(" + ") + " + b1[" + w.index + "]",
+      sub: w.products.map(function (p) {
+        return "(" + fmt(p.w) + " × " + fmt(p.x) + ")";
+      }).join(" + ") + " + " + fmt(w.bias),
+      result: fmt(w.out),
+      cls: "activation"
+    }));
+  });
+  NN.$("#mmexpand").appendChild(expand);
+
+  /* =============================================================== saved */
+  const savedNames = Object.keys(F.saved_for_backward);
+  const savedHost = NN.$("#savedhost");
+  const savedWrap = el("div", { class: "tpanel" });
+  savedNames.forEach(function (name) {
+    const vals = F.saved_for_backward[name];
+    const t = NN.tensor({
+      name: name, shape: [vals.length], values: vals,
+      cls: "activation", digits: 3
+    });
+    const why = {
+      x:         "dL/dW1 = dL/dz1 ⊗ x — the input is a factor in the weight gradient",
+      a1:        "dL/dW2 = dL/dz2 · a1 — the hidden activation is a factor too",
+      relu_mask: "dz1 = da1 × mask — the mask decides which paths carry gradient"
+    }[name] || "";
+    savedWrap.appendChild(el("div", { class: "tgroup" }, [
+      el("div", { class: "gh" }, [NN.chip("activation"), " saved"]),
+      t,
+      el("div", { class: "small muted", style: { maxWidth: "260px", marginBottom: "6px" } },
+        vals.length + " × " + BPE + " B = " + NN.bytes(vals.length * BPE) + " · " + why),
+      PT[name] && PT[name].note
+        ? el("div", {
+            class: "small",
+            style: { maxWidth: "260px", marginBottom: "10px", color: "var(--warning)" }
+          }, "caveat from the trace: " + PT[name].note)
+        : null
+    ]));
+  });
+  savedHost.appendChild(savedWrap);
+
+  const savedElems = savedNames.reduce(function (a, n) {
+    return a + F.saved_for_backward[n].length;
+  }, 0);
+
+  NN.$("#savedcallout").appendChild(NN.callout("mem", "Kept, not discarded",
+    "<p>When the forward pass finished, <span class='mono'>" + savedNames.join("</span>, " +
+    "<span class='mono'>") + "</span> were still sitting in memory — " + savedElems +
+    " elements, " + NN.bytes(savedElems * BPE) + ". They are not there by accident and " +
+    "they are not garbage the allocator forgot. The chain rule needs the forward values " +
+    "to compute the backward ones: you cannot get <span class='mono'>dL/dW1</span> " +
+    "without <span class='mono'>x</span>, and you cannot get <span class='mono'>dL/dW2</span> " +
+    "without <span class='mono'>a1</span>. Page 04 shows exactly where each one is " +
+    "read. The strip above counts every one of them at fp32 so the segments compare " +
+    "like for like, but the trace flags where that over-counts: " +
+    "<span class='mono'>relu_mask</span> carries the note “" + PT.relu_mask.note +
+    "”, so the real figure is smaller than the one drawn.</p>" +
+    "<p>This is the difference between inference and training. Inference can " +
+    "free every activation the moment the next layer has consumed it, so its activation " +
+    "memory is roughly one layer deep. Training cannot free anything until the backward " +
+    "pass has walked all the way back, so its activation memory is the <em>whole " +
+    "network</em> deep. Same weights, same GEMMs, wildly different memory profile.</p>"));
+
+  /* ============================================== reference configs + UI */
+  /* Shared canonical figures, so pages 02 / 07 / 08 all quote the same ones. */
+  const RC = T.reference_configs;
+  const MODELS = RC.models;
+  const BATCHES = [1, 2, 4, 8, 16, 32];
+  const GPU = RC.gpus.filter(function (g) { return g.name === RC.default_gpu; })[0] || RC.gpus[0];
+
+  let mi = Math.max(0, MODELS.map(function (m) { return m.name; }).indexOf(RC.default_model));
+  let bs = 8;
+  const pickers = [];
+
+  function makePicker(intro) {
+    const ms = el("select", { class: "picker", "aria-label": "reference model" },
+      MODELS.map(function (m, i) { return el("option", { value: String(i) }, m.name); }));
+    const bsel = el("select", { class: "picker", "aria-label": "batch size" },
+      BATCHES.map(function (b) { return el("option", { value: String(b) }, "batch " + b); }));
+    ms.value = String(mi); bsel.value = String(bs);
+    ms.addEventListener("change", function () { mi = +ms.value; sync(); });
+    bsel.addEventListener("change", function () { bs = +bsel.value; sync(); });
+    pickers.push([ms, bsel]);
+    return el("div", { class: "pickrow" }, [
+      el("span", { class: "pk" }, intro), ms, bsel,
+      el("span", { class: "src" }, "Source: " + RC._source + ". Everything else on this " +
+        "page is derived from the toy model; these are not.")
+    ]);
+  }
+  function sync() {
+    pickers.forEach(function (p) { p[0].value = String(mi); p[1].value = String(bs); });
+    renderRefs();
+  }
+
+  NN.$("#refpicker").appendChild(makePicker("compare against"));
+  NN.$("#refpicker2").appendChild(makePicker("compare against"));
+
+  const gemmCall = NN.callout("key", "Why the shape matters more than the math", "");
+  const gemmBody = gemmCall.lastChild;
+  NN.$("#gemmcallout").appendChild(gemmCall);
+
+  const scaleCall = NN.callout("key", "Activation memory scales with batch × sequence", "");
+  const scaleBody = scaleCall.lastChild;
+  NN.$("#scalecallout").appendChild(scaleCall);
+
+  const macsToy = NH * NI;
+
+  function renderRefs() {
+    const m = MODELS[mi];
+    const rows = [
+      { label: "this page's W1", r: NH, c: NI },
+      { label: m.name + " — attention projection", r: m.d_model, c: m.d_model }
+    ];
+    if (m.d_ff) rows.push({ label: m.name + " — MLP up-projection", r: m.d_model, c: m.d_ff });
+    const big = rows[rows.length - 1];
+    const bigMacs = big.r * big.c;
+
+    NN.$("#gemmnote").innerHTML =
+      "<p>A GPU does not execute that as " + macsToy + " scalar multiplies in a loop. " +
+      "It executes it as a <b>GEMM</b> — general matrix–matrix multiply — the single " +
+      "most optimised routine in all of numerical computing, running on dedicated " +
+      "tensor-core hardware. The kernel that runs here is the same kernel that runs " +
+      "in a real model. Only the loop bounds change.</p>" +
+      "<table class='data'><thead><tr><th>matrix</th><th>shape</th>" +
+      "<th>multiply–accumulates</th><th>weight bytes (fp32)</th></tr></thead><tbody>" +
+      rows.map(function (rw) {
+        const n = rw.r * rw.c;
+        return "<tr><td>" + rw.label + "</td><td class='n'>" + rw.r + " × " + rw.c +
+          "</td><td class='n'>" + (n < 1e4 ? n : NN.count(n)) + "</td><td class='n'>" +
+          NN.bytes(n * BPE) + "</td></tr>";
+      }).join("") +
+      "</tbody></table>" +
+      "<p class='small muted'>Every row is the same line of code. " +
+      NN.count(bigMacs) + " MACs is " + NN.count(2 * bigMacs) + " floating-point " +
+      "operations for <em>one token</em> through <em>one</em> matrix, and " + m.name +
+      " stacks " + m.n_layers + " blocks each containing several of them. That is the " +
+      "whole reason this hardware exists.</p>";
+
+    gemmBody.innerHTML =
+      "The arithmetic you just watched is associative and embarrassingly parallel: " +
+      "every one of the " + macsToy + " products in <span class='mono'>W1·x</span> is " +
+      "independent, and so is every row. At " + big.r + "×" + big.c + " that independence " +
+      "is what lets a GPU keep tens of thousands of lanes busy. The forward pass is " +
+      "never limited by cleverness. It is limited by how fast you can get " +
+      NN.bytes(bigMacs * BPE) + " of weights out of HBM and into the multipliers — " +
+      "which is why page 01's dtype question (" + BPE + " bytes vs " + BPE16 +
+      ") is a throughput question, not just a capacity one.";
+
+    const oneAct = bs * m.seq * m.d_model * BPE16;
+    const allAct = oneAct * m.n_layers;
+    const pct = allAct / GPU.hbm_bytes * 100;
+
+    scaleBody.innerHTML =
+      "<p>Weight memory depends only on the model. Activation memory depends on the " +
+      "<em>data</em> you push through it, and it multiplies. Here the whole forward pass " +
+      "held " + ACT.elements + " numbers because there is one example with one feature " +
+      "vector. In " + m.name + ", a single hidden-state tensor is " +
+      "<span class='mono'>batch × sequence × hidden</span>:</p>" +
+      "<p class='mono'>batch " + bs + " × seq " + m.seq + " × hidden " + m.d_model +
+      " × " + BPE16 + " B = <b class='v-activation'>" + NN.bytes(oneAct) + "</b></p>" +
+      "<p class='mono'>× " + m.n_layers + " blocks = <b class='v-activation'>" +
+      NN.bytes(allAct) + "</b> &nbsp;=&nbsp; <b>" + NN.fmt(pct, 1) + "%</b> of one " +
+      GPU.name + " (" + NN.gibytes(GPU.hbm_bytes) + " = " +
+      NN.bytes(GPU.hbm_bytes) + ")</p>" +
+      "<p>And that is <em>one</em> tensor per block, in bf16, before you count the " +
+      "attention scores, the MLP intermediates, or a single weight. Double the batch and " +
+      "it doubles. Double the context length and it doubles again — the picker above " +
+      "lets you watch it move. This single line of arithmetic is why activation " +
+      "checkpointing exists, why sequence parallelism exists, and why your training run " +
+      "OOMs at step 1 rather than step 1000.</p>";
+  }
+
+  renderRefs();
+
+  NN.page("forward");
+})();
+</script>
+</body>
+</html>

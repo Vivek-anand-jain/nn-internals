@@ -1,0 +1,1382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 01 Tensors in Memory</title>
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* Page-local styles. Tokens only, no raw colour literals. */
+.picker { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 4px; align-items: center; }
+.pill {
+  font-family: var(--mono); font-size: .78rem; padding: 5px 12px;
+  border-radius: 999px; background: var(--surface-2);
+  border: 1px solid var(--hairline); color: var(--ink-2); cursor: pointer;
+  transition: background .25s, color .25s, border-color .25s, transform .18s;
+}
+.pill:hover { border-color: var(--ink-muted); color: var(--ink); transform: translateY(-1px); }
+.pill[aria-pressed="true"] {
+  background: var(--weight-w); border-color: var(--weight);
+  color: var(--weight); font-weight: 700;
+}
+.pill.cw[aria-pressed="true"] { background: var(--weight-w);     border-color: var(--weight);     color: var(--weight); }
+.pill.cg[aria-pressed="true"] { background: var(--gradient-w);   border-color: var(--gradient);   color: var(--gradient); }
+.pill.ca[aria-pressed="true"] { background: var(--activation-w); border-color: var(--activation); color: var(--activation); }
+.pill.co[aria-pressed="true"] { background: var(--optimizer-w);  border-color: var(--optimizer);  color: var(--optimizer); }
+.pickerlabel {
+  font-family: var(--mono); font-size: .7rem; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--ink-muted); margin-right: 4px;
+}
+
+/* --- bit ribbon --- */
+.bitwrap { overflow-x: auto; padding: 4px 0 2px; }
+.bitwrap .bits { flex-wrap: nowrap; }
+.bitwrap .bit {
+  cursor: help;
+  transition: transform .18s cubic-bezier(.4,0,.2,1), box-shadow .18s, opacity .3s, background .3s;
+}
+.bitwrap .bit:hover { transform: translateY(-4px) scale(1.14); box-shadow: 0 0 0 2px var(--ink-muted); }
+.fieldbars { display: flex; gap: 2px; margin-top: 5px; }
+.fbar { height: 4px; border-radius: 2px; }
+.fbar.s { background: color-mix(in srgb, var(--critical) 55%, var(--surface-3)); }
+.fbar.e { background: color-mix(in srgb, var(--weight) 60%, var(--surface-3)); }
+.fbar.m { background: color-mix(in srgb, var(--activation) 60%, var(--surface-3)); }
+.fieldkey { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; font-family: var(--mono); font-size: .76rem; }
+.fieldkey b { font-weight: 700; }
+.dtcard {
+  background: var(--surface-2); border: 1px solid var(--hairline);
+  border-radius: 8px; padding: 14px 16px; margin: 14px 0;
+  transition: border-color .3s;
+}
+.dtcard.active { border-color: var(--weight); }
+.pill.danger[aria-pressed="true"] {
+  background: var(--gradient-w); border-color: var(--gradient); color: var(--gradient);
+}
+.pill.danger::after { content: " ⚠"; font-size: .9em; }
+.whyline {
+  font-size: .88rem; color: var(--ink-2); margin: 6px 0 2px;
+  border-left: 2px solid var(--accent); padding-left: 10px;
+  transition: color .25s;
+}
+.statusbadge {
+  font-family: var(--mono); font-size: .68rem; font-weight: 700;
+  padding: 1px 7px; border-radius: 999px; border: 1px solid currentColor;
+  text-transform: lowercase; white-space: nowrap;
+}
+.statusbadge.st-ok, .statusbadge.st-exact { color: var(--activation); background: var(--activation-w); }
+.statusbadge.st-rounded { color: var(--ink-muted); }
+.statusbadge.st-subnormal { color: var(--warning); background: color-mix(in srgb, var(--warning) 14%, transparent); }
+.statusbadge.st-underflow,
+.statusbadge.st-overflow { color: var(--critical); background: color-mix(in srgb, var(--critical) 14%, transparent); }
+.norep {
+  border: 1px dashed var(--critical); border-radius: 8px; padding: 14px 16px;
+  background: color-mix(in srgb, var(--critical) 8%, transparent);
+  color: var(--ink-2);
+}
+.norepbig {
+  font-family: var(--mono); font-weight: 700; font-size: 1.05rem;
+  color: var(--critical); letter-spacing: .04em; margin-bottom: 6px;
+}
+td.whycell {
+  color: var(--ink-muted); font-size: .82rem; font-family: var(--sans);
+  padding-top: 0; padding-bottom: 10px;
+}
+.scrollx table.data { min-width: 620px; }
+table.data tr.on  { background: var(--surface-2); }
+table.data tr.hi  { background: var(--weight-w); }
+table.data td.rowlab { white-space: nowrap; }
+
+/* --- byte ribbon --- */
+.ribbon { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 4px; }
+.word {
+  border: 1px solid var(--hairline); border-radius: 8px; padding: 7px 7px 5px;
+  background: var(--surface-2); cursor: pointer;
+  transition: border-color .25s, background .25s, transform .25s, box-shadow .25s, opacity .25s;
+}
+.word:hover { border-color: var(--ink-muted); }
+.word.hot {
+  border-color: var(--weight); background: var(--weight-w);
+  transform: translateY(-4px); box-shadow: 0 0 0 3px var(--weight-w);
+}
+.word.dimmed { opacity: .34; }
+.wbytes { display: flex; gap: 3px; }
+.bytebox { width: 27px; }
+.bytehex {
+  height: 25px; border-radius: 3px; display: flex; align-items: center;
+  justify-content: center; font-family: var(--mono); font-size: .66rem;
+  background: var(--surface-3); border: 1px solid var(--hairline-2);
+  color: var(--ink-2); transition: background .25s, color .25s, border-color .25s;
+}
+.word.hot .bytehex { background: var(--weight-w); color: var(--weight); border-color: var(--weight); }
+.byteoff {
+  font-family: var(--mono); font-size: .58rem; color: var(--ink-muted);
+  text-align: center; margin-top: 2px;
+}
+.wmeta {
+  font-family: var(--mono); font-size: .66rem; color: var(--ink-muted);
+  margin-top: 5px; text-align: center; transition: color .25s;
+}
+.word.hot .wmeta { color: var(--weight); }
+.addrline {
+  font-family: var(--mono); font-size: .72rem; color: var(--ink-muted);
+  margin: 2px 0 12px;
+}
+.sidebyside { display: flex; gap: 26px; flex-wrap: wrap; align-items: flex-start; }
+.stridebox {
+  font-family: var(--mono); font-size: .8rem; background: var(--surface-2);
+  border: 1px solid var(--hairline); border-radius: 8px; padding: 10px 14px;
+  display: inline-block; margin: 0 10px 10px 0;
+}
+.stridebox .k { color: var(--ink-muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; }
+@media (max-width: 860px) { .sidebyside { gap: 14px; } }
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 01</div>
+    <h1>Tensors in Memory</h1>
+    <p class="lede">A parameter is not an abstraction. It is a fixed number of bytes
+    at a fixed address, plus a shape that tells you how to walk them. This page takes
+    one weight apart down to the bit, then puts the whole model back together as a
+    byte budget.</p>
+    <noscript><p class="callout warn">This page renders itself from
+    <code>assets/data/trace.js</code> using JavaScript. With JS disabled there is
+    nothing below this line.</p></noscript>
+  </div>
+
+  <section class="block" id="intro">
+    <h2 style="margin-top:0">The running example</h2>
+    <p>Every page of this site traces the same tiny network on the same single
+    example, so that numbers can be followed from one page to the next without
+    anything being hidden. It is small enough to print every value it ever holds,
+    and structured enough to show every phenomenon that matters at scale.</p>
+    <div id="introMount"></div>
+  </section>
+
+  <section class="block" id="bits">
+    <h2 style="margin-top:0">1 · A weight is a number is a bit pattern</h2>
+    <p>Pick a value from the trace and pick a floating-point format. The ribbon is
+    the literal bit pattern that would sit in HBM: one sign bit, an exponent field,
+    and a mantissa field. Hover any bit to see what it contributes. The format
+    decides two independent things &mdash; how <em>wide</em> a range of magnitudes you
+    can name, and how <em>finely</em> you can name a value inside that range.</p>
+    <div id="bitMount"></div>
+  </section>
+
+  <section class="block" id="layout">
+    <h2 style="margin-top:0">2 · A tensor is a flat buffer plus a shape</h2>
+    <p>There are no rows in memory. There is one contiguous run of bytes, and a
+    small tuple of strides that turns an index into an offset. The grid on the left
+    and the byte ribbon on the right are the same six numbers. Hover either one;
+    the other follows.</p>
+    <div id="layoutMount"></div>
+  </section>
+
+  <section class="block" id="mem">
+    <h2 style="margin-top:0">3 · The four things that live in GPU memory</h2>
+    <p>Everything a training step touches falls into exactly four classes, and each
+    class has a different lifetime. That taxonomy is the whole of memory planning:
+    the rest is multiplication. Here is every live tensor in the trace, grouped.</p>
+    <div id="memMount"></div>
+  </section>
+
+  <section class="block" id="real">
+    <h2 style="margin-top:0">4 · The same four categories, at real scale</h2>
+    <div id="realMount"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+  const T  = NN.T;
+  const el = NN.el;
+
+  /* Bytes per element for the fp32 baseline, taken from the trace, not typed. */
+  const BPE = T.memory.dtype_bytes.fp32;
+
+  /* ============================================================ helpers */
+
+  /** IEEE-754 binary32 bytes of a value, little-endian (x86 / NVIDIA order). */
+  function f32bytes(v) {
+    const buf = new ArrayBuffer(BPE);
+    new DataView(buf).setFloat32(0, v, true);
+    return Array.prototype.slice.call(new Uint8Array(buf));
+  }
+  function hex2(b) { return ("0" + b.toString(16)).slice(-2); }
+
+  /* Field widths, limits and range figures now come from T.formats — nothing
+     about a float format is re-derived on this page. */
+
+  function sup(n) { return "<sup>" + n + "</sup>"; }
+
+  /* ============================================================== intro */
+  (function buildIntro() {
+    const m = NN.$("#introMount");
+    const meta = T.meta, inp = meta.input;
+
+    m.appendChild(NN.tiles([
+      { k: "architecture", v: meta.architecture.split(",")[0].trim(), s: meta.architecture.split(",").slice(1).join(",").trim() },
+      { k: "parameters",   v: String(T.memory.n_params), cls: "weight",
+        s: T.param_layout.map(function (p) { return p.name + "(" + p.shape.join("×") + ")"; }).join(" · ") },
+      { k: "live tensors", v: String(T.memory.per_tensor.length),
+        s: "across all four classes" },
+      { k: "training steps traced", v: String(meta.hyperparams.n_steps),
+        s: "lr = " + NN.fmt(meta.hyperparams.lr) }
+    ]));
+
+    const rows = inp.x.map(function (v, i) {
+      return el("tr", {}, [
+        el("td", {}, "x[" + i + "]"),
+        el("td", { class: "n" }, NN.fmt(v)),
+        el("td", { style: { textAlign: "left" } }, inp.x_meaning[i])
+      ]);
+    });
+    rows.push(el("tr", {}, [
+      el("td", {}, "y"),
+      el("td", { class: "n" }, NN.fmt(inp.y)),
+      el("td", { style: { textAlign: "left" } }, inp.y_meaning + "  (the target)")
+    ]));
+
+    m.appendChild(el("div", { class: "scrollx" }, [
+      el("table", { class: "data" }, [
+        el("thead", {}, el("tr", {}, [
+          el("th", {}, "symbol"), el("th", {}, "value"),
+          el("th", { style: { textAlign: "left" } }, "what it means")
+        ])),
+        el("tbody", {}, rows)
+      ])
+    ]));
+
+    m.appendChild(el("p", { class: "small muted", html:
+      "One house, two features, one price. The network is " +
+      "<code>" + meta.architecture + "</code>, which is " +
+      "<b>" + T.memory.n_params + "</b> learnable numbers. Everything below is " +
+      "about where those " + T.memory.n_params + " numbers physically are." }));
+  })();
+
+  /* ========================================================= 1 · bits */
+  (function buildBits() {
+    const m = NN.$("#bitMount");
+    const FMT = T.formats;                 /* field widths and limits, from the trace */
+    const DTYPES = Object.keys(FMT);
+    let vi = 0, dt = DTYPES[0];
+
+    /* the traced mixed-precision failures: fp16 status is not "ok" */
+    const FAILS = T.bitviews.map(function (b, i) { return { b: b, i: i }; })
+      .filter(function (o) { return o.b.fp16.status && o.b.fp16.status !== "ok"; });
+
+    function showVal(v, digits) {
+      if (v === null || v === undefined) return "–";
+      if (!isFinite(v)) return (v < 0 ? "−∞" : "+∞");
+      return NN.fmt(v, digits === undefined ? 10 : digits);
+    }
+    /* A decompose whose value left the format has exact:null and carries a
+       `display` string instead ("+inf"), plus overflow_sign. */
+    function storedTxt(dd, digits) {
+      if (dd.exact === null || dd.exact === undefined) {
+        return dd.display ? dd.display.replace("inf", "∞") : "–";
+      }
+      return showVal(dd.exact, digits);
+    }
+    function hasValue(dd) { return dd.exact !== null && dd.exact !== undefined; }
+    function statusOf(d, bv) {
+      if (d.status) return d.status;
+      return d.exact === bv.value ? "exact" : "rounded";
+    }
+
+    /* --- controls --- */
+    const valRow = el("div", { class: "picker" }, [
+      el("span", { class: "pickerlabel" }, "value")
+    ]);
+    const valBtns = T.bitviews.map(function (bv, i) {
+      const broken = bv.fp16.status && bv.fp16.status !== "ok";
+      const b = el("button", {
+        class: "pill" + (broken ? " danger" : ""), type: "button",
+        title: bv.why || "", "aria-pressed": i === 0 ? "true" : "false"
+      }, bv.label + " = " + NN.fmt(bv.value, 4));
+      b.addEventListener("click", function () { vi = i; render(); });
+      valRow.appendChild(b);
+      return b;
+    });
+
+    const dtRow = el("div", { class: "picker" }, [
+      el("span", { class: "pickerlabel" }, "format")
+    ]);
+    const dtBtns = DTYPES.map(function (d) {
+      const b = el("button", { class: "pill", type: "button", "aria-pressed": d === dt ? "true" : "false" }, d);
+      b.addEventListener("click", function () { dt = d; render(); });
+      dtRow.appendChild(b);
+      return b;
+    });
+
+    m.appendChild(valRow);
+    m.appendChild(dtRow);
+
+    const whyLine = el("div", { class: "whyline" });
+    m.appendChild(whyLine);
+
+    /* --- ribbon area --- */
+    const card     = el("div", { class: "dtcard active" });
+    const cardHead = el("div", { class: "small muted", style: { marginBottom: "8px" } });
+    const ribHost  = el("div", { class: "bitwrap" });
+    const barHost  = el("div", { class: "fieldbars" });
+    const keyHost  = el("div", { class: "fieldkey" });
+    card.appendChild(cardHead);
+    card.appendChild(ribHost);
+    card.appendChild(barHost);
+    card.appendChild(keyHost);
+    m.appendChild(card);
+
+    const decodeHost = el("div");
+    m.appendChild(decodeHost);
+
+    const tileHost = el("div");
+    m.appendChild(tileHost);
+
+    m.appendChild(el("h3", {}, "What happens to this value in each format"));
+    const cmpHost = el("div", { class: "scrollx" });
+    m.appendChild(cmpHost);
+
+    const truncHost = el("div");
+    m.appendChild(truncHost);
+
+    /* --- static: the formats themselves, straight from T.formats --- */
+    (function formatTable() {
+      m.appendChild(el("h3", {}, "The three formats, as field widths"));
+      const body = el("tbody", {});
+      DTYPES.forEach(function (name) {
+        const f = FMT[name];
+        body.appendChild(el("tr", {}, [
+          el("td", {}, name),
+          el("td", { class: "n" }, f.bytes),
+          el("td", { class: "n" }, 1 + f.exponent_bits + f.mantissa_bits),
+          el("td", { class: "n v-weight" }, f.exponent_bits),
+          el("td", { class: "n v-activation" }, f.mantissa_bits),
+          el("td", { class: "n" }, f.bias),
+          el("td", { class: "n" }, NN.fmt(f.max_finite, 3)),
+          el("td", { class: "n" }, NN.fmt(f.min_normal, 3)),
+          el("td", { class: "n" }, NN.fmt(f.min_subnormal, 3)),
+          el("td", { class: "n" }, NN.fmt(f.epsilon, 4)),
+          el("td", { class: "n" }, f.decimal_digits),
+          el("td", { class: "n" }, f.decades_of_range)
+        ]));
+      });
+      m.appendChild(el("div", { class: "scrollx" }, [
+        el("table", { class: "data" }, [
+          el("thead", {}, el("tr", {}, [
+            el("th", {}, "format"), el("th", {}, "bytes"), el("th", {}, "bits"),
+            el("th", {}, "exp bits"), el("th", {}, "mantissa bits"), el("th", {}, "bias"),
+            el("th", {}, "max finite"), el("th", {}, "min normal"), el("th", {}, "min subnormal"),
+            el("th", {}, "epsilon"), el("th", {}, "decimal digits"), el("th", {}, "decades")
+          ])),
+          body
+        ])
+      ]));
+      m.appendChild(el("p", { class: "small", html:
+        "Two columns carry the whole story. <b>Decades</b> is how many powers of ten the " +
+        "format can name, and it is set by the exponent field: fp32 and bf16 both span " +
+        "<b>" + FMT.fp32.decades_of_range + "</b>, fp16 spans <b>" + FMT.fp16.decades_of_range +
+        "</b>. <b>Decimal digits</b> is how much of a value survives, and it is set by the " +
+        "mantissa: fp32 keeps " + FMT.fp32.decimal_digits + ", fp16 keeps " +
+        FMT.fp16.decimal_digits + ", bf16 keeps " + FMT.bf16.decimal_digits + ". bf16 is the " +
+        "format that gives up digits to keep decades. fp16 does the opposite." }));
+    })();
+
+    /* --- static: range comparison --- */
+    m.appendChild(NN.chart.bars({
+      items: DTYPES.map(function (name) {
+        return {
+          label: name + "  ·  " + FMT[name].exponent_bits + " exponent bits",
+          value: FMT[name].decades_of_range,
+          color: name === "fp16" ? "var(--gradient)"
+               : name === "bf16" ? "var(--activation)" : "var(--weight)",
+          sub: NN.fmt(FMT[name].min_normal, 2) + " … " + NN.fmt(FMT[name].max_finite, 2)
+        };
+      }),
+      unit: "decades of range"
+    }));
+
+    /* --- static: the three traced failures --- */
+    function relErr(bv, dd) {
+      if (bv.value === 0 || !hasValue(dd)) return NaN;
+      return Math.abs((dd.exact - bv.value) / bv.value);
+    }
+    function relTxt(bv, dd) {
+      const r = relErr(bv, dd);
+      return isFinite(r) ? NN.fmt(r, 6) : "–";
+    }
+    (function failTable() {
+      m.appendChild(el("h3", {}, "Three values that break fp16, taken from the trace"));
+      const body = el("tbody", {});
+      FAILS.forEach(function (o) {
+        const bv = o.b;
+        const tr = el("tr", { style: { cursor: "pointer" } }, [
+          el("td", {}, bv.label),
+          el("td", { class: "n" }, showVal(bv.value, 6)),
+          el("td", { class: "n v-activation" }, storedTxt(bv.bf16, 6)),
+          el("td", { class: "n v-activation" }, relTxt(bv, bv.bf16)),
+          el("td", { class: "n v-gradient" }, storedTxt(bv.fp16, 6)),
+          el("td", { class: "n v-gradient" }, relTxt(bv, bv.fp16)),
+          el("td", { class: "n" }, [el("span", { class: "statusbadge st-" + bv.fp16.status }, bv.fp16.status)])
+        ]);
+        tr.addEventListener("click", function () { vi = o.i; render(); card.scrollIntoView({ block: "center" }); });
+        body.appendChild(tr);
+        const why = el("tr", {}, [
+          el("td", { colspan: "7", class: "whycell", style: { textAlign: "left" } }, bv.why)
+        ]);
+        body.appendChild(why);
+      });
+      m.appendChild(el("div", { class: "scrollx" }, [
+        el("table", { class: "data" }, [
+          el("thead", {}, el("tr", {}, [
+            el("th", {}, "value"), el("th", {}, "requested"),
+            el("th", {}, "bf16 stores"), el("th", {}, "bf16 rel err"),
+            el("th", {}, "fp16 stores"), el("th", {}, "fp16 rel err"),
+            el("th", {}, "fp16 status")
+          ])),
+          body
+        ])
+      ]));
+      m.appendChild(el("p", { class: "small muted" },
+        "The stored-value columns are rounded for display and hide the difference; the " +
+        "relative-error columns are the honest comparison. Click any row to load it into " +
+        "the inspector above."));
+    })();
+
+    /* --- the callout, built from those traced values --- */
+    (function lossScaling() {
+      const tiny  = FAILS.filter(function (o) { return o.b.fp16.status === "underflow"; })[0];
+      const small = FAILS.filter(function (o) { return o.b.fp16.status === "subnormal"; })[0];
+      const big   = FAILS.filter(function (o) { return o.b.fp16.status === "overflow"; })[0];
+      const parts = [];
+
+      parts.push("<p>bf16 and fp32 have the <b>same " + FMT.bf16.exponent_bits +
+        " exponent bits and the same bias " + FMT.bf16.bias + "</b>, so they cover the same " +
+        FMT.bf16.decades_of_range + " decades. Casting fp32 to bf16 costs precision (" +
+        FMT.fp32.decimal_digits + " decimal digits down to " + FMT.bf16.decimal_digits +
+        ") and nothing else: no value that was finite becomes infinite, and no value that " +
+        "was non-zero becomes zero. fp16 has " + FMT.fp16.exponent_bits + " exponent bits and " +
+        FMT.fp16.decades_of_range + " decades, and that is where training breaks. Three " +
+        "traced values, three different failures:</p>");
+
+      if (tiny) parts.push("<p class='mono small'>" + tiny.b.label + " = " +
+        showVal(tiny.b.value, 6) + " &nbsp;→&nbsp; bf16 <b>" + storedTxt(tiny.b.bf16, 6) +
+        "</b> &nbsp;·&nbsp; fp16 <b>" + storedTxt(tiny.b.fp16, 6) + "</b> (" +
+        tiny.b.fp16.status + ")</p><p>" + tiny.b.why + " It is below fp16's smallest " +
+        "subnormal, " + NN.fmt(FMT.fp16.min_subnormal, 3) + ", so there is no bit pattern " +
+        "left to round to. The gradient does not get small; it ceases to exist, and the " +
+        "parameter it belonged to stops moving.</p>");
+
+      if (small) parts.push("<p class='mono small'>" + small.b.label + " = " +
+        showVal(small.b.value, 6) + " &nbsp;→&nbsp; bf16 <b>" + storedTxt(small.b.bf16, 6) +
+        "</b> &nbsp;·&nbsp; fp16 <b>" + storedTxt(small.b.fp16, 6) + "</b> (" +
+        small.b.fp16.status + ")</p><p>" + small.b.why + " Read that carefully, because the " +
+        "table above does not say what you might expect: fp16's relative error here (" +
+        NN.fmt(relErr(small.b, small.b.fp16), 6) + ") is still <em>smaller</em> than bf16's (" +
+        NN.fmt(relErr(small.b, small.b.bf16), 6) + "). fp16 has " +
+        (FMT.fp16.mantissa_bits - FMT.bf16.mantissa_bits) + " more mantissa bits, and this " +
+        "value has only just crossed below " + NN.fmt(FMT.fp16.min_normal, 3) + ". What has " +
+        "changed is the <b>rule</b>. Below min normal there is no implicit leading 1, and the " +
+        "step between neighbours stops scaling with the value: it is frozen at " +
+        NN.fmt(FMT.fp16.min_subnormal, 3) + ", which at this magnitude is " +
+        NN.fmt(FMT.fp16.min_subnormal / small.b.value, 5) + " of the value — already " +
+        NN.fmt((FMT.fp16.min_subnormal / small.b.value) / FMT.fp16.epsilon, 1) +
+        "× coarser than the " + NN.fmt(FMT.fp16.epsilon, 4) + " relative step fp16 gives a " +
+        "normal number. Ten times smaller, and it is ten times coarser again. That slide ends " +
+        "at the row above it. bf16 never enters the slide at all: its relative error stays " +
+        "bounded by its epsilon, " + NN.fmt(FMT.bf16.epsilon, 4) + ", across all " +
+        FMT.bf16.decades_of_range + " decades. Bounded-but-coarse beats fine-until-it-isn't " +
+        "when the thing you are storing is a gradient whose magnitude you did not choose. " +
+        "Select this value above and look at the exponent field — it is all zeros.</p>");
+
+      if (big) parts.push("<p class='mono small'>" + big.b.label + " = " +
+        showVal(big.b.value, 6) + " &nbsp;→&nbsp; bf16 <b>" + storedTxt(big.b.bf16, 6) +
+        "</b> &nbsp;·&nbsp; fp16 <b>" + storedTxt(big.b.fp16, 6) + "</b> (" +
+        big.b.fp16.status + ")</p><p>" + big.b.why + " There is no bit pattern; the inspector " +
+        "has nothing to draw. One infinity in an activation poisons the loss, then every " +
+        "gradient behind it.</p>");
+
+      parts.push("<p>Loss scaling exists to move the first two problems out of the way. " +
+        "Multiply the loss by a large constant before <code>backward()</code> and every " +
+        "gradient in the graph is multiplied by it too, lifting values like " +
+        (tiny ? showVal(tiny.b.value, 6) : "the smallest ones") + " up into fp16's " +
+        FMT.fp16.decades_of_range + "-decade window; divide it back out before the optimizer " +
+        "step. The scale has to be tuned, and dynamic loss scaling spends steps backing off " +
+        "whenever it pushes something past " + NN.fmt(FMT.fp16.max_finite, 3) +
+        " into the third failure. That entire machine — the scaler, the overflow checks, the " +
+        "skipped steps — buys back " + (FMT.fp32.exponent_bits - FMT.fp16.exponent_bits) +
+        " exponent bits. bf16 never gives them up, which is why it is what large-model " +
+        "training uses now, and why it is worth losing " +
+        NN.fmt(FMT.fp16.decimal_digits - FMT.bf16.decimal_digits, 2) +
+        " decimal digits to get it.</p>");
+
+      m.appendChild(NN.callout("key",
+        "Why fp16 needs loss scaling and bf16 does not", parts.join("")));
+    })();
+
+    /* --- render the inspector --- */
+    function render() {
+      const bv = T.bitviews[vi];
+      const d  = bv[dt];
+      const f  = FMT[dt];
+      const REP = d.bits !== null && d.bits !== undefined;
+
+      valBtns.forEach(function (b, i) { b.setAttribute("aria-pressed", i === vi ? "true" : "false"); });
+      dtBtns.forEach(function (b, i) { b.setAttribute("aria-pressed", DTYPES[i] === dt ? "true" : "false"); });
+
+      const st = statusOf(d, bv);
+      whyLine.innerHTML = "<b>" + bv.label + "</b> — " + (bv.why || "");
+
+      cardHead.innerHTML =
+        "<b class='mono'>" + bv.label + "</b> as <b class='mono'>" + d.dtype + "</b> — " +
+        f.bytes + " bytes, " + (1 + f.exponent_bits + f.mantissa_bits) +
+        " bits, laid out sign · exponent · mantissa &nbsp; " +
+        "<span class='statusbadge st-" + st + "'>" + st + "</span>";
+
+      /* --- the ribbon, or an explicit "no such bit pattern" --- */
+      ribHost.innerHTML = "";
+      barHost.innerHTML = "";
+      keyHost.innerHTML = "";
+
+      if (!REP) {
+        ribHost.appendChild(el("div", { class: "norep" }, [
+          el("div", { class: "norepbig" }, "cannot be represented"),
+          el("div", { class: "small" },
+            bv.label + " = " + showVal(bv.value, 6) + " is beyond " + d.dtype +
+            "'s largest finite value, " + NN.fmt(f.max_finite, 3) +
+            ". The hardware does not round it — it stores " + storedTxt(d) +
+            ", the exponent field saturates to all-ones, and there is no mantissa left " +
+            "to inspect. The trace records the bit fields as null for exactly this reason.")
+        ]));
+      } else {
+        const rib = NN.bitribbon(d);
+        ribHost.appendChild(rib);
+
+        const E = f.exponent_bits, M = f.mantissa_bits;
+        const eraw = parseInt(d.exponent, 2);
+        const sub = eraw === 0;
+
+        /* per-bit hover explanation */
+        NN.$$(".bit", rib).forEach(function (b, i) {
+          let html;
+          const isOn = b.textContent === "1";
+          if (i === 0) {
+            html = "<b>sign bit</b><br>" + (isOn ? "1 → negative" : "0 → positive");
+          } else if (i <= E) {
+            const k = i - 1;
+            html = "<b>exponent bit " + k + "</b><br>place value " + Math.pow(2, E - 1 - k) +
+                   "<br>field = " + d.exponent + " = " + eraw +
+                   "<br>" + (sub ? "all zeros → subnormal, exponent pinned at 1 − " + f.bias
+                                 : "unbiased = " + eraw + " − " + f.bias + " = " + (eraw - f.bias));
+          } else {
+            const k = i - 1 - E;
+            html = "<b>mantissa bit " + k + "</b><br>place value 2<sup>−" + (k + 1) + "</sup> = " +
+                   NN.fmt(Math.pow(2, -(k + 1)), 8) +
+                   "<br>" + (isOn ? "set — it contributes" : "clear — contributes nothing");
+          }
+          b.addEventListener("mouseenter", function (e) { NN.tip.show(html, e.clientX, e.clientY); });
+          b.addEventListener("mousemove",  function (e) { NN.tip.show(html, e.clientX, e.clientY); });
+          b.addEventListener("mouseleave", function () { NN.tip.hide(); });
+        });
+
+        /* field bars, pixel-aligned with the ribbon (.bit is 17px, gap 2px) */
+        const W = function (n) { return (19 * n - 2) + "px"; };
+        barHost.appendChild(el("div", { class: "fbar s", style: { width: W(1) } }));
+        barHost.appendChild(el("div", { class: "fbar e", style: { width: W(E) } }));
+        barHost.appendChild(el("div", { class: "fbar m", style: { width: W(M) } }));
+
+        keyHost.innerHTML =
+          "<span><span class='fbar s' style='display:inline-block;width:14px;vertical-align:middle'></span> " +
+          "<b>sign</b> 1 bit</span>" +
+          "<span><span class='fbar e' style='display:inline-block;width:14px;vertical-align:middle'></span> " +
+          "<b>exponent</b> " + E + " bits → " + f.decades_of_range + " decades of range</span>" +
+          "<span><span class='fbar m' style='display:inline-block;width:14px;vertical-align:middle'></span> " +
+          "<b>mantissa</b> " + M + " bits → " + f.decimal_digits + " decimal digits</span>";
+      }
+
+      /* --- the decode, done from the bits themselves --- */
+      decodeHost.innerHTML = "";
+      if (REP) {
+        const E = f.exponent_bits, M = f.mantissa_bits;
+        const eraw = parseInt(d.exponent, 2);
+        const sub = eraw === 0;
+        const frac = d.mantissa.split("").reduce(function (a, b, i) {
+          return a + (b === "1" ? Math.pow(2, -(i + 1)) : 0);
+        }, 0);
+        const e = sub ? 1 - f.bias : eraw - f.bias;
+        const sig = (sub ? 0 : 1) + frac;
+        const ulp = sub ? f.min_subnormal : Math.pow(2, e - M);
+
+        decodeHost.appendChild(NN.formula({
+          rule: sub
+            ? "value = (−1)" + sup("sign") + " × 2" + sup("(1 − bias)") + " × 0.mantissa" +
+              " &nbsp;&nbsp;<span class='muted'>subnormal: exponent field is all zeros, " +
+              "so there is no implicit leading 1</span>"
+            : "value = (−1)" + sup("sign") + " × 2" + sup("(exponent − bias)") + " × 1.mantissa",
+          sub: "(−1)" + sup(d.sign) + " × 2" + sup(sub ? "(1 − " + f.bias + ")"
+                                                      : "(" + eraw + " − " + f.bias + ")") +
+               " × " + NN.fmt(sig, 10),
+          result: showVal((d.sign === "1" ? -1 : 1) * sig * Math.pow(2, e)),
+          cls: "weight"
+        }));
+
+        const err = d.exact - bv.value;
+        const rel = bv.value === 0 ? 0 : Math.abs(err / bv.value);
+        tileHost.innerHTML = "";
+        tileHost.appendChild(NN.tiles([
+          { k: "requested", v: showVal(bv.value), s: "the value in the trace" },
+          { k: "stored as " + d.dtype, v: storedTxt(d), cls: "weight",
+            s: f.bytes + " bytes in HBM · " + st },
+          { k: "rounding error", v: err === 0 ? "0" : NN.fmtSigned(err, 10),
+            s: err === 0 ? "exactly representable"
+                         : (rel === 1 ? "the value is gone entirely" : "relative " + NN.fmt(rel, 8)) },
+          { k: "gap to next value (ulp)", v: NN.fmt(ulp, 10),
+            s: sub ? "the subnormal step, " + d.dtype + "'s absolute floor"
+                   : "2^(" + e + " − " + M + ") at this magnitude" }
+        ]));
+      } else {
+        decodeHost.appendChild(NN.formula({
+          rule: "value = (−1)" + sup("sign") + " × 2" + sup("(exponent − bias)") + " × 1.mantissa",
+          sub: "no exponent field of " + f.exponent_bits + " bits can reach 2" +
+               sup(Math.floor(Math.log2(bv.value))) + " &nbsp;(the largest it can name is " +
+               NN.fmt(f.max_finite, 3) + ")",
+          result: storedTxt(d),
+          cls: "gradient"
+        }));
+        tileHost.innerHTML = "";
+        tileHost.appendChild(NN.tiles([
+          { k: "requested", v: showVal(bv.value), s: "the value in the trace" },
+          { k: "stored as " + d.dtype, v: storedTxt(d), cls: "gradient",
+            s: f.bytes + " bytes in HBM · " + st },
+          { k: "rounding error", v: "not a rounding",
+            s: "the value left the format; the trace stores no finite result" },
+          { k: d.dtype + " max finite", v: NN.fmt(f.max_finite, 3),
+            s: "anything larger saturates to " + storedTxt(d) }
+        ]));
+      }
+
+      /* --- this value in all three formats --- */
+      cmpHost.innerHTML = "";
+      const body = el("tbody", {});
+      DTYPES.forEach(function (name) {
+        const dd = bv[name], ff = FMT[name];
+        const e2 = hasValue(dd) ? dd.exact - bv.value : NaN;
+        const s2 = statusOf(dd, bv);
+        const tr = el("tr", { class: name === dt ? "hi" : "", style: { cursor: "pointer" } }, [
+          el("td", {}, name),
+          el("td", { class: "n" }, ff.bytes),
+          el("td", { class: "n" }, storedTxt(dd)),
+          el("td", { class: "n" }, !isFinite(e2) ? "–" : (e2 === 0 ? "0" : NN.fmtSigned(e2, 9))),
+          el("td", { class: "n" }, (!isFinite(e2) || bv.value === 0) ? "–"
+            : NN.fmt(Math.abs(e2 / bv.value), 6)),
+          el("td", { class: "n" }, [el("span", { class: "statusbadge st-" + s2 }, s2)])
+        ]);
+        tr.addEventListener("click", function () { dt = name; render(); });
+        body.appendChild(tr);
+      });
+      cmpHost.appendChild(el("table", { class: "data" }, [
+        el("thead", {}, el("tr", {}, [
+          el("th", {}, "format"), el("th", {}, "bytes"), el("th", {}, "stored value"),
+          el("th", {}, "absolute error"), el("th", {}, "relative error"), el("th", {}, "status")
+        ])),
+        body
+      ]));
+
+      /* --- bf16 as a slice of the fp32 word --- */
+      const f32 = bv.fp32, b16 = bv.bf16, f16 = bv.fp16;
+      const keep = 1 + FMT.bf16.exponent_bits + FMT.bf16.mantissa_bits;
+      const prefix = f32.bits.slice(0, keep);
+      const pureTruncation = prefix === b16.bits;
+
+      truncHost.innerHTML = "";
+      truncHost.appendChild(el("h3", {}, "Why bf16 is a cast and fp16 is a conversion"));
+      truncHost.appendChild(el("p", { class: "small", html:
+        "The fp32 word below is greyed from bit " + keep + " onward. What is left is " +
+        "the bf16 word: <b>the top " + keep + " bits of the fp32 pattern</b>. The " +
+        "exponent field is bit-identical (" + FMT.bf16.exponent_bits + " bits, bias " +
+        FMT.bf16.bias + ", in both), so the represented magnitude cannot change &mdash; only " +
+        "the last " + (FMT.fp32.mantissa_bits - FMT.bf16.mantissa_bits) +
+        " mantissa bits are gone." }));
+
+      const trib = el("div", { class: "bitwrap" });
+      trib.appendChild(NN.bitribbon(f32, keep));
+      truncHost.appendChild(trib);
+      truncHost.appendChild(el("div", { class: "small mono muted", style: { marginTop: "6px" } },
+        "fp32 kept prefix  " + prefix));
+      truncHost.appendChild(el("div", { class: "small mono", style: { marginBottom: "10px" } },
+        "bf16 stored word  " + b16.bits +
+        (pureTruncation ? "   ← identical: a pure truncation for this value"
+                        : "   ← differs: round-to-nearest carried into the last kept bit")));
+
+      if (f16.bits) {
+        truncHost.appendChild(el("p", { class: "small", html:
+          "fp16 is not a slice of anything. Its exponent field is " + FMT.fp16.exponent_bits +
+          " bits with bias " + FMT.fp16.bias + ", against fp32's " + FMT.fp32.exponent_bits +
+          " bits with bias " + FMT.fp32.bias + ", so every value has to be re-biased: " +
+          "<span class='mono'>" + f32.exponent + "</span> (" + parseInt(f32.exponent, 2) +
+          ") becomes <span class='mono'>" + f16.exponent + "</span> (" +
+          parseInt(f16.exponent, 2) + "). It buys " +
+          (FMT.fp16.mantissa_bits - FMT.bf16.mantissa_bits) + " more mantissa bits than bf16 " +
+          "and pays for them with " + (FMT.fp32.exponent_bits - FMT.fp16.exponent_bits) +
+          " exponent bits." }));
+      } else {
+        truncHost.appendChild(el("p", { class: "small", html:
+          "fp16 is not a slice of anything, and for this value the re-biasing has nowhere to " +
+          "go: the fp32 exponent field <span class='mono'>" + f32.exponent + "</span> (" +
+          parseInt(f32.exponent, 2) + ", meaning 2<sup>" +
+          (parseInt(f32.exponent, 2) - FMT.fp32.bias) + "</sup>) is larger than anything " +
+          FMT.fp16.exponent_bits + " bits with bias " + FMT.fp16.bias + " can encode. " +
+          "bf16 stores it without complaint, because bf16 <em>is</em> that exponent field. " +
+          "That is the whole argument for bf16 in one value." }));
+      }
+    }
+
+    render();
+  })();
+
+  /* ======================================================= 2 · layout */
+  (function buildLayout() {
+    const m = NN.$("#layoutMount");
+    const L = T.layout;
+    const cells = L.cells;
+    const nr = L.shape[0], nc = L.shape[1];
+    const nbytes = cells.length * BPE;
+
+    let transposed = false;
+    let pinned = null;      /* flat index pinned by click / stepper */
+    let hovered = null;
+
+    /* --- strides panel --- */
+    const strideRow = el("div", {});
+    function strideBox(k, v) {
+      return el("div", { class: "stridebox" }, [
+        el("div", { class: "k" }, k), el("div", {}, v)
+      ]);
+    }
+    m.appendChild(strideRow);
+
+    /* --- grids --- */
+    const gridHost = el("div", {});
+    const gridNormal = NN.tensor({
+      name: L.tensor, shape: L.shape, cls: "weight", digits: 3,
+      values: (function () {
+        const r = [];
+        for (let i = 0; i < nr; i++) {
+          const row = [];
+          for (let j = 0; j < nc; j++) row.push(cells[i * nc + j].value);
+          r.push(row);
+        }
+        return r;
+      })(),
+      note: L.order
+    });
+    const gridT = NN.tensor({
+      name: L.tensor + "ᵀ", shape: [nc, nr], cls: "weight", digits: 3,
+      values: (function () {
+        const r = [];
+        for (let j = 0; j < nc; j++) {
+          const row = [];
+          for (let i = 0; i < nr; i++) row.push(cells[i * nc + j].value);
+          r.push(row);
+        }
+        return r;
+      })(),
+      note: "same bytes, swapped strides"
+    });
+    gridHost.appendChild(gridNormal);
+    gridHost.appendChild(gridT);
+    gridT.classList.add("hidden");
+
+    /* map a flat buffer index to the [r,c] shown by the current view */
+    function rcOf(flat) {
+      const row = cells[flat].row, col = cells[flat].col;
+      return transposed ? [col, row] : [row, col];
+    }
+
+    [[gridNormal, false], [gridT, true]].forEach(function (pair) {
+      const g = pair[0];
+      g.cells.forEach(function (row, i) {
+        row.forEach(function (c, j) {
+          c.style.cursor = "pointer";
+          c.addEventListener("mouseenter", function () {
+            hovered = (pair[1] ? j * nc + i : i * nc + j); paint();
+          });
+          c.addEventListener("click", function () {
+            const f = (pair[1] ? j * nc + i : i * nc + j);
+            pinned = (pinned === f) ? null : f; paint();
+          });
+        });
+      });
+      g.addEventListener("mouseleave", function () { hovered = null; paint(); });
+    });
+
+    /* --- byte ribbon --- */
+    const ribbon = el("div", { class: "ribbon" });
+    const words = cells.map(function (c) {
+      const bytes = f32bytes(c.value);
+      const boxes = bytes.map(function (b, k) {
+        return el("div", { class: "bytebox" }, [
+          el("div", { class: "bytehex" }, hex2(b)),
+          el("div", { class: "byteoff" }, String(c.byte_offset + k))
+        ]);
+      });
+      const w = el("div", {
+        class: "word", "data-flat": c.flat_index,
+        title: L.tensor + "[" + c.row + "][" + c.col + "] = " + c.value +
+               "  @ byte " + c.byte_offset
+      }, [
+        el("div", { class: "wbytes" }, boxes),
+        el("div", { class: "wmeta" },
+          "0x" + bytes.slice().reverse().map(hex2).join("").toUpperCase()),
+        el("div", { class: "wmeta" },
+          "[" + c.row + "][" + c.col + "] = " + NN.fmt(c.value, 3))
+      ]);
+      w.addEventListener("mouseenter", function () { hovered = c.flat_index; paint(); });
+      w.addEventListener("click", function () {
+        pinned = (pinned === c.flat_index) ? null : c.flat_index; paint();
+      });
+      ribbon.appendChild(w);
+      return w;
+    });
+    ribbon.addEventListener("mouseleave", function () { hovered = null; paint(); });
+
+    /* --- layout of the two halves --- */
+    const left = el("div", {}, [
+      el("div", { class: "small muted", style: { marginBottom: "6px" } },
+        "logical view — what your code indexes"),
+      gridHost
+    ]);
+    const right = el("div", { style: { flex: "1 1 420px", minWidth: "0" } }, [
+      el("div", { class: "small muted", style: { marginBottom: "6px" } },
+        "physical view — " + nbytes + " contiguous bytes in HBM"),
+      el("div", { class: "scrollx" }, [ribbon]),
+      el("div", { class: "addrline" },
+        "byte offset 0 … " + (nbytes - 1) + " · each box is one byte, hex, " +
+        "little-endian within its " + BPE + "-byte word (the label under each group " +
+        "is the same word read big-endian, the way you would write the hex constant)")
+    ]);
+    m.appendChild(el("div", { class: "sidebyside" }, [left, right]));
+
+    /* --- live index arithmetic --- */
+    const formHost = el("div", {});
+    m.appendChild(formHost);
+
+    /* --- controls --- */
+    const ctl = el("div", { class: "controls" });
+    const tBtn = el("button", { class: "btn", type: "button" }, "Transpose  (.T)");
+    tBtn.addEventListener("click", function () {
+      transposed = !transposed;
+      tBtn.textContent = transposed ? "Undo transpose" : "Transpose  (.T)";
+      tBtn.classList.toggle("primary", transposed);
+      gridNormal.classList.toggle("hidden", transposed);
+      gridT.classList.toggle("hidden", !transposed);
+      paint();
+    });
+    ctl.appendChild(tBtn);
+    ctl.appendChild(el("span", { class: "small muted" },
+      "the byte ribbon does not move when you press this"));
+    m.appendChild(ctl);
+
+    const stepHost = el("div", {});
+    m.appendChild(stepHost);
+    new NN.Stepper({
+      mount: stepHost,
+      count: cells.length,
+      labels: cells.map(function (c) {
+        return "flat " + c.flat_index + " → byte " + c.byte_offset;
+      }),
+      autoplayMs: 900,
+      onStep: function (i) { pinned = i; hovered = null; paint(); }
+    });
+
+    /* --- the painter, single source of truth --- */
+    function paint() {
+      const active = hovered !== null ? hovered : pinned;
+      const g = transposed ? gridT : gridNormal;
+
+      /* strides panel */
+      const sE = transposed ? [L.strides_elements[1], L.strides_elements[0]] : L.strides_elements;
+      const sB = transposed ? [L.strides_bytes_fp32[1], L.strides_bytes_fp32[0]] : L.strides_bytes_fp32;
+      const shp = transposed ? [nc, nr] : L.shape;
+      strideRow.innerHTML = "";
+      strideRow.appendChild(strideBox("tensor", L.tensor + (transposed ? "ᵀ" : "")));
+      strideRow.appendChild(strideBox("shape", "(" + shp.join(", ") + ")"));
+      strideRow.appendChild(strideBox("strides (elements)", "(" + sE.join(", ") + ")"));
+      strideRow.appendChild(strideBox("strides (bytes, fp32)", "(" + sB.join(", ") + ")"));
+      strideRow.appendChild(strideBox("buffer", cells.length + " elements · " + nbytes + " bytes"));
+
+      /* grid + ribbon highlight */
+      (transposed ? gridNormal : gridT).highlight(null);   /* the hidden view */
+      if (active === null) {
+        g.highlight(null);
+        words.forEach(function (w) { w.classList.remove("hot", "dimmed"); });
+      } else {
+        const rc = rcOf(active);
+        g.highlight([rc], true);
+        words.forEach(function (w, k) {
+          w.classList.toggle("hot", k === active);
+          w.classList.toggle("dimmed", k !== active);
+        });
+      }
+
+      /* index arithmetic */
+      formHost.innerHTML = "";
+      if (active === null) {
+        formHost.appendChild(NN.formula({
+          rule: "offset<sub>elements</sub> = i × stride" + sup(0) + " + j × stride" + sup(1),
+          sub: "i × " + sE[0] + " + j × " + sE[1] +
+               "  &nbsp;&nbsp;(hover a cell or a byte group to substitute)",
+          cls: "weight"
+        }));
+      } else {
+        const c = cells[active];
+        const rc = rcOf(active);
+        const nm = L.tensor + (transposed ? "ᵀ" : "");
+        formHost.appendChild(NN.formula({
+          rule: nm + "[" + rc[0] + "][" + rc[1] + "] &nbsp; → &nbsp; " +
+                "offset<sub>elements</sub> = i × " + sE[0] + " + j × " + sE[1],
+          sub: rc[0] + " × " + sE[0] + " + " + rc[1] + " × " + sE[1] +
+               " = " + c.flat_index + "  &nbsp;→&nbsp; byte offset = " +
+               c.flat_index + " × " + BPE + " bytes",
+          result: "byte " + c.byte_offset + " … " + (c.byte_offset + BPE - 1) +
+                  "  =  " + NN.fmt(c.value, 6),
+          cls: "weight"
+        }));
+      }
+    }
+
+    paint();
+
+    m.appendChild(NN.callout("why", "Why .T is free",
+      "Transposing does not touch a single byte. It writes a new shape " +
+      "(" + L.shape.join(", ") + ") → (" + [nc, nr].join(", ") + ") and a new stride tuple " +
+      "(" + L.strides_elements.join(", ") + ") → " +
+      "(" + [L.strides_elements[1], L.strides_elements[0]].join(", ") + ") into the tensor's " +
+      "metadata, and hands back a <em>view</em> onto the same " + nbytes + " bytes. " +
+      "Press the transpose button and watch: the grid re-labels itself, the ribbon is " +
+      "unchanged, and every cell still resolves to the byte offset it always had. " +
+      "The cost shows up later, not here — the transposed view is no longer contiguous " +
+      "(walking a row now jumps " + L.strides_bytes_fp32[0] + " bytes at a time instead of " +
+      L.strides_bytes_fp32[1] + "), so a kernel that wants coalesced loads will call " +
+      "<code>.contiguous()</code> and pay for a real copy of all " + nbytes + " bytes. " +
+      "That is the whole trade: metadata is free, locality is not."));
+  })();
+
+  /* ======================================================= 3 · memory */
+  (function buildMemory() {
+    const m = NN.$("#memMount");
+    const P = T.memory.per_tensor;
+    const ORDER = ["weight", "gradient", "activation", "optimizer"];
+
+    /* per-class rollups come from the trace; only the row list is filtered here */
+    const BY = T.memory.by_class;
+    const byClass = {};
+    ORDER.forEach(function (c) { byClass[c] = P.filter(function (t) { return t.cls === c; }); });
+    const elemsOf = function (c) { return BY[c].elements; };
+    const bytesOf = function (c) { return BY[c].bytes_fp32; };
+    const totalElems = T.memory.total_elements;
+    const totalBytes = T.memory.total_bytes_fp32;
+
+    /* Gradients split in two, by the role the trace assigns each tensor:
+       param_grad persists to the optimizer step and pairs 1:1 with a parameter
+       (named by .of); node_grad is a transient the chain rule drops on the way. */
+    const paramGrads = byClass.gradient.filter(function (t) { return t.role === "param_grad"; });
+    const nodeGrads  = byClass.gradient.filter(function (t) { return t.role === "node_grad"; });
+    const paramGradElems = T.memory.param_gradient_elements;
+    const nodeGradElems  = T.memory.node_gradient_elements;
+
+    m.appendChild(NN.legend(ORDER));
+    m.appendChild(el("p", { class: "small muted", html:
+      "Lifetimes: " + ORDER.map(function (c) {
+        return "<b>" + NN.CLASSES[c].label + "</b> " + NN.CLASSES[c].life;
+      }).join(" · ") + "." }));
+
+    /* --- table --- */
+    const body = el("tbody", {});
+    const rowsByClass = {};
+    ORDER.forEach(function (c) {
+      rowsByClass[c] = [];
+      const head = el("tr", {}, [
+        el("td", { colspan: "4", style: { paddingTop: "14px" } }, [NN.chip(c)])
+      ]);
+      head.dataset.cls = c;
+      body.appendChild(head);
+      rowsByClass[c].push(head);
+
+      byClass[c].forEach(function (t) {
+        const tr = el("tr", {}, [
+          el("td", {}, t.name),
+          el("td", { class: "n" }, "(" + t.shape.join("×") + ")"),
+          el("td", { class: "n" }, t.elements),
+          el("td", { class: "n" }, t.elements * BPE)
+        ]);
+        tr.dataset.cls = c;
+        body.appendChild(tr);
+        rowsByClass[c].push(tr);
+      });
+
+      const sub = el("tr", { style: { fontWeight: "700" } }, [
+        el("td", { class: "v-" + c }, "subtotal"),
+        el("td", { class: "n muted" }, BY[c].tensors + " tensors"),
+        el("td", { class: "n v-" + c }, elemsOf(c)),
+        el("td", { class: "n v-" + c }, bytesOf(c))
+      ]);
+      sub.dataset.cls = c;
+      body.appendChild(sub);
+      rowsByClass[c].push(sub);
+    });
+    body.appendChild(el("tr", { style: { fontWeight: "700" } }, [
+      el("td", { style: { paddingTop: "14px" } }, "TOTAL"),
+      el("td", { class: "n muted", style: { paddingTop: "14px" } }, P.length + " tensors"),
+      el("td", { class: "n", style: { paddingTop: "14px" } }, totalElems),
+      el("td", { class: "n", style: { paddingTop: "14px" } }, totalBytes)
+    ]));
+
+    m.appendChild(el("div", { class: "scrollx" }, [
+      el("table", { class: "data" }, [
+        el("thead", {}, el("tr", {}, [
+          el("th", {}, "tensor"), el("th", {}, "shape"),
+          el("th", {}, "elements"), el("th", {}, "bytes @ fp32")
+        ])),
+        body
+      ])
+    ]));
+
+    /* --- strip --- */
+    m.appendChild(el("h3", {}, "The whole model, to scale, in fp32 bytes"));
+
+    const segs = ORDER.map(function (c) {
+      return { cls: c, bytes: bytesOf(c), label: NN.CLASSES[c].label + " " + bytesOf(c) + " B" };
+    });
+    const strip = NN.memstrip(segs, totalBytes);
+    const freeSeg = el("div", {
+      class: "memseg free", style: { flexGrow: "0" }, title: "excluded"
+    }, "");
+    strip.appendChild(freeSeg);
+    m.appendChild(strip);
+
+    const stripSegs = {};
+    ORDER.forEach(function (c, i) { stripSegs[c] = strip.children[i]; });
+
+    /* row hover ↔ segment emphasis */
+    ORDER.forEach(function (c) {
+      rowsByClass[c].forEach(function (tr) {
+        tr.addEventListener("mouseenter", function () {
+          ORDER.forEach(function (o) { stripSegs[o].style.opacity = o === c ? "1" : ".3"; });
+          rowsByClass[c].forEach(function (r) { r.classList.add("on"); });
+        });
+        tr.addEventListener("mouseleave", function () {
+          ORDER.forEach(function (o) { stripSegs[o].style.opacity = "1"; });
+          rowsByClass[c].forEach(function (r) { r.classList.remove("on"); });
+        });
+      });
+    });
+
+    /* --- include / exclude toggles --- */
+    const on = { weight: true, gradient: true, activation: true, optimizer: true };
+    const readout = el("div", { class: "small mono", style: { marginTop: "8px" } });
+    const toggles = el("div", { class: "picker" }, [
+      el("span", { class: "pickerlabel" }, "counted")
+    ]);
+    const cssKey = { weight: "cw", gradient: "cg", activation: "ca", optimizer: "co" };
+    ORDER.forEach(function (c) {
+      const b = el("button", {
+        class: "pill " + cssKey[c], type: "button", "aria-pressed": "true"
+      }, NN.CLASSES[c].glyph + " " + NN.CLASSES[c].label + "  " + bytesOf(c) + " B");
+      b.addEventListener("click", function () {
+        on[c] = !on[c];
+        b.setAttribute("aria-pressed", on[c] ? "true" : "false");
+        recount();
+      });
+      toggles.appendChild(b);
+    });
+    m.appendChild(toggles);
+    m.appendChild(readout);
+
+    function recount() {
+      let used = 0, dropped = 0;
+      ORDER.forEach(function (c) {
+        const b = bytesOf(c);
+        stripSegs[c].style.flexGrow = on[c] ? String(b) : "0";
+        if (on[c]) used += b; else dropped += b;
+      });
+      freeSeg.style.flexGrow = String(dropped);
+      freeSeg.textContent = dropped / totalBytes > 0.07 ? "not resident " + dropped + " B" : "";
+      const offList = ORDER.filter(function (c) { return !on[c]; });
+      readout.innerHTML =
+        "counted <b>" + used + " B</b> of <b>" + totalBytes + " B</b>  (" +
+        NN.fmt(used / totalBytes * 100, 1) + "% )" +
+        (offList.length
+          ? "  —  " + dropped + " B freed by dropping " +
+            offList.map(function (c) { return NN.CLASSES[c].label.toLowerCase(); }).join(" + ")
+          : "  —  every class counted, the fp32 baseline");
+    }
+    recount();
+
+    (function census() {
+      const loopPage = NN.PAGES.filter(function (p) { return p.id === "loop"; })[0];
+      const tl = T.memory.timeline;
+      const peakLabel = tl && tl[T.memory.peak_phase] ? tl[T.memory.peak_phase].label : null;
+      m.appendChild(el("p", { class: "small muted", html:
+        "One caveat on that bar: it is a <em>census</em>, not a snapshot. It counts every " +
+        "tensor the iteration allocates, and they are not all alive at the same moment. The " +
+        "trace's phase-by-phase timeline peaks at <b>" + T.memory.peak_bytes_fp32 +
+        " B</b> resident" + (peakLabel ? " (during <em>" + peakLabel + "</em>)" : "") +
+        " and falls back to a floor of <b>" + T.memory.floor_bytes_fp32 +
+        " B</b> between iterations — the weights and the optimizer state, the two classes " +
+        "that never go away. The gap between " + T.memory.floor_bytes_fp32 + " B and " +
+        T.memory.peak_bytes_fp32 + " B is what an allocator has to absorb every step. " +
+        "<a href='" + loopPage.file + "'>" + loopPage.n + " " + loopPage.title +
+        "</a> walks all " + (tl ? tl.length : 0) + " phases." }));
+    })();
+
+    /* --- totals --- */
+    m.appendChild(NN.tiles([
+      { k: "parameters", v: String(T.memory.n_params), cls: "weight",
+        s: elemsOf("weight") + " weight elements × " + BPE + " B = " + bytesOf("weight") + " B" },
+      { k: "gradients", v: String(elemsOf("gradient")), cls: "gradient",
+        s: bytesOf("gradient") + " B — " + paramGradElems + " one-per-parameter + " +
+           nodeGradElems + " intermediate" },
+      { k: "activations", v: String(elemsOf("activation")), cls: "activation",
+        s: bytesOf("activation") + " B — sized by the data, not the model" },
+      { k: "optimizer state", v: String(elemsOf("optimizer")), cls: "optimizer",
+        s: bytesOf("optimizer") + " B — " + BY.optimizer.tensors + " slots per parameter (Adam)" },
+      { k: "total allocated", v: NN.bytes(totalBytes),
+        s: totalElems + " elements @ fp32 · peak live " + T.memory.peak_bytes_fp32 + " B" }
+    ]));
+
+    m.appendChild(el("p", { class: "small", html:
+      "Read the ratios, not the sizes. The gradient class splits in two, and the split " +
+      "matters: <b>" + paramGradElems + "</b> of its " + elemsOf("gradient") + " elements are " +
+      "parameter gradients, and the trace pairs each one with the parameter it belongs to (" +
+      paramGrads.map(function (t) { return t.name + " → " + t.of; }).join(", ") +
+      "). Same shape, same element count &mdash; exactly <b>" +
+      NN.fmt(paramGradElems / T.memory.n_params, 2) + " per parameter</b>. Those are the ones " +
+      "an optimizer step consumes, and they have to survive until it runs. The other <b>" +
+      nodeGradElems + "</b> (" + nodeGrads.map(function (t) { return t.name; }).join(", ") +
+      ") are node gradients, every one of them flagged <code>transient</code>: temporaries the " +
+      "chain rule produces on its way backward, each freed as soon as the next step has read " +
+      "it. When people say &ldquo;gradients cost the same as weights&rdquo; they mean the first " +
+      "group, which is why the class total (" + elemsOf("gradient") + ") deliberately does not " +
+      "equal the parameter count. Adam's state is <b>" +
+      NN.fmt(elemsOf("optimizer") / elemsOf("weight"), 2) + "×</b> the weights because it " +
+      "keeps " + BY.optimizer.tensors + " running averages per parameter (" +
+      BY.optimizer.names.join(", ") + "). Activations are " +
+      "the odd one out: " + elemsOf("activation") + " elements here because the batch is one " +
+      "example, and the only class whose size is set by the input rather than the model. " +
+      "Those three ratios do not change when the model gets a billion times bigger." }));
+
+    m.appendChild(el("p", { class: "small muted", html:
+      "fp32 is only the baseline. The same " + totalElems + " elements, at the element " +
+      "sizes the trace lists in <code>T.memory.dtype_bytes</code>: " +
+      Object.keys(T.memory.dtype_bytes).map(function (k) {
+        return "<b>" + k + "</b> " + (totalElems * T.memory.dtype_bytes[k]) + " B";
+      }).join(" · ") + ". Choosing a dtype is choosing a multiplier on this whole table, " +
+      "which is what section 4 does at scale." }));
+
+    m.appendChild(el("p", { class: "small muted", html:
+      "Two details in the activation rows are worth pausing on. <code>a1</code> = [" +
+      T.forward.a1.map(function (v) { return NN.fmt(v, 3); }).join(", ") + "], because " +
+      "ReLU zeroed unit " + T.forward.relu_mask.indexOf(0) + " — and the byte is still " +
+      "allocated and still stored: a zero costs exactly as much memory as any other value. " +
+      "And <code>relu_mask</code> is in the table at all only because the backward pass will " +
+      "need it; the trace records " + Object.keys(T.forward.saved_for_backward).length +
+      " tensors under <code>saved_for_backward</code> (" +
+      Object.keys(T.forward.saved_for_backward).join(", ") + "), and every one of them is " +
+      "memory the forward pass has to keep alive until backward consumes it. Page 04 shows " +
+      "what that zero does to the gradient; page 06 shows this class rising and falling." }));
+  })();
+
+  /* ====================================================== 4 · at scale */
+  (function buildReal() {
+    const m = NN.$("#realMount");
+    const BY = T.memory.by_class;
+    const R  = T.memory.recipes;
+    const RC = T.reference_configs;
+    const nP = T.memory.n_params;
+    const ORDER = ["weight", "gradient", "activation", "optimizer"];
+    /* Model memory is quoted in decimal GB (10^9 B) everywhere on this site —
+       the same base NN.bytes uses, and the base the literature uses ("70B in
+       bf16 is 140 GB"). Device capacity is the one binary quantity; it gets
+       stated in both bases on the limit line below. */
+    const GB = 1e9;
+
+    /* Ratios, measured off the trace rather than asserted. Gradients here means
+       parameter gradients — the ones an optimizer step consumes — not the
+       short-lived node gradients that share the class. */
+    const gradPerParam = T.memory.param_gradient_elements / nP;
+    const optPerParam  = BY.optimizer.elements / nP;
+
+    /* Nothing on this page is typed by hand any more: the scale we are heading
+       toward and the device it has to fit on are both quoted from
+       T.reference_configs, which carries its own provenance note. */
+    const scalingPage = NN.PAGES.filter(function (p) { return p.id === "scaling"; })[0];
+
+    function idx(list, name) {
+      const i = list.findIndex(function (o) { return o.name === name; });
+      return i < 0 ? 0 : i;
+    }
+    let ri = R.findIndex(function (r) { return /bf16 Adam, fp32 master, bf16 grads/.test(r.name); });
+    if (ri < 0) ri = 0;
+    let mi = idx(RC.models, RC.default_model);
+    let gi = idx(RC.gpus, RC.default_gpu);
+
+    /* --- pickers --- */
+    function pickerRow(label, items, textOf, getIndex, setIndex, titleOf) {
+      const row = el("div", { class: "picker" }, [
+        el("span", { class: "pickerlabel" }, label)
+      ]);
+      const btns = items.map(function (it, i) {
+        const b = el("button", {
+          class: "pill", type: "button", title: titleOf ? titleOf(it) : "",
+          "aria-pressed": i === getIndex() ? "true" : "false"
+        }, textOf(it));
+        b.addEventListener("click", function () { setIndex(i); render(); });
+        row.appendChild(b);
+        return b;
+      });
+      m.appendChild(row);
+      return btns;
+    }
+
+    const rBtns = pickerRow("recipe", R,
+      function (r) {
+        return r.name + "  ·  " +
+          ORDER.reduce(function (a, c) { return a + (r.components[c] || 0); }, 0) + " B/param";
+      },
+      function () { return ri; }, function (i) { ri = i; },
+      function (r) { return r.note || ""; });
+
+    const mBtns = pickerRow("model", RC.models,
+      function (x) { return x.name + "  ·  " + NN.count(x.params); },
+      function () { return mi; }, function (i) { mi = i; },
+      function (x) { return x.n_layers + " layers, d_model " + x.d_model; });
+
+    const gBtns = pickerRow("device", RC.gpus,
+      function (x) { return x.name; },
+      function () { return gi; }, function (i) { gi = i; },
+      function (x) {
+        return NN.gibytes(x.hbm_bytes) + " (" + NN.bytes(x.hbm_bytes) + ") of HBM";
+      });
+
+    m.appendChild(el("div", { class: "small muted", style: { margin: "4px 0 10px" } },
+      "Model and device figures: " + RC._source + "."));
+
+    const noteLine = el("div", { class: "whyline" });
+    m.appendChild(noteLine);
+
+    const chartHost = el("div");
+    m.appendChild(chartHost);
+
+    m.appendChild(el("p", { class: "small muted", html:
+      "Activations are deliberately missing from these numbers: unlike the other three " +
+      "they do not scale with parameter count alone &mdash; batch size and sequence length " +
+      "set them &mdash; and they are the one class you can trade against compute. That " +
+      "argument needs its own page." }));
+
+    let calloutEl = el("div");
+    m.appendChild(calloutEl);
+
+    function render() {
+      const r = R[ri], mdl = RC.models[mi], gpu = RC.gpus[gi];
+      rBtns.forEach(function (b, i) { b.setAttribute("aria-pressed", i === ri ? "true" : "false"); });
+      mBtns.forEach(function (b, i) { b.setAttribute("aria-pressed", i === mi ? "true" : "false"); });
+      gBtns.forEach(function (b, i) { b.setAttribute("aria-pressed", i === gi ? "true" : "false"); });
+
+      const comps = ORDER.filter(function (c) { return r.components[c]; })
+        .map(function (c) { return { cls: c, bpp: r.components[c] }; });
+      const perParam = comps.reduce(function (a, c) { return a + c.bpp; }, 0);
+      const tot = mdl.params * perParam;
+      const nGpu = Math.ceil(tot / gpu.hbm_bytes);
+
+      noteLine.innerHTML =
+        "<b>" + mdl.name + "</b> (" + NN.count(mdl.params) + " parameters, " +
+        mdl.n_layers + " layers, d_model " + mdl.d_model + ") under <b>" + r.name +
+        "</b> — " + perParam + " bytes per parameter" + (r.note ? "; " + r.note : "");
+
+      chartHost.innerHTML = "";
+      chartHost.appendChild(NN.chart.bars({
+        items: comps.map(function (c) {
+          return {
+            label: NN.CLASSES[c.cls].label.toLowerCase() + "  ·  " + c.bpp + " B/param",
+            value: mdl.params * c.bpp / GB,
+            color: "var(--" + c.cls + ")",
+            sub: "= " + NN.count(mdl.params) + " × " + c.bpp + " B"
+          };
+        }),
+        unit: "GB",
+        limit: {
+          value: gpu.hbm_bytes / GB,
+          label: "one " + gpu.name + ", " + NN.gibytes(gpu.hbm_bytes)
+        }
+      }));
+      chartHost.appendChild(el("div", { class: "small muted", html:
+        "GB here is 10⁹ bytes, the way model memory is always quoted. " +
+        "The device is the one binary number in the picture: a &ldquo;" +
+        gpu.name + "&rdquo; card holds " + NN.gibytes(gpu.hbm_bytes) +
+        " = " + NN.bytes(gpu.hbm_bytes) + ", which is what the limit line uses." }));
+
+      const lines = comps.map(function (c) {
+        const label = NN.CLASSES[c.cls].label.toLowerCase();
+        const pad = "               ".slice(0, Math.max(1, 16 - label.length));
+        return label + pad + NN.count(mdl.params) + " × " + c.bpp + " B = " +
+               NN.bytes(mdl.params * c.bpp);
+      }).join("<br>");
+
+      const body =
+        "<p>Nothing structural changes between the " + nP + "-parameter model above and " +
+        mdl.name + ". The four classes are the same, the ratios are the same &mdash; " +
+        NN.fmt(gradPerParam, 2) + " gradient element and " + NN.fmt(optPerParam, 2) +
+        " optimizer elements per parameter, straight off the table in section 3 &mdash; and " +
+        "only the multiplier moves. Under <b>" + r.name + "</b>:</p>" +
+        "<p class='mono small'>" + lines + "<br>" +
+        "──────────────────────────────────<br>" +
+        "total" + "           " + NN.bytes(tot) + "  =  " + perParam +
+        " bytes per parameter</p>" +
+        "<p>That is <b>" + nGpu + " × " + gpu.name + "</b> worth of memory before a single " +
+        "activation is stored, for a model whose weights alone would fit on " +
+        Math.ceil(mdl.params * (r.components.weight || 0) / gpu.hbm_bytes) + ". " +
+        (r.components.optimizer
+          ? "The optimizer state, which no one ever mentions when quoting a model's size, is " +
+            NN.fmt(r.components.optimizer / perParam * 100, 0) + "% of that total. "
+          : "") +
+        (/master/.test(r.note || "")
+          ? "Notice that the fp32 master copy of the weights is kept alongside the working " +
+            "copy: the step is a small update to a large number, and bf16's " +
+            T.formats.bf16.decimal_digits + " decimal digits would silently swallow it. " +
+            "Page 05 shows that happening to a real value. "
+          : "") +
+        "Applied to our " + nP + " parameters the same recipe is " + nP + " × " + perParam +
+        " = " + (nP * perParam) + " B, against " + T.memory.total_bytes_fp32 +
+        " B for the all-fp32 layout in section 3. Same four categories, same arithmetic, a " +
+        "multiplier <b>" + NN.count(mdl.params / nP) + "×</b> larger.</p>" +
+        "<p>Change the recipe, the model or the device above and watch which line stops " +
+        "fitting. Every technique on the last page &mdash; ZeRO sharding, FSDP, tensor and " +
+        "pipeline parallelism, activation checkpointing, 8-bit optimizer states &mdash; is an " +
+        "answer to one of those lines being too big for one device. <a href='" +
+        scalingPage.file + "'>" + scalingPage.n + " " + scalingPage.title + "</a> takes them " +
+        "one at a time.</p>";
+
+      const fresh = NN.callout("mem",
+        "The same four categories, " + NN.count(mdl.params) + " parameters", body);
+      m.replaceChild(fresh, calloutEl);
+      calloutEl = fresh;
+    }
+
+    render();
+  })();
+
+  NN.page("memory");
+})();
+</script>
+</body>
+</html>

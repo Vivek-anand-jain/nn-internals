@@ -1,0 +1,2910 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · Slides</title>
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* ==========================================================================
+   Deck chrome. Everything visual that is not already in design.css.
+   The stage is a fixed 1280x720 box scaled to the viewport, so every size
+   below can be written in px and stay proportional on any screen.
+   ========================================================================== */
+html, body { height: 100%; overflow: hidden; }
+body { background: var(--page); }
+
+/* ------------------------------------------------------------- the deck */
+#deck {
+  position: fixed; top: 49px; left: 0; right: 0;
+  bottom: var(--deckbottom, 52px); z-index: 1;
+  transition: bottom .3s cubic-bezier(.32,.72,.24,1);
+}
+
+.slide {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  opacity: 0; pointer-events: none;
+  transform: translateX(5%) scale(.975);
+  transition: opacity .42s ease, transform .52s cubic-bezier(.32,.72,.24,1);
+  will-change: opacity, transform;
+}
+.slide.past { transform: translateX(-5%) scale(.975); }
+.slide.current { opacity: 1; pointer-events: auto; transform: none; z-index: 2; }
+
+.stage {
+  position: relative; width: 1280px; height: 720px;
+  transform: scale(var(--k, 1)); transform-origin: center center;
+}
+.inner {
+  position: absolute; inset: 0; padding: 0 74px;
+  display: flex; flex-direction: column; justify-content: center;
+}
+.fit { width: 100%; transform: scale(var(--fit, 1)); transform-origin: center center; }
+
+/* ------------------------------------------------------ slide typography */
+.stage .kicker {
+  font-family: var(--mono); font-size: 15px; letter-spacing: .18em;
+  text-transform: uppercase; color: var(--ink-muted); margin-bottom: 14px;
+}
+.stage .kicker b { color: var(--accent); font-weight: 600; }
+.stage .stitle {
+  font-size: 46px; line-height: 1.1; margin: 0 0 18px;
+  letter-spacing: -.025em; font-weight: 680;
+}
+.stage .stitle.sm { font-size: 36px; }
+.stage .lead { font-size: 21px; line-height: 1.5; color: var(--ink-2); max-width: 76ch; }
+.stage p { font-size: 19px; line-height: 1.55; }
+.stage .say { font-size: 22px; line-height: 1.5; color: var(--ink-2); }
+.stage .bignum {
+  font-family: var(--mono); font-size: 72px; font-weight: 700;
+  letter-spacing: -.03em; line-height: 1.05;
+}
+.stage .midnum { font-family: var(--mono); font-size: 40px; font-weight: 700; letter-spacing: -.02em; }
+.stage .phaselabel {
+  font-family: var(--mono); font-size: 21px; font-weight: 700;
+  min-height: 52px; display: flex; align-items: center;
+}
+.stage .hugetitle {
+  font-size: 78px; line-height: 1.03; letter-spacing: -.035em;
+  font-weight: 700; margin: 0 0 22px;
+}
+.stage .subtitle { font-size: 25px; color: var(--ink-2); line-height: 1.45; max-width: 30ch; }
+.stage .cell { font-size: 15px; min-width: 72px; padding: 9px 11px; }
+.stage .tensor-label { font-size: 14px; }
+.stage .tensor-shape { font-size: 13px; }
+.stage .formula { font-size: 19px; padding: 16px 20px; }
+.stage .formula .sub { font-size: 16px; }
+.stage .callout { font-size: 18px; padding: 16px 20px; }
+.stage .callout .t { font-size: 13px; }
+.stage .tile .v { font-size: 30px; }
+.stage .tile .k { font-size: 12px; }
+.stage .tile .s { font-size: 13px; }
+.stage .tclass { font-size: 14px; padding: 3px 11px 3px 9px; }
+.stage table.data { font-size: 16px; }
+.stage table.data th { font-size: 12px; }
+.stage .small { font-size: 15px; }
+.stage .ckey {
+  font-family: var(--mono); font-size: 14px; color: var(--ink-2);
+  display: inline-flex; align-items: center; gap: 8px;
+}
+.stage .ckey i { width: 16px; height: 3px; border-radius: 2px; display: inline-block; }
+.stage code { font-size: .95em; }
+
+/* ------------------------------------------------------------- layouts */
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 34px; align-items: center; }
+.cols.wide-l { grid-template-columns: 1.35fr 1fr; }
+.cols.wide-r { grid-template-columns: 1fr 1.35fr; }
+.cols3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; align-items: stretch; }
+.cols4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; align-items: stretch; }
+.stack { display: flex; flex-direction: column; gap: 14px; }
+.rowflex { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+.rowflex.top { align-items: flex-start; }
+.gap8 { height: 8px; } .gap16 { height: 16px; } .gap24 { height: 24px; }
+
+.panel {
+  background: var(--surface-1); border: 1px solid var(--hairline);
+  border-radius: 12px; padding: 20px 22px;
+}
+.panel.tight { padding: 14px 16px; }
+.panel .ph {
+  font-family: var(--mono); font-size: 12px; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--ink-muted); margin-bottom: 10px;
+}
+.panel.w { border-left: 3px solid var(--weight); }
+.panel.g { border-left: 3px solid var(--gradient); }
+.panel.a { border-left: 3px solid var(--activation); }
+.panel.o { border-left: 3px solid var(--optimizer); }
+.panel.acc { border-left: 3px solid var(--accent); }
+.panel.crit { border-left: 3px solid var(--critical); }
+
+.arrowline {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  font-family: var(--mono); font-size: 19px;
+}
+.arrowline .ar { color: var(--ink-muted); font-size: 22px; }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: var(--mono); font-size: 15px; font-weight: 600;
+  padding: 6px 13px; border-radius: 999px;
+  border: 1px solid var(--hairline); background: var(--surface-2); color: var(--ink-2);
+}
+.pill.hot { border-color: var(--critical); color: var(--critical); background: color-mix(in srgb, var(--critical) 12%, transparent); }
+
+.deadflag {
+  display: inline-flex; align-items: center; gap: 9px;
+  font-family: var(--mono); font-size: 16px; font-weight: 700;
+  color: var(--critical); border: 1px dashed var(--critical);
+  background: color-mix(in srgb, var(--critical) 10%, transparent);
+  padding: 7px 14px; border-radius: 8px;
+}
+
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; font-family: var(--mono); font-size: 16px; }
+.kv .k { color: var(--ink-muted); }
+
+/* the READS box — the thesis of the deck */
+.readbox {
+  border-radius: 12px; padding: 16px 20px;
+  border: 1px solid var(--activation);
+  background: var(--activation-w);
+}
+.readbox.none { border: 1px dashed var(--hairline); background: var(--surface-2); }
+.readbox .rt {
+  font-family: var(--mono); font-size: 13px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--activation); font-weight: 700; margin-bottom: 8px;
+}
+.readbox.none .rt { color: var(--ink-muted); }
+.readbox.wgt { border-color: var(--weight); background: var(--weight-w); }
+.readbox.wgt .rt { color: var(--weight); }
+
+/* ------------------------------------------------------ network diagram */
+.net { display: block; width: 100%; }
+.net .edge { stroke-width: 2; fill: none; opacity: .85; }
+.net .node circle { stroke-width: 2; }
+.net text { font-family: var(--mono); fill: var(--ink-2); }
+.net .elabel { font-size: 12px; fill: var(--ink-muted); }
+
+@keyframes drawEdge { from { stroke-dashoffset: 460; } to { stroke-dashoffset: 0; } }
+.slide.current .net .edge {
+  stroke-dasharray: 460; stroke-dashoffset: 460;
+  animation: drawEdge .75s cubic-bezier(.3,.7,.2,1) forwards;
+  animation-delay: calc(var(--e, 0) * 55ms + 120ms);
+}
+
+/* --------------------------------------------------------- entrance/frag */
+@keyframes riseIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: none; } }
+.slide.current .fit > *:not(.fragment) {
+  animation: riseIn .5s cubic-bezier(.2,.72,.3,1) both;
+  animation-delay: calc(var(--i, 0) * 70ms);
+}
+.fragment {
+  opacity: 0; transform: translateY(14px);
+  transition: opacity .38s ease, transform .42s cubic-bezier(.2,.72,.3,1), filter .38s;
+}
+.fragment.on { opacity: 1; transform: none; }
+.fragment.f-left  { transform: translateX(-26px); }
+.fragment.f-right { transform: translateX(26px); }
+.fragment.f-pop   { transform: scale(.9); }
+.fragment.f-fade  { transform: none; }
+.fragment.f-left.on, .fragment.f-right.on, .fragment.f-pop.on { transform: none; }
+/* a fragment that dims what came before it */
+.dimmed { opacity: .3; filter: saturate(.4); transition: opacity .4s, filter .4s; }
+
+/* ------------------------------------------------------------- chrome */
+.deckbar {
+  position: fixed; top: 0; left: 0; right: 0; height: 46px; z-index: 30;
+  display: flex; align-items: center; gap: 14px; padding: 0 18px;
+  background: color-mix(in srgb, var(--page) 82%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--hairline-2);
+}
+.deckbar .brand { font-size: .9rem; }
+.deckbar .chap {
+  font-family: var(--mono); font-size: .74rem; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--ink-muted);
+  border-left: 1px solid var(--hairline); padding-left: 14px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.deckbar .spacer { flex: 1; }
+.deckbar .iconbtn { font-size: .74rem; padding: 4px 9px; }
+.deckbar .iconbtn.on { color: var(--ink); border-color: var(--weight); background: var(--weight-w); }
+
+.progress {
+  position: fixed; top: 46px; left: 0; right: 0; height: 3px; z-index: 30;
+  background: var(--surface-2);
+}
+.progress i {
+  display: block; height: 100%; width: 0%;
+  background: linear-gradient(90deg, var(--activation), var(--weight));
+  transition: width .42s cubic-bezier(.32,.72,.24,1);
+}
+
+.deckfoot {
+  position: fixed; bottom: 0; left: 0; right: 0; height: 52px; z-index: 30;
+  display: flex; align-items: center; gap: 12px; padding: 0 18px;
+  background: color-mix(in srgb, var(--page) 82%, transparent);
+  backdrop-filter: blur(10px);
+  border-top: 1px solid var(--hairline-2);
+}
+.navbtn {
+  width: 34px; height: 30px; border-radius: 7px; cursor: pointer;
+  background: var(--surface-2); border: 1px solid var(--hairline);
+  color: var(--ink-2); font-size: 15px; line-height: 1;
+}
+.navbtn:hover:not(:disabled) { color: var(--ink); border-color: var(--ink-muted); }
+.navbtn:disabled { opacity: .3; cursor: not-allowed; }
+.fragdots { display: flex; gap: 5px; align-items: center; }
+.fragdots i {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--surface-3);
+  border: 1px solid var(--hairline); transition: background .25s, transform .25s;
+}
+.fragdots i.on { background: var(--activation); border-color: var(--activation); transform: scale(1.2); }
+.deckfoot .hint { font-size: .74rem; color: var(--ink-muted); font-family: var(--mono); }
+.counter {
+  margin-left: auto; font-family: var(--mono); font-size: .82rem;
+  color: var(--ink-muted); font-variant-numeric: tabular-nums;
+}
+.counter b { color: var(--ink); font-size: 1rem; }
+
+/* edge affordances for click-to-navigate */
+.edgehint {
+  position: fixed; top: 0; bottom: 0; width: 16%; z-index: 5;
+  pointer-events: none; opacity: 0; transition: opacity .25s;
+  display: flex; align-items: center; font-size: 34px; color: var(--ink-muted);
+}
+.edgehint.l { left: 0; justify-content: flex-start; padding-left: 14px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--ink) 7%, transparent), transparent); }
+.edgehint.r { right: 0; justify-content: flex-end; padding-right: 14px;
+  background: linear-gradient(270deg, color-mix(in srgb, var(--ink) 7%, transparent), transparent); }
+.edgehint.show { opacity: 1; }
+
+/* ---------------------------------------------------------- notes panel */
+.notes {
+  position: fixed; left: 0; right: 0; bottom: 52px; z-index: 25;
+  height: 0; overflow: hidden;
+  background: var(--surface-1); border-top: 1px solid var(--hairline);
+  transition: height .3s cubic-bezier(.32,.72,.24,1);
+}
+.notes.open { height: 176px; }
+.notes .ni { padding: 14px 22px; max-width: 1100px; margin: 0 auto; }
+.notes .nh {
+  font-family: var(--mono); font-size: .7rem; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--optimizer); margin-bottom: 6px;
+}
+.notes .nb { font-size: .95rem; line-height: 1.55; color: var(--ink-2); }
+.notes .nn { margin-top: 8px; font-size: .8rem; color: var(--ink-muted); font-family: var(--mono); }
+
+/* ----------------------------------------------------------- grid view */
+.gridview {
+  position: fixed; inset: 0; z-index: 60; overflow-y: auto;
+  background: color-mix(in srgb, var(--page) 96%, transparent);
+  backdrop-filter: blur(6px);
+  opacity: 0; pointer-events: none; transition: opacity .25s;
+  padding: 62px 26px 40px;
+}
+.gridview.open { opacity: 1; pointer-events: auto; }
+.gridview h3 { margin: 0 0 18px; font-size: 1.05rem; }
+.gridview h3 span { color: var(--ink-muted); font-weight: 400; font-size: .85rem; }
+.thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(248px, 1fr)); gap: 18px; }
+.thumb {
+  position: relative; cursor: pointer; border-radius: 9px; overflow: hidden;
+  border: 1px solid var(--hairline); background: var(--surface-1);
+  aspect-ratio: 16 / 9; transition: transform .18s, border-color .18s, box-shadow .18s;
+}
+.thumb:hover { transform: translateY(-3px); border-color: var(--weight); box-shadow: 0 10px 26px rgba(0,0,0,.35); }
+.thumb.current { border-color: var(--activation); box-shadow: 0 0 0 2px var(--activation-w); }
+.thumb .tw {
+  position: absolute; top: 0; left: 0; width: 1280px; height: 720px;
+  transform-origin: top left; pointer-events: none;
+}
+.thumb .tn {
+  position: absolute; left: 0; bottom: 0; right: 0; z-index: 2;
+  font-family: var(--mono); font-size: .68rem; padding: 4px 8px;
+  background: color-mix(in srgb, var(--page) 80%, transparent);
+  color: var(--ink-2); display: flex; justify-content: space-between; gap: 8px;
+}
+.thumb .tn b { color: var(--ink-muted); font-weight: 600; }
+.thumb .fragment { opacity: 1 !important; transform: none !important; }
+.thumb .fit > * { animation: none !important; }
+.thumb .net .edge { stroke-dasharray: none !important; stroke-dashoffset: 0 !important; animation: none !important; }
+
+/* --------------------------------------------------------- help / black */
+.overlay {
+  position: fixed; inset: 0; z-index: 80; display: flex;
+  align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--page) 92%, transparent);
+  backdrop-filter: blur(8px);
+  opacity: 0; pointer-events: none; transition: opacity .22s;
+}
+.overlay.open { opacity: 1; pointer-events: auto; }
+.helpcard {
+  background: var(--surface-1); border: 1px solid var(--hairline);
+  border-radius: 12px; padding: 26px 30px; max-width: 620px;
+}
+.helpcard h3 { margin-top: 0; }
+.keys { display: grid; grid-template-columns: auto 1fr; gap: 9px 18px; font-size: .9rem; }
+.keys kbd {
+  font-family: var(--mono); font-size: .78rem; background: var(--surface-3);
+  border: 1px solid var(--hairline); border-bottom-width: 2px;
+  border-radius: 5px; padding: 2px 7px; white-space: nowrap;
+}
+#black {
+  position: fixed; inset: 0; z-index: 90; background: #000;
+  opacity: 0; pointer-events: none; transition: opacity .2s;
+}
+#black.on { opacity: 1; pointer-events: auto; }
+
+@media (prefers-reduced-motion: reduce) {
+  .slide { transform: none !important; }
+  .slide.current .fit > *:not(.fragment) { animation: none !important; }
+  .slide.current .net .edge { animation: none !important; stroke-dashoffset: 0 !important; }
+  .fragment { transform: none !important; }
+}
+</style>
+</head>
+<body>
+
+<noscript>
+  <p style="padding:40px;font-family:system-ui">
+    This slide deck is generated entirely in JavaScript from
+    <code>assets/data/trace.js</code>. With JS disabled there is nothing to show —
+    please enable it, or read the written pages in <code>site/</code>.
+  </p>
+</noscript>
+
+<header class="deckbar">
+  <a class="brand" href="../index.html" title="Back to the site">nn<span>-internals</span></a>
+  <div class="chap" id="chap"></div>
+  <div class="spacer"></div>
+  <button class="iconbtn" id="btnGrid"  title="Overview grid (G)">Grid</button>
+  <button class="iconbtn" id="btnNotes" title="Speaker notes (S)">Notes</button>
+  <button class="iconbtn" id="btnHelp"  title="Shortcuts (?)">?</button>
+  <button class="iconbtn" id="themeToggle" title="Light / dark (T)">Theme</button>
+  <a class="iconbtn" href="../index.html" title="Leave the deck">Exit</a>
+</header>
+<div class="progress"><i id="pbar"></i></div>
+
+<div class="edgehint l" id="ehL">‹</div>
+<div class="edgehint r" id="ehR">›</div>
+
+<div id="deck" aria-live="polite"></div>
+
+<div class="notes" id="notes"><div class="ni">
+  <div class="nh" id="notesHead">Speaker notes</div>
+  <div class="nb" id="notesBody"></div>
+  <div class="nn" id="notesNext"></div>
+</div></div>
+
+<footer class="deckfoot">
+  <button class="navbtn" id="btnPrev" title="Previous (←)">‹</button>
+  <button class="navbtn" id="btnNext" title="Next (→ or Space)">›</button>
+  <div class="fragdots" id="fragdots"></div>
+  <div class="hint">← → navigate · G grid · S notes</div>
+  <div class="counter"><b id="cNum">1</b> / <span id="cTot">–</span></div>
+</footer>
+
+<div class="gridview" id="gridview">
+  <h3>All slides <span>— click to jump, Esc or G to close</span></h3>
+  <div class="thumbs" id="thumbs"></div>
+</div>
+
+<div class="overlay" id="help"><div class="helpcard">
+  <h3>Keyboard</h3>
+  <div class="keys" id="keysList"></div>
+</div></div>
+
+<div id="black"></div>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/transformer.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+"use strict";
+
+const T = NN.T, el = NN.el, f = NN.fmt, fS = NN.fmtSigned, BY = NN.bytes;
+const RM = !!(window.matchMedia &&
+              window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+NN.initTheme();
+
+/* ====================================================== small builders */
+function d(cls, kids)      { return el("div", { class: cls }, kids); }
+function h(cls, s)         { return el("div", { class: cls, html: s }); }
+function frag(e, kind)     { e.classList.add("fragment"); if (kind) e.classList.add(kind); return e; }
+function kicker(s)         { return h("kicker", s); }
+function title(s, sm)      { return el("h2", { class: "stitle" + (sm ? " sm" : ""), html: s }); }
+function lead(s)           { return h("lead", s); }
+function say(s)            { return h("say", s); }
+function panel(cls, kids)  { return d("panel " + (cls || ""), kids); }
+function ph(s)             { return h("ph", s); }
+function n_(v, cls, dig)   { return '<span class="num' + (cls ? " v-" + cls : "") + '">' + f(v, dig) + "</span>"; }
+function nS_(v, cls, dig)  { return '<span class="num' + (cls ? " v-" + cls : "") + '">' + fS(v, dig) + "</span>"; }
+function tn(o)             { return NN.tensor(o); }
+function gap(px)           { return el("div", { style: { height: px + "px" } }); }
+/* Charts get a written key: colour never carries meaning on its own. */
+function chartKey(items) {
+  return d("rowflex", items.map(function (it) {
+    return el("span", { class: "ckey" }, [
+      el("i", { style: { background: it.color } }), it.name]);
+  }));
+}
+
+/* Class-coloured value, used constantly in prose. */
+function W(v, dig)  { return n_(v, "weight", dig); }
+function G(v, dig)  { return nS_(v, "gradient", dig); }
+function A(v, dig)  { return n_(v, "activation", dig); }
+function O(v, dig)  { return n_(v, "optimizer", dig); }
+
+/* ============================================ numbers derived from NN.T */
+const HP      = T.meta.hyperparams;
+const MEM     = T.memory;
+const NPARAM  = MEM.n_params;
+const FP32B   = MEM.dtype_bytes.fp32;
+const BF16B   = MEM.dtype_bytes.bf16;
+const PT      = MEM.per_tensor;
+const BYCLS   = MEM.by_class;
+const byClass = function (c) { return PT.filter(function (t) { return t.cls === c; }); };
+
+/* Weight / activation / optimizer counts come straight from by_class.
+   For gradients we want the parameter gradients only — by_class.gradient
+   also counts the transient node gradients (dL/dz1 and friends), which are
+   not 1:1 with the parameters. */
+const N_W = BYCLS.weight.elements;
+const N_G = MEM.param_gradient_elements;
+const N_A = BYCLS.activation.elements;
+const N_O = BYCLS.optimizer.elements;
+const N_GNODE = MEM.node_gradient_elements;
+const B_W = BYCLS.weight.bytes_fp32;
+const B_G = N_G * FP32B;
+const B_A = BYCLS.activation.bytes_fp32;
+const B_O = BYCLS.optimizer.bytes_fp32;
+const B_GNODE = N_GNODE * FP32B;
+const OPT_TENSORS = BYCLS.optimizer.tensors;
+
+/* Bytes-per-parameter recipes come from the trace, not from arithmetic
+   done here. The headline mixed-precision recipe is the one holding bf16
+   weights, bf16 gradients and an fp32 master copy plus both Adam moments. */
+const RECIPES = MEM.recipes;
+function recipe(sub) {
+  return RECIPES.filter(function (r) { return r.name.indexOf(sub) >= 0; })[0];
+}
+const R_MIX = RECIPES.filter(function (r) {
+  return r.components.weight === BF16B && r.components.gradient === BF16B &&
+         r.components.optimizer === FP32B * (1 + OPT_TENSORS);
+})[0];
+const R_SGD  = recipe("fp32 SGD");
+const R_MOM  = recipe("momentum");
+const R_ADAM = recipe("fp32 Adam");
+const BPP_MIXED = R_MIX.bytes_per_param;
+
+/* -------------------------------------------------- reference configs */
+/* Published model shapes and GPU capacities. These are the one set of
+   numbers in the project that are quoted rather than derived, so the
+   caveat travels with them onto the slides. */
+const RC    = T.reference_configs;
+const MODEL = RC.models.filter(function (m) { return m.name === RC.default_model; })[0];
+const GPUD  = RC.gpus.filter(function (g) { return g.name === RC.default_gpu; })[0];
+/* Units. Model, gradient and activation memory are decimal GB (10^9 B) —
+   the base NN.bytes uses and the base the literature quotes. Device capacity
+   is the one binary quantity in the deck: an "80 GB" card is 80 GiB, and
+   wherever it appears next to a decimal figure both bases are stated. */
+const GBD   = 1e9;                /* decimal GB, for chart axes            */
+const GBY   = NN.gibytes;         /* binary, for device capacity only      */
+const CAP   = function (b) { return GBY(b) + " (" + BY(b) + ")"; };
+const bn    = NN.count;           /* 70.6e9 -> "70.6B" */
+function sourceNote(extra) {
+  return h("small muted",
+    "Shapes for <b>" + MODEL.name + "</b> and capacity for <b>" + GPUD.name +
+    "</b> come from <span class='mono'>T.reference_configs</span> — " +
+    RC._source + "." + (extra ? " " + extra : ""));
+}
+
+const CFG = {
+  name: MODEL.name, d: MODEL.d_model, layers: MODEL.n_layers,
+  heads: MODEL.n_heads, kv_heads: MODEL.n_kv_heads || MODEL.n_heads,
+  d_ff: MODEL.d_ff || 4 * MODEL.d_model, vocab: MODEL.vocab,
+  seq: MODEL.seq, batch: 1, params: MODEL.params   /* batch: scenario choice */
+};
+CFG.head_dim  = CFG.d / CFG.heads;
+CFG.d_kv      = CFG.kv_heads * CFG.head_dim;
+CFG.attn_par  = 2 * CFG.d * CFG.d + 2 * CFG.d * CFG.d_kv;
+CFG.mlp_par   = 3 * CFG.d * CFG.d_ff;
+CFG.layer_par = CFG.attn_par + CFG.mlp_par;
+CFG.embed_par = 2 * CFG.vocab * CFG.d;
+/* what the shape alone accounts for, versus the published parameter count */
+CFG.derived   = CFG.layers * CFG.layer_par + CFG.embed_par;
+CFG.stateB    = CFG.params * BPP_MIXED;
+CFG.gradB     = CFG.params * R_MIX.components.gradient;
+const GPU_B   = GPUD.hbm_bytes;
+const GPUS    = Math.ceil(CFG.stateB / GPU_B);
+
+/* ------------------------------------------- the worked transformer block */
+/* transformer.js carries the per-family parameter accounting and the
+   Korthikanti activation-memory terms. If it is not loaded the deck still
+   works: ACT falls back to a clearly-labelled heuristic. */
+const XF  = window.TFORMER || null;
+const XR  = XF && XF.real
+  ? XF.real.models.filter(function (m) { return m.name === MODEL.name; })[0]
+  : null;
+const XA  = XF ? XF.actmem : null;
+const ACTC = XA ? XA.coeff_by_dtype.bf16 : null;
+
+/* activation bytes per layer, Korthikanti Table-2 accounting */
+function actLinearPerLayer(seq, batch) {
+  return ACTC ? seq * batch * CFG.d * ACTC.linear
+              : 10 * seq * batch * CFG.d * BF16B;
+}
+function actQuadPerLayer(seq, batch) {
+  return ACTC ? CFG.heads * seq * seq * batch * ACTC.quad
+              : CFG.heads * seq * seq * batch * BF16B;
+}
+function actFlashPerLayer(seq, batch) {
+  return ACTC ? CFG.heads * seq * batch * ACTC.flash_extra : 0;
+}
+/* what one sequence costs across the whole stack, with FlashAttention on */
+CFG.actFlashSeq = CFG.layers *
+  (actLinearPerLayer(CFG.seq, 1) + actFlashPerLayer(CFG.seq, 1));
+CFG.actFullSeq  = CFG.layers *
+  (actLinearPerLayer(CFG.seq, 1) + actQuadPerLayer(CFG.seq, 1));
+CFG.actPerSeq   = CFG.actFlashSeq;   /* the honest number: nobody materialises */
+CFG.crossBatch  = Math.max(1, Math.ceil(CFG.gradB / CFG.actPerSeq));
+CFG.attnMatB    = actQuadPerLayer(CFG.seq, CFG.batch);
+
+/* parameter accounting: the worked breakdown if transformer.js is present,
+   our own shape arithmetic otherwise */
+const P_LAYER = XR ? XR.exact.per_layer : CFG.layer_par;
+const P_ATTN  = XR ? XR.exact.attn      : CFG.attn_par;
+const P_MLP   = XR ? XR.exact.mlp       : CFG.mlp_par;
+const P_EMBED = XR ? XR.exact.embed + XR.exact.lm_head : CFG.embed_par;
+const P_EXACT = XR ? XR.exact.total     : CFG.derived;
+
+/* ================================================== network diagram SVG */
+const SV = NN.svg;
+function netSVG(o) {
+  o = o || {};
+  const Wd = 900, Ht = o.height || 290;
+  const s = SV("svg", { viewBox: "0 0 " + Wd + " " + Ht, width: "100%",
+                        height: Ht, class: "net", role: "img" });
+  const cx = [130, 450, 780];
+  const ys = [[Ht * .36, Ht * .66], [Ht * .2, Ht * .5, Ht * .8], [Ht * .5]];
+  const back = !!o.back;
+  const edgeCol = back ? "var(--gradient)" : "var(--weight)";
+  let ei = 0;
+
+  function edge(x1, y1, x2, y2, lab, dead) {
+    const p = SV("path", {
+      class: "edge", d: "M" + x1 + " " + y1 + " C " + (x1 + 90) + " " + y1 +
+             ", " + (x2 - 90) + " " + y2 + ", " + x2 + " " + y2,
+      stroke: dead ? "var(--ink-muted)" : edgeCol,
+      "stroke-opacity": dead ? .3 : .8,
+      style: "--e:" + (ei++)
+    });
+    s.appendChild(p);
+    if (lab !== undefined && o.labels !== false) {
+      const t = SV("text", { x: (x1 + x2) / 2, y: (y1 + y2) / 2 - 6,
+                             "text-anchor": "middle", class: "elabel" });
+      t.textContent = lab; s.appendChild(t);
+    }
+  }
+  /* input -> hidden */
+  for (let j = 0; j < 2; j++) for (let i = 0; i < 3; i++) {
+    edge(cx[0] + 26, ys[0][j], cx[1] - 26, ys[1][i], f(T.init.W1[i][j], 2),
+         o.dead && i === 2);
+  }
+  /* hidden -> output */
+  for (let i = 0; i < 3; i++) {
+    edge(cx[1] + 26, ys[1][i], cx[2] - 26, ys[2][0], f(T.init.W2[0][i], 2),
+         o.dead && i === 2);
+  }
+  function node(x, y, label, val, cls, dead) {
+    const g = SV("g", { class: "node" });
+    g.appendChild(SV("circle", {
+      cx: x, cy: y, r: 26,
+      fill: dead ? "var(--surface-2)" : "var(--" + cls + "-w)",
+      stroke: dead ? "var(--critical)" : "var(--" + cls + ")",
+      "stroke-dasharray": dead ? "4 3" : null
+    }));
+    const t1 = SV("text", { x: x, y: y + (val !== undefined ? -2 : 5),
+                            "text-anchor": "middle", "font-size": "13",
+                            fill: dead ? "var(--critical)" : "var(--" + cls + ")" });
+    t1.textContent = label; g.appendChild(t1);
+    if (val !== undefined) {
+      const t2 = SV("text", { x: x, y: y + 13, "text-anchor": "middle",
+                              "font-size": "12", fill: "var(--ink-muted)" });
+      t2.textContent = f(val, 2); g.appendChild(t2);
+    }
+    s.appendChild(g);
+  }
+  const V = o.values;
+  node(cx[0], ys[0][0], "x₁", V ? T.forward.x[0] : undefined, "activation");
+  node(cx[0], ys[0][1], "x₂", V ? T.forward.x[1] : undefined, "activation");
+  for (let i = 0; i < 3; i++) {
+    node(cx[1], ys[1][i], "h" + (i + 1),
+         V ? T.forward.a1[i] : undefined, "activation", o.dead && i === 2);
+  }
+  node(cx[2], ys[2][0], "ŷ", V ? T.forward.yhat : undefined, "activation");
+
+  if (o.caption !== false) {
+    [["input", cx[0]], ["hidden · ReLU", cx[1]], ["output", cx[2]]].forEach(function (c) {
+      const t = SV("text", { x: c[1], y: Ht - 4, "text-anchor": "middle",
+                             "font-size": "12", fill: "var(--ink-muted)" });
+      t.textContent = c[0]; s.appendChild(t);
+    });
+  }
+  return s;
+}
+
+/* =========================================================== the slides */
+const SLIDES = [];
+function S(o) { SLIDES.push(o); }
+
+/* ---------------------------------------------------------- 1. title */
+S({
+  chapter: "Title", plain: "What actually happens inside a neural network",
+  notes: "Opening. The promise: by the end of this deck you will be able to " +
+    "point at every byte a training step touches and say what it is, when it " +
+    "was born and when it dies. We do it on a network with " + NPARAM +
+    " parameters, small enough that every number on every slide is a real " +
+    "number from a real trace — then we multiply the same structure up to " +
+    bn(CFG.params) + " " +
+    "and watch it stop fitting on a GPU.",
+  build: function () {
+    return [
+      kicker("A slide deck · every number generated by <b>code/ground_truth.py</b>"),
+      el("h1", { class: "hugetitle", html:
+        "What Actually Happens<br>Inside a Neural Network" }),
+      frag(h("subtitle",
+        "Memory, gradients, and why distributed training exists — " +
+        "traced through a model with <b>" + NPARAM + "</b> parameters."), "f-fade"),
+      frag(gap(10)),
+      frag(NN.legend(), "f-left"),
+      frag(gap(6)),
+      frag(h("small muted",
+        "Model: <span class='mono'>" + T.meta.architecture + "</span>. " +
+        "Gradients verified against finite differences to " +
+        f(T.gradcheck.max_abs_error, 1) + " max absolute error. " +
+        "Press <kbd>?</kbd> for keys, <kbd>G</kbd> for the overview grid."))
+    ];
+  }
+});
+
+/* ----------------------------------------------------------- 2. task */
+S({
+  chapter: "Setup · the problem", plain: "The problem: predict a house price",
+  notes: "Keep this concrete. Two input numbers, one output number, one " +
+    "training example. The whole of supervised learning is here: a guess, a " +
+    "true answer, and a way to measure the gap. Everything else in the deck " +
+    "is machinery for shrinking that gap.",
+  build: function () {
+    const x = tn({ name: "x", shape: [2], values: T.forward.x, cls: "activation",
+                   digits: 2, note: "the input" });
+    return [
+      kicker("The problem"),
+      title("One house. Two numbers in, one number out."),
+      d("cols wide-l", [
+        d("stack", [
+          frag(panel("a", [ph("input · x"), x,
+            h("small muted",
+              T.meta.input.x_meaning[0] + " = " + A(T.forward.x[0], 1) + " &nbsp;·&nbsp; " +
+              T.meta.input.x_meaning[1] + " = " + A(T.forward.x[1], 1))]), "f-left"),
+          frag(panel("acc", [ph("target · y"),
+            h("bignum", f(T.meta.input.y, 2)),
+            h("small muted", T.meta.input.y_meaning)]), "f-left")
+        ]),
+        d("stack", [
+          frag(say("The network will produce a guess. The guess will be wrong. " +
+            "The <b>size and direction</b> of that wrongness is the only signal " +
+            "we have, and every byte of machinery in the next forty slides " +
+            "exists to turn it into a better set of numbers."), "f-right"),
+          frag(NN.callout("key", "One example, one step",
+            "Real training uses batches of thousands and millions of steps. " +
+            "The <em>shapes</em> get bigger; the four kinds of tensor, and their " +
+            "lifetimes, do not change at all."), "f-right")
+        ])
+      ])
+    ];
+  }
+});
+
+/* ---------------------------------------------------------- 3. model */
+S({
+  chapter: "Setup · the model", plain: "The model: 2 → 3 → 1",
+  notes: "Two layers. The hidden layer has three units and a ReLU; the output " +
+    "layer is a single linear unit with no activation. Point out that every " +
+    "edge in the diagram is one number — a weight — and every circle carries " +
+    "one number too, an activation. Those are two of our four tensor classes " +
+    "already.",
+  build: function () {
+    return [
+      kicker("The model"),
+      title("<span class='mono'>" + T.meta.architecture + "</span>", true),
+      frag(netSVG({ height: 300 }), "f-fade"),
+      frag(d("cols3", [
+        panel("w", [ph("edges are weights"),
+          h("say", "Every line carries one number. There are " +
+            (N_W) + " of them, counting biases.")]),
+        panel("a", [ph("circles are activations"),
+          h("say", "Every circle holds one number, computed fresh for every input.")]),
+        panel("acc", [ph("the nonlinearity"),
+          h("say", "The hidden layer applies <span class='mono'>relu(z) = max(0, z)</span>. " +
+            "Without it, two linear layers collapse into one.")])
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* -------------------------------------------------------- 4. 13 params */
+S({
+  chapter: "Setup · parameters", plain: NPARAM + " parameters — the whole model",
+  notes: "This slide is the model. Four tensors, " + NPARAM + " scalars, and " +
+    "that is the entire thing you would ship. Read a couple of the values out " +
+    "loud — 0.5, minus 0.2 — so people register that a parameter is nothing " +
+    "more exotic than a number someone initialised randomly. Mention that " +
+    "param_names in the trace lists all " + NPARAM + " by name.",
+  build: function () {
+    return [
+      kicker("The parameters"),
+      title("This is the entire model: <span class='v-weight'>" + NPARAM +
+            "</span> numbers."),
+      frag(d("rowflex top", [
+        tn({ name: "W1", shape: [3, 2], values: T.init.W1, cls: "weight",
+             digits: 2, note: "6 params" }),
+        tn({ name: "b1", shape: [3], values: T.init.b1, cls: "weight",
+             digits: 2, note: "3 params" }),
+        tn({ name: "W2", shape: [1, 3], values: T.init.W2, cls: "weight",
+             digits: 2, note: "3 params" }),
+        tn({ name: "b2", shape: [1], values: T.init.b2, cls: "weight",
+             digits: 2, note: "1 param" })
+      ]), "f-pop"),
+      frag(NN.tiles([
+        { k: "parameters", v: String(NPARAM), s: "named in T.param_names", cls: "weight" },
+        { k: "tensors", v: String(byClass("weight").length), s: "W1 b1 W2 b2", cls: "weight" },
+        { k: "at " + FP32B + " bytes each", v: BY(B_W), s: "fp32", cls: "weight" },
+        { k: "lifetime", v: "entire run", s: NN.CLASSES.weight.life }
+      ])),
+      frag(NN.callout("why", "Why start this small",
+        "Because you can hold " + NPARAM + " numbers in your head. " +
+        MODEL.name + " has the same four tensors per layer, " + MODEL.n_layers +
+        " times over, with a few million numbers in each — and not one new idea."))
+    ];
+  }
+});
+
+/* ------------------------------------------------- 5. a weight is a float */
+S({
+  chapter: "Memory · what a weight is", plain: "A weight is a float: " + FP32B + " bytes",
+  notes: "Zoom all the way in on one parameter. W1[0][0] = 0.5 is a 32-bit " +
+    "IEEE-754 float: one sign bit, eight exponent bits, twenty-three mantissa " +
+    "bits. The tensor is not a grid in memory — it is one flat run of bytes, " +
+    "and the row/column structure is entirely a matter of strides.",
+  build: function () {
+    const bv = T.bitviews[0];
+    const rows = T.layout.cells.map(function (c) {
+      return el("tr", {}, [
+        el("td", {}, "W1[" + c.row + "][" + c.col + "]"),
+        el("td", { class: "n" }, String(c.flat_index)),
+        el("td", { class: "n" }, "+" + c.byte_offset),
+        el("td", { class: "n v-weight" }, f(c.value, 2))
+      ]);
+    });
+    return [
+      kicker("What a weight actually is"),
+      title("One parameter · <span class='mono'>" + bv.label + " = " +
+            W(bv.value, 2) + "</span>", true),
+      d("cols wide-l", [
+        d("stack", [
+          frag(panel("w", [ph("its " + bv.fp32.bytes + " bytes, as bits (fp32)"),
+            NN.bitribbon(bv.fp32),
+            h("small muted",
+              "sign <span class='mono'>" + bv.fp32.sign + "</span> · exponent <span class='mono'>" +
+              bv.fp32.exponent + "</span> · mantissa <span class='mono'>" +
+              bv.fp32.mantissa + "</span>")]), "f-left"),
+          frag(NN.callout("key", "There is no “weight” object",
+            "A parameter is " + bv.fp32.bytes + " bytes at an address. The name " +
+            "<span class='mono'>W1[0][0]</span> is bookkeeping the framework " +
+            "does on your behalf."), "f-left")
+        ]),
+        frag(panel("acc", [
+          ph("W1 in memory · " + T.layout.order),
+          el("table", { class: "data" }, [
+            el("thead", {}, el("tr", {}, [
+              el("th", {}, "cell"), el("th", {}, "flat"),
+              el("th", {}, "byte"), el("th", {}, "value")])),
+            el("tbody", {}, rows)
+          ]),
+          h("small muted", "strides " + T.layout.strides_elements.join(", ") +
+            " elements = " + T.layout.strides_bytes_fp32.join(", ") + " bytes")
+        ]), "f-right")
+      ])
+    ];
+  }
+});
+
+/* ------------------------------------------------------ 6. not exact */
+S({
+  chapter: "Memory · what a weight is", plain: "Most weights are not the number you typed",
+  notes: "W1[0][1] is written as -0.2 but the float that lands in memory is " +
+    "not -0.2. Binary fractions cannot represent one fifth, exactly as decimal " +
+    "cannot represent one third. This is not a bug and you should not chase it " +
+    "— but it is the reason gradient checks compare with a tolerance rather " +
+    "than for equality.",
+  build: function () {
+    const bv = T.bitviews[1];
+    return [
+      kicker("Precision"),
+      title("You wrote <span class='mono v-weight'>" + f(bv.value, 2) +
+            "</span>. Memory holds <span class='mono v-weight'>" +
+            bv.fp32.exact + "</span>.", true),
+      frag(panel("w", [ph(bv.label + " · fp32 · " + bv.fp32.bytes + " bytes"),
+        NN.bitribbon(bv.fp32)]), "f-fade"),
+      frag(d("cols", [
+        NN.formula({ rule: "stored value", sub: "sign × 2^exponent × 1.mantissa",
+                     result: String(bv.fp32.exact), cls: "weight" }),
+        NN.formula({ rule: "error", sub: f(bv.fp32.exact, 12) + " − (" + bv.value + ")",
+                     result: (bv.fp32.exact - bv.value).toExponential(2), cls: "weight" })
+      ])),
+      frag(NN.callout("why", "Why this matters later",
+        "Every float you meet is an approximation with a fixed number of " +
+        "significant digits. When we drop to " + BF16B * 8 + "-bit weights on the " +
+        "next slide, we keep the exponent — the range — and throw away digits. " +
+        "That trade is the whole of mixed-precision training. The gradient " +
+        "check for this model passes to " + f(T.gradcheck.max_abs_error, 1) +
+        ", which is float noise, not error."))
+    ];
+  }
+});
+
+/* ------------------------------------------------------- 7. bf16 vs fp32 */
+S({
+  chapter: "Memory · dtypes", plain: "bf16: same range, fewer digits, half the bytes",
+  notes: "bf16 keeps all eight exponent bits and truncates the mantissa from " +
+    "twenty-three bits to seven. Same dynamic range as fp32 — so no overflow " +
+    "surprises — but roughly three significant decimal digits. Halving the " +
+    "bytes halves weight memory, halves gradient traffic on the wire, and " +
+    "doubles the arithmetic throughput on tensor cores. Note the exact value " +
+    "changes: bf16 is a lossy container.",
+  build: function () {
+    const bv = T.bitviews[1];
+    const mantKeep = 1 + bv.fp32.exponent.length + bv.bf16.mantissa.length;
+    return [
+      kicker("Dtypes"),
+      title("bf16 keeps the exponent and throws away the digits", true),
+      frag(panel("w", [
+        ph("fp32 · " + bv.fp32.bytes + " bytes · exact " + bv.fp32.exact),
+        NN.bitribbon(bv.fp32)]), "f-left"),
+      frag(panel("w", [
+        ph("bf16 · " + bv.bf16.bytes + " bytes · exact " + bv.bf16.exact +
+           " · the greyed bits are simply gone"),
+        NN.bitribbon(bv.fp32, mantKeep)]), "f-left"),
+      frag(d("cols3", [
+        NN.tiles([{ k: "exponent bits", v: bv.fp32.exponent.length + " → " + bv.bf16.exponent.length,
+                    s: "identical range", cls: "weight" }]),
+        NN.tiles([{ k: "mantissa bits", v: bv.fp32.mantissa.length + " → " + bv.bf16.mantissa.length,
+                    s: "≈3 decimal digits", cls: "weight" }]),
+        NN.tiles([{ k: NPARAM + " params", v: BY(NPARAM * FP32B) + " → " + BY(NPARAM * BF16B),
+                    s: "×0.5 on every layer", cls: "weight" }])
+      ]), "f-fade"),
+      frag(NN.callout("mem", "The reason every large model trains in bf16",
+        "At " + bn(CFG.params) + " parameters (" + MODEL.name +
+        "), fp32 weights alone are " +
+        BY(CFG.params * FP32B) + ". In bf16 they are " + BY(CFG.params * BF16B) +
+        ". You still keep an fp32 master copy for the optimizer — we get to " +
+        "that arithmetic later — but every matmul and every all-reduce moves " +
+        "half as many bytes."))
+    ];
+  }
+});
+
+/* ------------------------------------------------- 8. forward overview */
+S({
+  chapter: "Forward pass", plain: "The forward pass, end to end",
+  notes: "Set up the next few slides. The forward pass is four operations: a " +
+    "matrix-vector product, a ReLU, another matrix-vector product, and a loss. " +
+    "Every arrow produces a tensor that has to be written down somewhere, and " +
+    "some of those tensors cannot be freed when the arrow finishes — which is " +
+    "the point we will keep returning to.",
+  build: function () {
+    const step = function (lab, val, note) {
+      return panel("a", [ph(lab), h("midnum v-activation", val),
+                         note ? h("small muted", note) : null]);
+    };
+    return [
+      kicker("Forward pass"),
+      title("Four operations, four tensors"),
+      frag(d("arrowline", [
+        step("x", "[" + T.forward.x.map(function (v) { return f(v, 1); }).join(", ") + "]",
+             "the input"),
+        h("ar", "→"),
+        frag(step("z1 = W1·x + b1",
+             "[" + T.forward.z1.map(function (v) { return f(v, 2); }).join(", ") + "]",
+             "pre-activation"), "f-pop"),
+        h("ar", "→"),
+        frag(step("a1 = relu(z1)",
+             "[" + T.forward.a1.map(function (v) { return f(v, 2); }).join(", ") + "]",
+             "one unit is dead"), "f-pop"),
+        h("ar", "→"),
+        frag(step("ŷ = W2·a1 + b2", f(T.forward.yhat, 2), "the prediction"), "f-pop")
+      ]), "f-fade"),
+      frag(netSVG({ height: 250, values: true, dead: true }), "f-fade"),
+      frag(NN.callout("key", "Watch what has to survive",
+        "<span class='mono'>x</span>, <span class='mono'>a1</span> and the ReLU " +
+        "mask are all still needed <em>after</em> the forward pass is finished. " +
+        "Nothing tells you that yet — the backward pass will."))
+    ];
+  }
+});
+
+/* --------------------------------------- 9-11. one hidden unit at a time */
+function z1Slide(i) {
+  const wk = T.forward.z1_work[i];
+  const dead = wk.out < 0;
+  return {
+    chapter: "Forward · hidden unit " + (i + 1),
+    plain: "z1[" + i + "] = " + f(wk.out, 2) + (dead ? "  (negative)" : ""),
+    notes: "Hidden unit " + (i + 1) + ". Two multiplies, one add, one bias. " +
+      "This is a matrix-vector product done by hand: row " + i + " of W1 against " +
+      "x. " + (dead
+        ? "This one comes out negative — " + f(wk.out, 2) + " — and that single " +
+          "fact will echo through the entire rest of the deck."
+        : "Nothing exotic; the only reason to show it is so that nobody thinks " +
+          "there is anything hidden inside a matmul."),
+    build: function (ctx) {
+      ctx.W1 = tn({ name: "W1", shape: [3, 2], values: T.init.W1, cls: "weight", digits: 2 });
+      ctx.x  = tn({ name: "x", shape: [2], values: T.forward.x, cls: "activation", digits: 2 });
+      ctx.b1 = tn({ name: "b1", shape: [3], values: T.init.b1, cls: "weight", digits: 2 });
+      ctx.acc = h("bignum v-activation", "0");
+      ctx.accLabel = h("small muted", "accumulator");
+      ctx.wk = wk;
+      const prods = wk.products.map(function (p, k) {
+        return frag(NN.formula({
+          rule: "W1[" + i + "][" + k + "] × x[" + k + "]",
+          sub: W(p.w, 2) + " × " + A(p.x, 2),
+          result: f(p.prod, 4), cls: "activation"
+        }), "f-right");
+      });
+      return [
+        kicker("Forward · multiply, accumulate"),
+        title("z1[" + i + "] &nbsp;=&nbsp; W1[" + i + "] · x + b1[" + i + "]", true),
+        d("cols wide-r", [
+          d("stack", [
+            d("rowflex top", [ctx.W1, ctx.x, ctx.b1]),
+            panel("a tight", [ctx.accLabel, ctx.acc])
+          ]),
+          d("stack", prods.concat([
+            frag(NN.formula({ rule: "sum of products",
+              sub: wk.products.map(function (p) { return f(p.prod, 2); }).join(" + "),
+              result: f(wk.sum_of_products, 4), cls: "activation" }), "f-right"),
+            frag(NN.formula({ rule: "+ bias b1[" + i + "]",
+              sub: f(wk.sum_of_products, 4) + " + " + W(wk.bias, 2),
+              result: f(wk.out, 4), cls: "activation" }), "f-right"),
+            frag(dead
+              ? h("deadflag", "z1[" + i + "] = " + f(wk.out, 2) + " — negative. " +
+                  "Remember this number.")
+              : h("pill", "z1[" + i + "] = " + f(wk.out, 2)), "f-pop")
+          ]))
+        ])
+      ];
+    },
+    render: function (n, ctx) {
+      const hot = [];
+      for (let k = 0; k < Math.min(n, 2); k++) hot.push([i, k]);
+      ctx.W1.highlight(hot.length ? hot : null, hot.length > 0);
+      ctx.x.highlight(hot.length ? hot.map(function (p) { return [p[1], 0]; }) : null,
+                      hot.length > 0);
+      ctx.b1.highlight(n >= 4 ? [[i, 0]] : null, n >= 4);
+      let v = 0, lab = "accumulator";
+      if (n >= 1) v = ctx.wk.products[0].prod;
+      if (n >= 2) v = ctx.wk.products[0].prod + ctx.wk.products[1].prod;
+      if (n >= 3) { v = ctx.wk.sum_of_products; lab = "sum of products"; }
+      if (n >= 4) { v = ctx.wk.out; lab = "z1[" + i + "] — pre-activation"; }
+      ctx.acc.textContent = f(v, 4);
+      ctx.accLabel.textContent = lab;
+    }
+  };
+}
+S(z1Slide(0)); S(z1Slide(1)); S(z1Slide(2));
+
+/* ------------------------------------------------------------ 12. ReLU */
+S({
+  chapter: "Forward · ReLU", plain: "ReLU kills unit 3 — the dead unit",
+  notes: "ReLU is max(0, z), applied elementwise. Units one and two pass " +
+    "through untouched. Unit three had a pre-activation of " +
+    f(T.forward.z1[2], 2) + ", so it becomes exactly zero. Two consequences, " +
+    "both of which we will cash in later: it contributes nothing to the " +
+    "prediction, and it will receive exactly zero gradient. Also point at the " +
+    "mask — one bit per unit — which the framework has to keep.",
+  build: function (ctx) {
+    ctx.z1 = tn({ name: "z1", shape: [3], values: T.forward.z1, cls: "activation",
+                  digits: 2, note: "pre-activation" });
+    ctx.a1 = tn({ name: "a1", shape: [3], values: T.forward.a1, cls: "activation",
+                  digits: 2, note: "post-activation" });
+    ctx.mk = tn({ name: "relu_mask", shape: [3], values: T.forward.relu_mask,
+                  cls: "activation", digits: 0, note: "1 = alive" });
+    return [
+      kicker("Forward · the nonlinearity"),
+      title("<span class='mono'>a1 = max(0, z1)</span>", true),
+      d("cols wide-l", [
+        frag(d("rowflex top", [ctx.z1, h("ar", "→"), ctx.a1, ctx.mk]), "f-fade"),
+        d("stack", [
+          frag(NN.formula({ rule: "relu(z1[2])", sub: "max(0, " + f(T.forward.z1[2], 2) + ")",
+                            result: f(T.forward.a1[2], 0), cls: "activation" }), "f-right"),
+          frag(h("deadflag", "Unit 3 is dead for this input."), "f-pop")
+        ])
+      ]),
+      frag(d("cols", [
+        NN.callout("why", "It cannot affect the prediction",
+          "a1[2] = " + A(T.forward.a1[2], 0) + ", so whatever W2[0][2] = " +
+          W(T.init.W2[0][2], 2) + " happens to be, that path contributes " +
+          f(T.init.W2[0][2] * T.forward.a1[2], 0) + " to the output."),
+        NN.callout("mem", "The mask is not free",
+          "Backward needs to know <em>which</em> units were alive. That is " +
+          T.forward.relu_mask.length + " more values here; in a transformer it is " +
+          "one byte or one bit per activation element, kept from forward until " +
+          "backward.")
+      ]), "f-fade")
+    ];
+  },
+  render: function (n, ctx) {
+    ctx.z1.highlight(n >= 1 ? [[2, 0]] : null, false);
+    ctx.a1.highlight(n >= 1 ? [[2, 0]] : null, false);
+    ctx.mk.highlight(n >= 1 ? [[2, 0]] : null, false);
+  }
+});
+
+/* -------------------------------------------------------- 13. output layer */
+S({
+  chapter: "Forward · output", plain: "ŷ = W2·a1 + b2 = " + f(T.forward.yhat, 2),
+  notes: "The output layer is one more dot product. Land hard on the third " +
+    "term: W2[0][2] times a1[2] is " + f(T.init.W2[0][2], 2) + " times zero, " +
+    "which is zero. The dead unit is not merely small — it is arithmetically " +
+    "absent. And there is no activation function on the output, because we are " +
+    "predicting an unbounded real number.",
+  build: function (ctx) {
+    const wk = T.forward.z2_work[0];
+    ctx.W2 = tn({ name: "W2", shape: [1, 3], values: T.init.W2, cls: "weight", digits: 2 });
+    ctx.a1 = tn({ name: "a1", shape: [3], values: T.forward.a1, cls: "activation", digits: 2 });
+    const prods = wk.products.map(function (p, k) {
+      const zero = p.prod === 0;
+      return frag(NN.formula({
+        rule: "W2[0][" + k + "] × a1[" + k + "]" + (zero ? "   ← the dead unit" : ""),
+        sub: W(p.w, 2) + " × " + A(p.x, 2),
+        result: f(p.prod, 4), cls: zero ? "gradient" : "activation"
+      }), "f-right");
+    });
+    return [
+      kicker("Forward · output layer"),
+      title("ŷ &nbsp;=&nbsp; W2 · a1 + b2", true),
+      d("cols wide-r", [
+        d("stack", [
+          frag(d("rowflex top", [ctx.W2, ctx.a1]), "f-fade"),
+          frag(h("deadflag", f(wk.products[2].w, 2) + " × " + f(wk.products[2].x, 1) + " = " +
+            f(wk.products[2].prod, 0) + " — the third path is arithmetically absent"), "f-pop")
+        ]),
+        d("stack", prods.concat([
+          frag(NN.formula({ rule: "sum + b2",
+            sub: f(wk.sum_of_products, 4) + " + " + W(wk.bias, 2),
+            result: f(wk.out, 4), cls: "activation" }), "f-right")
+        ]))
+      ])
+    ];
+  },
+  render: function (n, ctx) {
+    const k = Math.min(n, 3);
+    const hot = []; for (let i = 0; i < k; i++) hot.push([0, i]);
+    ctx.W2.highlight(hot.length ? hot : null, hot.length > 0);
+    ctx.a1.highlight(hot.length ? hot.map(function (p) { return [p[1], 0]; }) : null,
+                     hot.length > 0);
+  }
+});
+
+/* ------------------------------------------------------- 14. prediction */
+S({
+  chapter: "Forward · prediction", plain: "The prediction is wrong: " + f(T.forward.yhat, 2) + " vs " + f(T.forward.y, 1),
+  notes: "Here is the whole point of the forward pass: a number to be wrong " +
+    "about. We predicted " + f(T.forward.yhat, 2) + " hundred thousand dollars " +
+    "against a true price of " + f(T.forward.y, 1) + ". The error is " +
+    f(T.forward.error, 2) + " — and crucially it is signed. The sign says " +
+    "which direction to move; the magnitude says how far.",
+  build: function () {
+    return [
+      kicker("Forward · the result"),
+      title("A prediction, and how wrong it is"),
+      frag(d("cols3", [
+        panel("a", [ph("prediction ŷ"), h("bignum v-activation", f(T.forward.yhat, 2))]),
+        panel("acc", [ph("truth y"), h("bignum", f(T.forward.y, 2))]),
+        panel("g", [ph("error  ŷ − y"), h("bignum v-gradient", fS(T.forward.error, 2))])
+      ]), "f-pop"),
+      frag(say("The model predicted a <b>negative</b> price. That is what an " +
+        "untrained network does: the weights were chosen without ever having " +
+        "seen a house."), "f-fade"),
+      frag(NN.callout("key", "The sign is the useful part",
+        "An error of " + G(T.forward.error, 2) + " says: the prediction is too " +
+        "low, by a lot. Backpropagation is the machinery for splitting that one " +
+        "signed number across all " + NPARAM + " parameters, in proportion to " +
+        "how much each of them contributed."))
+    ];
+  }
+});
+
+/* ------------------------------------------------------------- 15. loss */
+S({
+  chapter: "Loss", plain: "Loss = (ŷ − y)² = " + f(T.forward.loss, 4),
+  notes: "Squaring does two jobs: it makes the error positive so that errors " +
+    "in both directions count as bad, and it punishes big misses more than " +
+    "small ones. The parabola on the right is the loss as a function of the " +
+    "prediction; we are sitting on the left arm of it, far from the bottom. " +
+    "Training is the process of sliding down that curve — except in " + NPARAM +
+    " dimensions instead of one.",
+  build: function () {
+    const pts = [];
+    for (let v = -2.2; v <= 3.3; v += 0.11) pts.push([v, (v - T.forward.y) * (v - T.forward.y)]);
+    const chart = NN.chart.line({
+      series: [
+        { name: "(ŷ − y)²", color: "var(--accent)", points: pts, dots: false },
+        { name: "we are here", color: "var(--activation)",
+          points: [[T.forward.yhat, T.forward.loss]] }
+      ],
+      width: 560, height: 250, xlabel: "prediction ŷ", ylabel: "loss"
+    });
+    return [
+      kicker("Loss"),
+      title("One number that says how bad the whole thing is", true),
+      d("cols", [
+        d("stack", [
+          frag(NN.formula({ rule: "L = (ŷ − y)²",
+            sub: "(" + f(T.forward.yhat, 2) + " − " + f(T.forward.y, 1) + ")²",
+            result: f(T.forward.loss, 4), cls: "gradient" }), "f-left"),
+          frag(NN.formula({ rule: "= error²",
+            sub: "(" + f(T.forward.error, 2) + ")²",
+            result: f(T.forward.loss, 4), cls: "gradient" }), "f-left"),
+          frag(NN.callout("why", "Why square it",
+            "Squaring makes both directions of error costly, and makes big " +
+            "misses hurt disproportionately. It also has a very convenient " +
+            "derivative — <span class='mono'>2(ŷ − y)</span> — which is the " +
+            "first thing the backward pass computes."), "f-left")
+        ]),
+        frag(d("panel g", [ph("the loss surface, in one dimension"), chart,
+          chartKey([{ name: "(ŷ − y)² for any prediction", color: "var(--accent)" },
+                    { name: "our ŷ = " + f(T.forward.yhat, 2), color: "var(--activation)" }])]), "f-right")
+      ])
+    ];
+  }
+});
+
+/* -------------------------------------------------- 16. why one scalar */
+S({
+  chapter: "Loss", plain: "Why the loss must be a single scalar",
+  notes: "This is a question people rarely ask and always benefit from. A " +
+    "derivative dL/dθ only makes sense if L is one number: 'if I nudge this " +
+    "one parameter, how much does that one number change?' If the loss were a " +
+    "vector you would get a Jacobian per parameter and no way to rank two " +
+    "candidate updates. The whole of training is: collapse everything to one " +
+    "scalar, then take " + NPARAM + " partial derivatives of it.",
+  build: function () {
+    return [
+      kicker("Loss"),
+      title("Everything funnels through one number"),
+      frag(d("arrowline", [
+        panel("a tight", [ph(NPARAM + " parameters"), h("midnum v-weight", String(NPARAM))]),
+        h("ar", "→"),
+        panel("a tight", [ph("one prediction"), h("midnum v-activation", f(T.forward.yhat, 2))]),
+        h("ar", "→"),
+        panel("g tight", [ph("one scalar loss"), h("midnum v-gradient", f(T.forward.loss, 4))]),
+        h("ar", "⇢"),
+        frag(panel("g tight", [ph("back out: " + NPARAM + " partials"),
+          h("midnum v-gradient", "∂L/∂θᵢ")]), "f-pop")
+      ]), "f-fade"),
+      frag(NN.callout("key", "A derivative needs a scalar",
+        "<span class='mono'>∂L/∂θᵢ</span> asks: if I nudge parameter i, how much " +
+        "does L change? That question only has a single answer when L is a " +
+        "single number. Multi-objective training does exist — it just weights " +
+        "the objectives into one scalar first."), "f-fade"),
+      frag(d("cols", [
+        NN.tiles([{ k: "loss", v: f(T.forward.loss, 4), s: "one scalar", cls: "gradient" }]),
+        NN.tiles([{ k: "gradients to compute", v: String(NPARAM),
+                    s: "one per parameter", cls: "gradient" }])
+      ]))
+    ];
+  }
+});
+
+/* ============================================== backward pass machinery */
+const STEPS = T.backward.steps;
+const NSTEP = STEPS.length;
+const SAVED_KEYS = Object.keys(T.forward.saved_for_backward);
+const READ_SRC = {
+  x:         { values: T.forward.x,          cls: "activation", shape: [2],
+               why: "the layer input, saved during the forward pass" },
+  a1:        { values: T.forward.a1,         cls: "activation", shape: [3],
+               why: "the hidden activation, saved during the forward pass" },
+  relu_mask: { values: T.forward.relu_mask,  cls: "activation", shape: [3],
+               why: "which units were alive, saved during the forward pass" },
+  W2:        { values: T.init.W2,            cls: "weight",     shape: [1, 3],
+               why: "a live parameter — nothing had to be saved for this one" }
+};
+function isSaved(name) { return SAVED_KEYS.indexOf(name) >= 0; }
+
+/* -------------------------------------------------- 17. backward plan */
+S({
+  chapter: "Backward pass", plain: "The plan: " + NSTEP + " steps, right to left",
+  notes: "Before we walk it, the shape of the thing. Backpropagation is the " +
+    "chain rule applied " + NSTEP + " times, from the loss backwards to the " +
+    "first weight matrix. Each step takes the gradient that arrived from its " +
+    "right and produces the gradient to pass further left, plus — if it owns " +
+    "parameters — the gradient for those. Keep an eye on the READS line on " +
+    "each of the next " + NSTEP + " slides; that is the whole argument of this deck.",
+  build: function () {
+    const chain = STEPS.map(function (s, i) {
+      return frag(d("pill" + (s.reads.some(isSaved) ? " hot" : ""),
+        (i + 1) + ". " + s.label + (s.reads.length ? "  ← " + s.reads.join(", ") : "")), "f-pop");
+    });
+    return [
+      kicker("Backward pass"),
+      title("The chain rule, " + NSTEP + " times, in reverse order"),
+      frag(netSVG({ height: 230, back: true, dead: true, labels: false, values: true }), "f-fade"),
+      d("rowflex", chain),
+      frag(NN.callout("key", "Read the arrows on the left of each step",
+        "Some steps need nothing but the gradient flowing in. Others must " +
+        "re-read a tensor that the <em>forward</em> pass produced. Those are the " +
+        "reason activation memory exists, and the reason it scales with batch " +
+        "size and sequence length."), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------ 18..(17+NSTEP). one per step */
+/* Presenter framing per step, keyed by the id in the trace. The factual
+   note always comes from T.backward.steps[i].note. */
+const STEP_SAY = {
+  dL_dyhat: "Where every gradient in the network comes from. The derivative of " +
+    "a square is two times the thing, and the thing is the signed error. Note " +
+    "it is bigger than the error itself — the 2 is real and it propagates.",
+  dL_dz2: "A free step, and worth saying so. The output has no activation " +
+    "function, so the gradient passes through untouched. In a network with a " +
+    "sigmoid or softmax head this is where that derivative would appear.",
+  dL_dW2: "The first weight gradient, and the first time backward has to look " +
+    "backwards in time. Say the sentence explicitly: to know how much a weight " +
+    "is to blame, you have to know what it was multiplied by.",
+  dL_db2: "Biases are the easy case. A bias adds itself in with a coefficient " +
+    "of one, so its derivative is one, so it simply receives whatever arrived. " +
+    "No saved tensor needed — which is why bias gradients are never the " +
+    "memory problem.",
+  dL_da1: "The gradient crosses a layer boundary. This one reads the weights, " +
+    "not an activation — and the weights are live parameters we are keeping " +
+    "anyway. Contrast the two rules: input-gradient uses the weights, " +
+    "weight-gradient uses the input.",
+  dL_dz1: "The ReLU derivative is a gate: one where the unit was alive, zero " +
+    "where it was clamped. That means backward must know which units were " +
+    "alive, which means the mask had to be saved. And here is where the dead " +
+    "unit's gradient becomes exactly zero.",
+  dL_dW1: "The same rule as dL/dW2, one layer down, and the same dependency on " +
+    "a saved tensor — this time the network input itself. Point at the third " +
+    "row while you say it: two zeros, because the incoming gradient for that " +
+    "unit was zero.",
+  dL_db1: "The last step, and the cheapest. Every bias gradient in the network " +
+    "is just the gradient of its own pre-activation. We now have all " +
+    NPARAM + " numbers and the backward pass is finished."
+};
+STEPS.forEach(function (st, si) {
+  const arr = Array.isArray(st.value);
+  const flat = arr ? [].concat.apply([], st.value) : [st.value];
+  const readsSaved = st.reads.some(isSaved);
+  S({
+    chapter: "Backward · step " + (si + 1) + " of " + NSTEP,
+    plain: st.label + " = " + (arr
+      ? "[" + flat.map(function (v) { return f(v, 2); }).join(", ") + "]"
+      : fS(st.value, 3)),
+    notes: st.note + "  ——  " + STEP_SAY[st.id] + (readsSaved
+      ? "  ——  Stop here. This step cannot be computed from the incoming " +
+        "gradient alone: it re-reads " + st.reads.join(" and ") + ", a tensor " +
+        "the forward pass produced and the framework has been holding in " +
+        "memory ever since."
+      : ""),
+    build: function (ctx) {
+      const valNode = arr
+        ? tn({ name: st.label, values: st.value, cls: "gradient", digits: 4, signed: true })
+        : h("bignum v-gradient", fS(st.value, 4));
+
+      const readNodes = st.reads.length
+        ? st.reads.map(function (r) {
+            const src = READ_SRC[r];
+            return d("readbox" + (isSaved(r) ? "" : " wgt"), [
+              h("rt", isSaved(r)
+                ? "READS SAVED ACTIVATION · " + r
+                : "READS LIVE PARAMETER · " + r),
+              d("rowflex", [
+                tn({ name: r, shape: src.shape, values: src.values, cls: src.cls, digits: 2 }),
+                h("say", src.why)
+              ])
+            ]);
+          })
+        : [d("readbox none", [h("rt", "READS NOTHING SAVED"),
+            h("say", "Only the gradient flowing in from the right.")])];
+
+      return [
+        kicker("Backward · step <b>" + (si + 1) + " / " + NSTEP + "</b> · " +
+               "<span class='mono'>" + st.id + "</span>"),
+        title("<span class='mono v-gradient'>" + st.label + "</span>", true),
+        d("cols wide-l", [
+          d("stack", [
+            frag(NN.formula({ rule: st.formula, cls: "gradient" }), "f-left"),
+            frag(NN.formula({ rule: "substitute", sub: st.substitution, cls: "gradient" }), "f-left"),
+            frag(d("panel g", [ph("result · " + st.label), valNode]), "f-pop")
+          ]),
+          d("stack", readNodes.map(function (rn, k) {
+            return frag(rn, "f-right");
+          }))
+        ]),
+        frag(h("say", st.note), "f-fade")
+      ];
+    }
+  });
+});
+
+/* ------------------------------------------------- the thesis slide */
+S({
+  chapter: "Backward pass · the thesis", plain: "Backward reads forward. That is why activations are stored.",
+  notes: "This is the single most important slide in the deck. Of the " + NSTEP +
+    " backward steps, " + STEPS.filter(function (s) { return s.reads.some(isSaved); }).length +
+    " re-read a tensor produced during the forward pass. A weight gradient is " +
+    "always the incoming gradient times the saved input. So the framework " +
+    "cannot free x, a1 or the ReLU mask when the forward pass ends — it has to " +
+    "hold them until backward consumes them. That is activation memory, and " +
+    "unlike weight memory it scales with batch size and sequence length.",
+  build: function () {
+    const rows = STEPS.map(function (s) {
+      const saved = s.reads.some(isSaved);
+      return el("tr", {}, [
+        el("td", {}, s.label),
+        el("td", { style: { textAlign: "left" }, html: s.reads.length
+          ? s.reads.map(function (r) {
+              return "<span class='mono " + (isSaved(r) ? "v-activation" : "v-weight") +
+                     "'>" + r + "</span>";
+            }).join(", ")
+          : "<span class='muted'>—</span>" }),
+        el("td", { style: { textAlign: "left" }, html: saved
+          ? "<span class='v-activation'>saved from forward</span>"
+          : (s.reads.length ? "<span class='v-weight'>live parameter</span>"
+                            : "<span class='muted'>incoming gradient only</span>") })
+      ]);
+    });
+    const nSaved = STEPS.filter(function (s) { return s.reads.some(isSaved); }).length;
+    return [
+      kicker("The thesis"),
+      el("h2", { class: "stitle", html:
+        "The backward pass <span class='v-activation'>re-reads</span> the forward pass." }),
+      d("cols wide-l", [
+        frag(d("panel a", [
+          ph("what each of the " + NSTEP + " steps had to read"),
+          el("table", { class: "data" }, [
+            el("thead", {}, el("tr", {}, [
+              el("th", {}, "step"), el("th", { style: { textAlign: "left" } }, "reads"),
+              el("th", { style: { textAlign: "left" } }, "kind")])),
+            el("tbody", {}, rows)
+          ])
+        ]), "f-left"),
+        d("stack", [
+          frag(NN.tiles([
+            { k: "steps", v: String(NSTEP), s: "chain-rule links" },
+            { k: "read a saved activation", v: String(nSaved),
+              s: SAVED_KEYS.join(", "), cls: "activation" }
+          ]), "f-right"),
+          frag(NN.callout("mem", "This is the whole argument",
+            "A weight gradient is <em>always</em> the incoming gradient times " +
+            "the saved input: <span class='mono'>dL/dW = dL/dz ⊗ inputᵀ</span>. " +
+            "So the input has to still be there. The forward pass cannot free " +
+            "its outputs — it has to hand them to the backward pass, which may " +
+            "not run for milliseconds."), "f-right"),
+          frag(NN.callout("warn", "And it scales with the batch, not the model",
+            "Weights are fixed by the architecture. Activations are " +
+            "<span class='mono'>batch × sequence × hidden</span> per layer. " +
+            "Double the batch and weight memory does not move — activation " +
+            "memory doubles."), "f-right")
+        ])
+      ])
+    ];
+  }
+});
+
+/* ----------------------------------------------- the dead unit's gradient */
+S({
+  chapter: "Backward · the dead unit", plain: "The dead unit's gradient is exactly zero",
+  notes: "Cash in the promise from the forward pass. Unit 3 had a " +
+    "pre-activation of " + f(T.forward.z1[2], 2) + ", ReLU clamped it to zero, " +
+    "so the mask entry is zero, so dL/dz1[2] is zero, so the entire row of " +
+    "dL/dW1 for that unit is zero — not small, exactly zero. It contributed " +
+    "nothing to the prediction, so it takes none of the blame. And because SGD " +
+    "multiplies the gradient by the learning rate, those weights will not move " +
+    "this step. If the unit stays negative for every input, it never moves again.",
+  build: function (ctx) {
+    ctx.dW1 = tn({ name: "dL/dW1", shape: [3, 2], values: T.backward.dL_dW1,
+                   cls: "gradient", digits: 3, signed: true });
+    ctx.db1 = tn({ name: "dL/db1", shape: [3], values: T.backward.dL_db1,
+                   cls: "gradient", digits: 3, signed: true });
+    ctx.mk  = tn({ name: "relu_mask", shape: [3], values: T.forward.relu_mask,
+                   cls: "activation", digits: 0 });
+    return [
+      kicker("The dead unit"),
+      title("Row 2 of <span class='mono'>dL/dW1</span> is <span class='v-gradient'>[0, 0]</span>", true),
+      d("cols wide-l", [
+        frag(d("rowflex top", [ctx.dW1, ctx.db1, ctx.mk]), "f-fade"),
+        d("stack", [
+          frag(NN.formula({ rule: "dL/dz1[2] = dL/da1[2] × mask[2]",
+            sub: fS(T.backward.dL_da1[2], 3) + " × " + f(T.forward.relu_mask[2], 0),
+            result: f(T.backward.dL_dz1[2], 0), cls: "gradient" }), "f-right"),
+          frag(NN.formula({ rule: "dL/dW1[2] = dL/dz1[2] ⊗ xᵀ",
+            sub: f(T.backward.dL_dz1[2], 0) + " × [" +
+                 T.forward.x.map(function (v) { return f(v, 1); }).join(", ") + "]",
+            result: "[" + T.backward.dL_dW1[2].map(function (v) { return f(v, 0); }).join(", ") + "]",
+            cls: "gradient" }), "f-right"),
+          frag(h("deadflag", "Exactly zero — not merely small"), "f-pop")
+        ])
+      ]),
+      frag(NN.callout("warn", "A dying ReLU",
+        "The update is <span class='mono'>θ − lr × 0 = θ</span>: these three " +
+        "weights do not move this step. If unit 3 is negative for every input " +
+        "in the dataset, it receives zero gradient forever and is permanently " +
+        "dead capacity — memory and FLOPs spent on a unit that can never learn. " +
+        "This is why leaky ReLU, GELU and SiLU exist."), "f-fade")
+    ];
+  },
+  render: function (n, ctx) {
+    const on = n >= 1;
+    ctx.dW1.highlight(on ? [[2, 0], [2, 1]] : null, on);
+    ctx.db1.highlight(on ? [[2, 0]] : null, on);
+    ctx.mk.highlight(on ? [[2, 0]] : null, on);
+  }
+});
+
+/* --------------------------------------------- gradients mirror weights */
+S({
+  chapter: "Gradients", plain: "A gradient has the same shape as its weight",
+  notes: "Every parameter tensor gets a gradient tensor of identical shape. " +
+    "Not similar — identical, element for element, because there is exactly " +
+    "one partial derivative per parameter. That is why gradient memory is " +
+    "always the same size as weight memory in the same dtype. The finite " +
+    "difference check on the right is worth mentioning: the analytic gradients " +
+    "agree with numerically perturbing each of the " + NPARAM + " parameters to " +
+    f(T.gradcheck.max_abs_error, 1) + ".",
+  build: function () {
+    const pair = function (name, wv, gv, shape) {
+      return d("stack", [
+        tn({ name: name, shape: shape, values: wv, cls: "weight", digits: 2 }),
+        tn({ name: "dL/d" + name, shape: shape, values: gv, cls: "gradient",
+             digits: 2, signed: true })
+      ]);
+    };
+    return [
+      kicker("Gradients"),
+      title("Same shape. Same element count. Different meaning."),
+      frag(d("rowflex top", [
+        pair("W1", T.init.W1, T.backward.dL_dW1, [3, 2]),
+        pair("b1", T.init.b1, T.backward.dL_db1, [3]),
+        pair("W2", T.init.W2, T.backward.dL_dW2, [1, 3]),
+        pair("b2", T.init.b2, T.backward.dL_db2, [1])
+      ]), "f-pop"),
+      frag(d("cols", [
+        NN.tiles([
+          { k: "weights", v: String(N_W), s: "elements", cls: "weight" },
+          { k: "parameter gradients", v: String(N_G), s: "exactly one each",
+            cls: "gradient" },
+          { k: "+ transient node grads", v: String(N_GNODE),
+            s: "dL/dz1 and friends", cls: "gradient" }
+        ]),
+        NN.callout("why", "Verified, not asserted",
+          "Every gradient here was checked against a finite-difference estimate: " +
+          "nudge one parameter by ε, re-run the forward pass, divide the change " +
+          "in loss by ε. Max absolute disagreement across all " + NPARAM +
+          " parameters: <span class='mono'>" + f(T.gradcheck.max_abs_error, 1) +
+          "</span>. That is float noise.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------------------- memory doubles */
+S({
+  chapter: "Gradients · memory", plain: "Gradients double the parameter memory",
+  notes: "Arithmetic, out loud: " + N_W + " weight elements at " + FP32B +
+    " bytes is " + B_W + " bytes. The parameter gradients are the same count in " +
+    "the same dtype, so the moment the backward pass finishes you are holding " +
+    (B_W + B_G) + " bytes instead of " + B_W + ". Backward also allocates " +
+    N_GNODE + " elements of transient node gradients (" + B_GNODE + " bytes) " +
+    "that are freed as the chain rule moves on. That is all before the " +
+    "optimizer has asked for anything, and nothing about the 1:1 ratio changes " +
+    "at " + bn(CFG.params) + " — it is one gradient per parameter, always.",
+  build: function (ctx) {
+    ctx.host = d("stack");
+    return [
+      kicker("Memory"),
+      title("Backward doubles what you are holding"),
+      frag(d("panel w", [ph("weights only · " + N_W + " × " + FP32B + " B"),
+        NN.memstrip([{ cls: "weight", bytes: B_W, label: "weights " + BY(B_W) }],
+                    B_W + B_G)]), "f-fade"),
+      frag(d("panel g", [ph("after backward · weights + gradients"),
+        NN.memstrip([
+          { cls: "weight", bytes: B_W, label: "weights " + BY(B_W) },
+          { cls: "gradient", bytes: B_G, label: "gradients " + BY(B_G) }
+        ], B_W + B_G)]), "f-fade"),
+      frag(NN.tiles([
+        { k: "weights", v: BY(B_W), s: N_W + " × " + FP32B + " bytes", cls: "weight" },
+        { k: "gradients", v: BY(B_G), s: N_G + " × " + FP32B + " bytes", cls: "gradient" },
+        { k: "total", v: BY(B_W + B_G), s: "×2 the model", cls: "gradient" },
+        { k: "at " + bn(CFG.params) + " params", v: BY(CFG.params * FP32B * 2),
+          s: "fp32 weights + grads" }
+      ])),
+      frag(h("small muted",
+        "Backward also holds " + N_GNODE + " elements (" + B_GNODE + " B) of " +
+        "<em>transient</em> node gradients — <span class='mono'>dL/dŷ</span>, " +
+        "<span class='mono'>dL/dz2</span>, <span class='mono'>dL/da1</span>, " +
+        "<span class='mono'>dL/dz1</span> — which are freed as soon as the " +
+        "chain rule has moved past them. Only the " + N_G +
+        " parameter gradients survive to the optimizer step.")),
+      frag(NN.callout("mem", "And the gradient is short-lived",
+        "Gradients are born in the backward pass and are dead the instant the " +
+        "optimizer has consumed them. That lifetime asymmetry — weights forever, " +
+        "gradients for one step — is exactly what ZeRO-2 exploits."))
+    ];
+  }
+});
+
+/* ==================================================== optimizer helpers */
+function chunkRows(flat, cols) {
+  const out = [];
+  for (let i = 0; i < flat.length; i += cols) out.push(flat.slice(i, i + cols));
+  return out;
+}
+function unpack(vec) {
+  let k = 0; const out = {};
+  T.param_layout.forEach(function (p) {
+    const n = p.shape.reduce(function (a, b) { return a * b; }, 1);
+    const flat = vec.slice(k, k + n); k += n;
+    out[p.name] = p.shape.length === 2 ? chunkRows(flat, p.shape[1]) : flat;
+  });
+  return out;
+}
+const SGD0 = T.runs.sgd.history[0];
+const MOM0 = T.runs.momentum.history[0], MOM1 = T.runs.momentum.history[1];
+const ADA0 = T.runs.adam.history[0];
+const lossPts = function (run) {
+  return T.runs[run].history.map(function (r) { return [r.t, r.loss]; });
+};
+
+/* ---------------------------------------------------------- SGD update */
+S({
+  chapter: "Optimizer · SGD", plain: "SGD: θ ← θ − lr · g",
+  notes: "The simplest possible optimizer, and the arithmetic is one line. " +
+    "Take W1[0][0]: it was " + f(SGD0.theta[0], 2) + ", its gradient is " +
+    fS(SGD0.grad[0], 3) + ", the learning rate is " + HP.lr + ", so it moves to " +
+    f(SGD0.theta_after[0], 4) + ". Note the minus sign: the gradient points " +
+    "uphill, we want to go downhill. Note also that the two dead-unit weights " +
+    "do not move at all.",
+  build: function (ctx) {
+    const before = unpack(SGD0.theta), after = unpack(SGD0.theta_after);
+    ctx.bt = tn({ name: "W1 (before)", shape: [3, 2], values: before.W1, cls: "weight", digits: 3 });
+    ctx.gt = tn({ name: "dL/dW1", shape: [3, 2], values: T.backward.dL_dW1,
+                  cls: "gradient", digits: 3, signed: true });
+    ctx.at = tn({ name: "W1 (after)", shape: [3, 2], values: after.W1, cls: "weight", digits: 3 });
+    return [
+      kicker("Optimizer · stochastic gradient descent"),
+      title("<span class='mono'>θ ← θ − " + HP.lr + " × g</span>", true),
+      frag(d("rowflex top", [ctx.bt, h("ar", "−  lr ×"), ctx.gt, h("ar", "="), ctx.at]), "f-fade"),
+      frag(d("cols", [
+        NN.formula({ rule: "W1[0][0]",
+          sub: W(SGD0.theta[0], 2) + " − " + HP.lr + " × " + G(SGD0.grad[0], 4),
+          result: f(SGD0.theta_after[0], 4), cls: "weight" }),
+        NN.formula({ rule: "W1[2][0]  (the dead unit)",
+          sub: W(SGD0.theta[4], 2) + " − " + HP.lr + " × " + G(SGD0.grad[4], 1),
+          result: f(SGD0.theta_after[4], 4), cls: "weight" })
+      ]), "f-fade"),
+      frag(d("cols", [
+        NN.callout("why", "Why minus",
+          "The gradient points in the direction of steepest <em>increase</em> " +
+          "of the loss. We want a decrease, so we step against it. The learning " +
+          "rate " + O(HP.lr, 2) + " decides how far — too small and nothing " +
+          "happens, too large and you overshoot the valley."),
+        NN.callout("mem", "Memory cost of SGD: zero extra",
+          "Plain SGD keeps no state between steps. Weights " + BY(B_W) +
+          " and gradients " + BY(B_G) + " and nothing else — " + R_SGD.bytes_per_param +
+          " bytes per parameter in fp32 (" + R_SGD.name + "). Every optimizer after this one buys " +
+          "faster convergence with memory.")
+      ]), "f-fade")
+    ];
+  },
+  render: function (n, ctx) {
+    const hot = n >= 2 ? [[0, 0]] : null;
+    ctx.bt.highlight(hot, false); ctx.gt.highlight(hot, false); ctx.at.highlight(hot, false);
+  }
+});
+
+/* ----------------------------------------------------------- momentum */
+S({
+  chapter: "Optimizer · momentum", plain: "Momentum: one extra tensor, remembers direction",
+  notes: "Momentum keeps a running average of past gradients — a velocity — " +
+    "and steps along that instead of the raw gradient. On step 1 the velocity " +
+    "is just the gradient. By step 2 it already carries " + HP.beta1 +
+    " of the first step forward, which is why it accelerates down long shallow " +
+    "valleys and damps oscillation across narrow ones. The cost is one more " +
+    "tensor the same size as the parameters: " + R_MOM.bytes_per_param + " bytes per " +
+    "parameter in fp32 instead of " + R_SGD.bytes_per_param + ".",
+  build: function () {
+    const chart = NN.chart.line({
+      series: [
+        { name: "SGD", color: "var(--accent)", points: lossPts("sgd") },
+        { name: "momentum", color: "var(--warning)", points: lossPts("momentum") }
+      ],
+      width: 560, height: 240, xlabel: "step", ylabel: "loss"
+    });
+    return [
+      kicker("Optimizer · momentum"),
+      title("Remember where you were going", true),
+      d("cols", [
+        d("stack", [
+          frag(NN.formula({ rule: "v ← β·v + g",
+            sub: "β = " + HP.beta1 + ", v starts at 0", cls: "optimizer" }), "f-left"),
+          frag(NN.formula({ rule: "θ ← θ − lr·v", cls: "optimizer" }), "f-left"),
+          frag(d("panel o", [ph("velocity for W1[0][0]"),
+            el("table", { class: "data" }, [
+              el("thead", {}, el("tr", {}, [el("th", {}, "step"), el("th", {}, "g"),
+                el("th", {}, "v"), el("th", {}, "θ after")])),
+              el("tbody", {}, [MOM0, MOM1].map(function (r) {
+                return el("tr", {}, [
+                  el("td", {}, "t = " + r.t),
+                  el("td", { class: "n v-gradient" }, fS(r.grad[0], 3)),
+                  el("td", { class: "n v-optimizer" }, fS(r.velocity[0], 3)),
+                  el("td", { class: "n v-weight" }, f(r.theta_after[0], 3))
+                ]);
+              }))
+            ])]), "f-left")
+        ]),
+        d("stack", [
+          frag(d("panel acc", [ph("loss over " + HP.n_steps + " steps"), chart,
+            chartKey([{ name: "SGD", color: "var(--accent)" },
+                      { name: "momentum", color: "var(--warning)" }])]), "f-right"),
+          frag(NN.callout("mem", "One extra tensor, forever",
+            "The velocity is the same shape as the parameters and lives for the " +
+            "whole run — it is <em>optimizer state</em>, our fourth tensor class. " +
+            "<span class='mono'>" + R_MOM.name + "</span> costs " +
+            R_MOM.bytes_per_param + " bytes per parameter: " +
+            R_MOM.components.weight + " weights + " + R_MOM.components.gradient +
+            " gradients + " + R_MOM.components.optimizer + " velocity."), "f-right")
+        ])
+      ])
+    ];
+  }
+});
+
+/* ------------------------------------------------------------ Adam m,v */
+S({
+  chapter: "Optimizer · Adam", plain: "Adam keeps two state tensors: m and v",
+  notes: "Adam keeps two running averages per parameter: m, the mean of the " +
+    "gradient, and v, the mean of the gradient squared. Dividing m by the root " +
+    "of v gives every parameter its own effective learning rate — big for " +
+    "parameters with small, consistent gradients, small for parameters with " +
+    "large, noisy ones. Two tensors, both the size of the model, both living " +
+    "for the entire run. That is where the memory goes.",
+  build: function () {
+    const chart = NN.chart.line({
+      series: [
+        { name: "SGD", color: "var(--accent)", points: lossPts("sgd") },
+        { name: "momentum", color: "var(--warning)", points: lossPts("momentum") },
+        { name: "Adam", color: "var(--critical)", points: lossPts("adam") }
+      ],
+      width: 560, height: 240, xlabel: "step", ylabel: "loss"
+    });
+    return [
+      kicker("Optimizer · Adam"),
+      title("Two more tensors, both the size of the model"),
+      frag(d("panel g tight", [
+        tn({ name: "g  ·  the gradient, t = 1", shape: [NPARAM],
+             values: chunkRows(ADA0.grad, NPARAM), cls: "gradient", digits: 2, signed: true })
+      ]), "f-fade"),
+      frag(d("panel o tight", [
+        tn({ name: "m = (1−β₁)·g  ·  mean of the gradient", shape: [NPARAM],
+             values: chunkRows(ADA0.m, NPARAM), cls: "optimizer", digits: 3, signed: true })
+      ]), "f-fade"),
+      frag(d("panel o tight", [
+        tn({ name: "v = (1−β₂)·g²  ·  mean of its square", shape: [NPARAM],
+             values: chunkRows(ADA0.v, NPARAM), cls: "optimizer", digits: 4 })
+      ]), "f-fade"),
+      d("cols", [
+        frag(d("panel acc", [ph("loss · " + HP.n_steps + " steps, same start"), chart,
+          chartKey([{ name: "SGD", color: "var(--accent)" },
+                    { name: "momentum", color: "var(--warning)" },
+                    { name: "Adam", color: "var(--critical)" }])]), "f-right"),
+        frag(NN.callout("mem", "The bill for adaptivity",
+          "m and v are each " + NPARAM + " numbers here and <em>n_params</em> " +
+          "numbers in any real model, held in fp32 for the whole run. " +
+          OPT_TENSORS + " tensors × " + FP32B + " bytes = " +
+          (OPT_TENSORS * FP32B) + " bytes per parameter of pure optimizer state, " +
+          "on top of weights and gradients."), "f-right")
+      ])
+    ];
+  }
+});
+
+/* --------------------------------------------------------- t=1 surprise */
+S({
+  chapter: "Optimizer · Adam", plain: "The t = 1 surprise: Adam takes a step of exactly ±lr",
+  notes: "This surprises people every time. At t=1 the bias correction " +
+    "divides m by (1−β₁) and v by (1−β₂), which exactly undoes the first " +
+    "update — so m̂ is the raw gradient and v̂ is the raw gradient squared. " +
+    "The update becomes lr·g/(|g| + ε), which is lr times the sign of g. Look " +
+    "at the numbers: a gradient of " + fS(ADA0.adam_detail[0].g, 3) + " and a " +
+    "gradient of " + fS(ADA0.adam_detail[12].g, 3) + " produce the same size " +
+    "step. Adam's first step ignores gradient magnitude completely. And the " +
+    "dead-unit parameters, with g = 0, get 0/(0+ε) = 0 — they still do not move.",
+  build: function () {
+    const det = ADA0.adam_detail;
+    const pick = [0, 1, 4, 12];
+    const rows = pick.map(function (i) {
+      const a = det[i];
+      return el("tr", {}, [
+        el("td", {}, T.param_names[i]),
+        el("td", { class: "n v-gradient" }, fS(a.g, 3)),
+        el("td", { class: "n v-optimizer" }, fS(a.m_hat, 3)),
+        el("td", { class: "n v-optimizer" }, f(a.v_hat, 3)),
+        el("td", { class: "n" }, fS(-a.update, 5)),
+        el("td", { class: "n v-weight" }, f(a.after, 4))
+      ]);
+    });
+    return [
+      kicker("Optimizer · Adam at t = 1"),
+      title("Every parameter takes a step of exactly <span class='mono'>±" +
+            HP.lr + "</span>", true),
+      d("cols wide-r", [
+        d("stack", [
+          frag(NN.formula({ rule: "m̂ = m / (1 − β₁ᵗ)",
+            sub: "at t=1 this is exactly g", cls: "optimizer" }), "f-left"),
+          frag(NN.formula({ rule: "v̂ = v / (1 − β₂ᵗ)",
+            sub: "at t=1 this is exactly g²", cls: "optimizer" }), "f-left"),
+          frag(NN.formula({ rule: "update = lr · m̂ / (√v̂ + ε)",
+            sub: "= lr · g / (|g| + " + HP.eps + ") = lr · sign(g)",
+            result: f(Math.abs(det[0].update), 6), cls: "optimizer" }), "f-left")
+        ]),
+        frag(d("panel o", [
+          ph("four of the " + NPARAM + " parameters, t = 1"),
+          el("table", { class: "data" }, [
+            el("thead", {}, el("tr", {}, [
+              el("th", {}, "param"), el("th", {}, "g"), el("th", {}, "m̂"),
+              el("th", {}, "v̂"), el("th", {}, "Δθ"), el("th", {}, "θ after")])),
+            el("tbody", {}, rows)
+          ]),
+          h("small muted", "Gradients spanning " +
+            f(Math.abs(det[0].g) / Math.abs(det[12].g), 2) + "× in magnitude — " +
+            "identical step size. Zero gradient — zero step.")
+        ]), "f-right")
+      ]),
+      frag(NN.callout("key", "Why this matters in practice",
+        "It is the reason Adam needs a warmup schedule. On step 1 every one of " +
+        "your billions of parameters moves by the full learning rate in whatever " +
+        "direction its noisy first gradient happened to point. Warmup makes lr " +
+        "small enough that this does not wreck the initialisation."), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------------------- the memory bill */
+S({
+  chapter: "Optimizer · memory", plain: "The bill: " + BPP_MIXED + " bytes per parameter",
+  notes: "Add it up. The headline recipe — " + R_MIX.name + " — holds " +
+    R_MIX.components.weight + " bytes of weights, " + R_MIX.components.gradient +
+    " of gradients and " + R_MIX.components.optimizer +
+    " of optimizer state, which is " + BPP_MIXED + " bytes for every parameter. " +
+    "All " + RECIPES.length + " recipes on this chart come from T.memory.recipes; " +
+    "they run from " + RECIPES[0].bytes_per_param + " to " +
+    Math.max.apply(null, RECIPES.map(function (r) { return r.bytes_per_param; })) +
+    " bytes per parameter, and mainstream mixed-precision Adam sits at " +
+    BPP_MIXED + ". The headline: the weights are the small part of the bill.",
+  build: function () {
+    const recipes = RECIPES.map(function (r) {
+      const c = r.components;
+      return {
+        label: r.name, v: r.bytes_per_param,
+        color: r === R_MIX ? "var(--warning)"
+             : r.bytes_per_param > BPP_MIXED ? "var(--critical)" : "var(--accent)",
+        sub: "w " + c.weight + " + g " + c.gradient +
+             (c.optimizer ? " + opt " + c.optimizer : "")
+      };
+    });
+    return [
+      kicker("Optimizer · the bill"),
+      title("<span class='v-optimizer'>" + BPP_MIXED +
+            "</span> bytes per parameter, of which " + R_MIX.components.weight +
+            " are the weights"),
+      frag(d("panel o", [ph("bytes per parameter, by recipe"),
+        NN.chart.bars({
+          items: recipes.map(function (r) {
+            return { label: r.label, value: r.v, color: r.color, sub: "· " + r.sub };
+          }), unit: "B/param"
+        })]), "f-fade"),
+      frag(d("cols", [
+        NN.memstrip([
+          { cls: "weight", bytes: R_MIX.components.weight, label: "w bf16" },
+          { cls: "gradient", bytes: R_MIX.components.gradient, label: "g bf16" },
+          { cls: "optimizer", bytes: R_MIX.components.optimizer,
+            label: "fp32 master + m + v" }
+        ], BPP_MIXED),
+        NN.tiles([
+          { k: "this toy model", v: BY(NPARAM * BPP_MIXED), s: NPARAM + " params" },
+          { k: "per parameter", v: BPP_MIXED + " B", s: "mixed Adam", cls: "optimizer" }
+        ])
+      ]), "f-fade"),
+      frag(NN.callout("mem", "The master copy is not optional",
+        "bf16 carries " + f(T.formats.bf16.decimal_digits, 1) +
+        " significant decimal digits. A typical update is " +
+        "five or six orders of magnitude smaller than the weight it is applied " +
+        "to, so in bf16 <span class='mono'>w + update</span> rounds straight " +
+        "back to <span class='mono'>w</span> and training silently stalls. The " +
+        "fp32 master copy is where the small updates actually accumulate."))
+    ];
+  }
+});
+
+/* ================================================== lifetimes & phases */
+/* The schedule is not authored here: T.memory.timeline lists what each
+   phase allocates and frees, and the generator simulates and asserts it.
+   We replay the same alloc/free list to get the per-class split, and we
+   plot T.memory.timeline_bytes_fp32 for the curve itself. */
+const TL     = MEM.timeline;
+const CURVE  = MEM.timeline_bytes_fp32;
+const FLOOR  = MEM.floor_bytes_fp32;
+const PEAK_B = MEM.peak_bytes_fp32;
+const PEAK_I = MEM.peak_phase;
+const ACT_PEAK_I = (function () {
+  for (let i = 0; i < TL.length; i++) if (TL[i].peak_activations) return i;
+  return -1;
+})();
+const TBYNAME = {};
+PT.forEach(function (t) { TBYNAME[t.name] = t; });
+
+/* replay alloc/free to get the resident set at every phase */
+const RESIDENT = (function () {
+  const live = {};
+  PT.forEach(function (t) {
+    if (t.cls === "weight" || t.cls === "optimizer") live[t.name] = true;
+  });
+  return TL.map(function (p) {
+    (p.alloc || []).forEach(function (n) { live[n] = true; });
+    (p.free  || []).forEach(function (n) { delete live[n]; });
+    return Object.keys(live);
+  });
+})();
+function residentBytes(i, cls) {
+  return RESIDENT[i].reduce(function (a, n) {
+    const t = TBYNAME[n];
+    if (!t || (cls && t.cls !== cls)) return a;
+    return a + t.elements * FP32B;
+  }, 0);
+}
+/* self-check: our replay must reproduce the curve the generator asserted */
+RESIDENT.forEach(function (_, i) {
+  if (residentBytes(i) !== CURVE[i]) {
+    console.warn("nn-internals slides: phase " + i + " replay " +
+                 residentBytes(i) + " != trace " + CURVE[i]);
+  }
+});
+function phaseSegs(i) {
+  return ["weight", "optimizer", "activation", "gradient"].map(function (c) {
+    return { cls: c, bytes: residentBytes(i, c), label: c };
+  }).filter(function (s) { return s.bytes > 0; });
+}
+
+/* ------------------------------------------------ four classes, four lives */
+S({
+  chapter: "Lifetimes", plain: "Four tensor classes, four lifetimes",
+  notes: "Everything in a training step is one of four things, and the useful " +
+    "distinction is not what they contain but how long they live. Weights and " +
+    "optimizer state live for the entire run. Activations live from the " +
+    "forward pass until the backward pass consumes them. Gradients live from " +
+    "the backward pass until the optimizer consumes them. Note the gradient " +
+    "card: " + N_G + " of its " + BYCLS.gradient.elements + " elements are " +
+    "parameter gradients, one per weight; the other " + N_GNODE + " are " +
+    "transient node gradients that exist only while the chain rule is walking " +
+    "backwards. Every memory optimisation you have ever heard of is an " +
+    "exploitation of one of these lifetimes.",
+  build: function () {
+    const card = function (cls) {
+      const c = NN.CLASSES[cls], bc = BYCLS[cls];
+      return panel(cls === "weight" ? "w" : cls === "gradient" ? "g" :
+                   cls === "activation" ? "a" : "o", [
+        NN.chip(cls),
+        h("gap8", ""),
+        h("midnum v-" + cls, BY(bc.bytes_fp32)),
+        h("small muted", bc.tensors + " tensors · " + bc.elements +
+          " elements — " + bc.names.join(" · ")),
+        h("gap8", ""),
+        h("small", "<b>lives:</b> " + c.life)
+      ]);
+    };
+    return [
+      kicker("Lifetimes"),
+      title("Four classes. The difference that matters is <em>when they die</em>."),
+      frag(d("cols4", [card("weight"), card("activation"),
+                       card("gradient"), card("optimizer")]), "f-pop"),
+      frag(d("cols3", [
+        NN.callout("why", "Weights & optimizer state",
+          "Allocated once, freed when training ends. Their size is fixed by the " +
+          "architecture — nothing you do at runtime changes it. " +
+          BY(FLOOR) + " here, and that is the floor of the whole iteration."),
+        NN.callout("why", "Activations",
+          "Born in forward, killed by backward. Their size scales with " +
+          "<span class='mono'>batch × sequence</span>, which is the one knob you " +
+          "control at runtime — and the one you trade for throughput."),
+        NN.callout("why", "Gradients — two kinds",
+          N_G + " elements are <em>parameter</em> gradients, exactly one per " +
+          "weight, and they live until the optimizer step. The other " + N_GNODE +
+          " are <em>node</em> gradients like <span class='mono'>dL/dz1</span>: " +
+          "scratch space that exists for a phase or two and is gone.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------ memory across one iteration */
+S({
+  chapter: "Lifetimes · one iteration", plain: "Memory across one iteration",
+  notes: "Step through the phases and watch the strip. This schedule is not " +
+    "hand-drawn: T.memory.timeline lists what each phase allocates and frees, " +
+    "and the generator simulates it and asserts that nothing is freed before " +
+    "it is allocated, nothing is allocated twice and nothing leaks. Weights and " +
+    "optimizer state are a flat floor of " + BY(FLOOR) + " you can never " +
+    "remove. Activations pile up through the forward pass; gradients pile up " +
+    "through the backward pass. The maximum, " + BY(PEAK_B) + ", is phase " +
+    PEAK_I + " — " + TL[PEAK_I].label + ". The next slide is about why it is " +
+    "there and not where the textbooks draw it.",
+  build: function (ctx) {
+    ctx.chartHost = d("panel acc", [ph("resident bytes · T.memory.timeline_bytes_fp32")]);
+    ctx.chartBox  = el("div", { style: { height: "240px" } });
+    ctx.chartHost.appendChild(ctx.chartBox);
+    ctx.stripHost = d("panel acc", [ph("what is resident right now")]);
+    ctx.label     = h("phaselabel", "");
+    ctx.desc      = h("small", "");
+    ctx.stripBox  = el("div", {});
+    ctx.tot       = h("small muted", "");
+    ctx.stripHost.appendChild(ctx.label);
+    ctx.stripHost.appendChild(ctx.stripBox);
+    ctx.stripHost.appendChild(ctx.tot);
+    ctx.stripHost.appendChild(ctx.desc);
+    const marks = TL.slice(1).map(function (p, i) {
+      const k = i + 1;
+      return frag(d("pill" + (k === PEAK_I ? " hot" : ""),
+        k + " · " + p.label + (k === PEAK_I ? "  ← peak" :
+        k === ACT_PEAK_I ? "  ← peak activations" : "")), "f-pop");
+    });
+    return [
+      kicker("One full iteration · " + TL.length + " phases"),
+      title("Memory rises and falls in a shape you can predict", true),
+      d("cols", [ctx.chartHost, ctx.stripHost]),
+      d("rowflex", marks),
+      NN.legend()
+    ];
+  },
+  render: function (n, ctx) {
+    const k = NN.clamp(n, 0, TL.length - 1);
+    const pts = CURVE.slice(0, k + 1).map(function (b, i) { return [i, b]; });
+    ctx.chartBox.innerHTML = "";
+    ctx.chartBox.appendChild(NN.chart.line({
+      series: [{ name: "bytes resident", color: "var(--accent)", points: pts }],
+      width: 540, height: 230, xlabel: "phase", ylabel: "bytes",
+      margin: { t: 14, r: 16, b: 34, l: 66 },
+      xMin: 0, xMax: TL.length - 1, yMin: 0, yMax: PEAK_B * 1.06
+    }));
+    ctx.label.textContent = k + " · " + TL[k].label;
+    ctx.desc.textContent = TL[k].desc;
+    ctx.stripBox.innerHTML = "";
+    ctx.stripBox.appendChild(NN.memstrip(phaseSegs(k), PEAK_B));
+    ctx.tot.innerHTML = "resident <b>" + BY(CURVE[k]) + "</b> · floor " + BY(FLOOR) +
+      " · peak " + BY(PEAK_B) + " at phase " + PEAK_I +
+      (TL[k].reads ? " &nbsp;·&nbsp; reads <span class='v-activation'>" +
+        TL[k].reads.join(", ") + "</span>" : "");
+  }
+});
+
+/* ------------------------------------------------------- where the peak is */
+S({
+  chapter: "Lifetimes · the peak", plain: "Where the peak actually is — and where it usually is",
+  notes: "Be precise here, because the textbook picture is wrong for this " +
+    "model. The maximum is phase " + PEAK_I + ", the END of the backward pass, " +
+    "not the forward/backward boundary. The reason is a coincidence of scale: " +
+    "in a " + NPARAM + "-parameter model the parameter gradients (" + BY(B_G) +
+    ") are exactly the same size as the saved activations (" +
+    BY(BYCLS.activation.bytes_fp32) + "), so gradients fill up faster than " +
+    "activations drain away. In a real transformer the activation term is far " +
+    "larger than the gradient term and the peak snaps back to the boundary. " +
+    "For " + MODEL.name + " at " + CFG.seq + " tokens a single sequence saves " +
+    BY(CFG.actPerSeq) + " of activations — with FlashAttention already on — " +
+    "against " + BY(CFG.gradB) + " of bf16 gradients, so it outweighs them at " +
+    "batch " + CFG.crossBatch + ". Either way the lesson is the same: you size " +
+    "the machine for one instant, not for the average.",
+  build: function () {
+    const pageLoop = NN.PAGES.filter(function (p) { return p.id === "loop"; })[0];
+    return [
+      kicker("The consequence"),
+      title("An out-of-memory error is a statement about one instant"),
+      frag(NN.tiles([
+        { k: "floor · phases 0 and " + (TL.length - 1), v: BY(FLOOR),
+          s: "weights + optimizer" },
+        { k: "peak · phase " + PEAK_I + ", " + TL[PEAK_I].label, v: BY(PEAK_B),
+          s: f(PEAK_B / FLOOR, 2) + "× the floor", cls: "optimizer" },
+        { k: "peak activations · phase " + ACT_PEAK_I,
+          v: BY(residentBytes(ACT_PEAK_I, "activation")),
+          s: "during \u201c" + TL[ACT_PEAK_I].label + "\u201d", cls: "activation" },
+        { k: "gradients at the peak", v: BY(residentBytes(PEAK_I, "gradient")),
+          s: "freed at zero_grad", cls: "gradient" }
+      ]), "f-pop"),
+      frag(NN.callout("warn", "The peak here is at the END of backward, not the boundary",
+        "That is a genuine property of <em>this</em> model, and it is worth " +
+        "saying out loud because the usual diagram shows the peak at the " +
+        "forward/backward boundary. With " + NPARAM + " parameters the " +
+        "parameter gradients (" + G(B_G, 0).replace("+", "") + " bytes) are " +
+        "exactly as big as everything the forward pass saved (" +
+        BYCLS.activation.bytes_fp32 + " bytes), so the gradients fill faster " +
+        "than the activations drain. Once activations outweigh gradients the " +
+        "textbook shape returns, and in a real transformer they do so " +
+        "immediately: " + MODEL.name + " at " + CFG.seq + " tokens saves " +
+        BY(CFG.actPerSeq) + " per sequence — FlashAttention already applied — " +
+        "against " + BY(CFG.gradB) + " of bf16 gradients, so the boundary wins " +
+        "from batch " + CFG.crossBatch + ". " +
+        (pageLoop ? "Part " + pageLoop.n + " walks the same schedule." : "")), "f-fade"),
+      frag(d("cols", [
+        NN.callout("key", "Lever 1 — shrink the transient",
+          "Activation checkpointing keeps only the inputs of each block and " +
+          "recomputes the rest during backward. You pay roughly one extra " +
+          "forward pass — about 30% more compute — and the activation term " +
+          "collapses from per-layer to per-checkpoint."),
+        NN.callout("mem", "Lever 2 — shrink the floor",
+          "The floor here is " + BY(FLOOR) + " for " + NPARAM + " parameters. " +
+          "For " + MODEL.name + " it is " + BY(CFG.stateB) + ", which no single " +
+          "device has. That is where data, tensor and pipeline parallelism come in.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* ---------------------------------------------------- transformer block */
+S({
+  chapter: "Transformer", plain: "A transformer block: same four classes, bigger tensors",
+  notes: "Nothing structural changes. A transformer block is seven weight " +
+    "matrices instead of two, the activations are rank-3 instead of rank-1, and " +
+    "the arithmetic is the same arithmetic. Each of those seven matrices has a " +
+    "gradient of identical shape and two Adam moments of identical shape — the " +
+    "same " + BPP_MIXED + " bytes per parameter we derived on the toy model. " +
+    "The shapes on this slide are " + MODEL.name + "'s, quoted from " +
+    "T.reference_configs rather than derived. Read the per-block " +
+    "parameter count: " + NN.count(P_LAYER) + " parameters in one block, " +
+    CFG.layers + " blocks. The norms are in there too — " +
+    (XR ? NN.count(XR.exact.norms) + " parameters a block, which rounds to " +
+          "nothing next to the matrices" : "small enough to ignore") + ".",
+  build: function () {
+    const mats = XR
+      ? XR.exact.attn_terms.concat(XR.exact.mlp_terms).map(function (t) {
+          return [t.name, t.shape, t.count, t.formula];
+        })
+      : [
+          ["q_proj", [CFG.d, CFG.heads * CFG.head_dim], CFG.d * CFG.heads * CFG.head_dim],
+          ["k_proj", [CFG.d, CFG.d_kv], CFG.d * CFG.d_kv],
+          ["v_proj", [CFG.d, CFG.d_kv], CFG.d * CFG.d_kv],
+          ["o_proj", [CFG.heads * CFG.head_dim, CFG.d], CFG.d * CFG.heads * CFG.head_dim],
+          ["gate_proj", [CFG.d, CFG.d_ff], CFG.d * CFG.d_ff],
+          ["up_proj", [CFG.d, CFG.d_ff], CFG.d * CFG.d_ff],
+          ["down_proj", [CFG.d_ff, CFG.d], CFG.d * CFG.d_ff]
+        ];
+    const rows = mats.map(function (m) {
+      return el("tr", {}, [
+        el("td", { class: "v-weight" }, m[0]),
+        el("td", { class: "n" }, m[1].join(" × ")),
+        el("td", { class: "n" }, NN.count(m[2])),
+        el("td", { class: "n v-gradient" }, NN.count(m[2])),
+        el("td", { class: "n v-optimizer" }, NN.count(m[2] * OPT_TENSORS))
+      ]);
+    });
+    return [
+      kicker("Transformer"),
+      title(MODEL.name + " · one block · d = " + CFG.d + " · " +
+            NN.count(P_LAYER) + " parameters", true),
+      d("cols wide-l", [
+        frag(d("panel w", [
+          ph("the weight tensors in one block, and what shadows each of them"),
+          el("table", { class: "data" }, [
+            el("thead", {}, el("tr", {}, [
+              el("th", {}, "tensor"), el("th", {}, "shape"),
+              el("th", {}, "params"), el("th", {}, "gradient"),
+              el("th", {}, "Adam m+v")])),
+            el("tbody", {}, rows.concat([
+              el("tr", {}, [
+                el("td", {}, el("b", {}, "block total")),
+                el("td", {}, ""),
+                el("td", { class: "n" }, el("b", {}, NN.count(P_LAYER))),
+                el("td", { class: "n v-gradient" }, NN.count(P_LAYER)),
+                el("td", { class: "n v-optimizer" }, NN.count(P_LAYER * OPT_TENSORS))
+              ])
+            ]))
+          ])
+        ]), "f-left"),
+        d("stack", [
+          frag(NN.legend(), "f-right"),
+          frag(sourceNote(), "f-right"),
+          frag(NN.callout("key", "The toy model, repeated",
+            "<span class='mono'>z = Wx + b</span>, a nonlinearity, then another " +
+            "<span class='mono'>Wx + b</span>. The backward pass still reads the " +
+            "saved input of every matmul. The dead-unit story still applies — " +
+            "GELU and SiLU only soften it."), "f-right"),
+          frag(NN.callout("mem", "Activations are rank-3 now",
+            "Every activation is <span class='mono'>batch × seq × d</span> = " +
+            CFG.batch + " × " + CFG.seq + " × " + CFG.d + " = " +
+            NN.count(CFG.batch * CFG.seq * CFG.d) + " elements, or " +
+            BY(CFG.batch * CFG.seq * CFG.d * BF16B) + " in bf16. " +
+            (ACTC ? "Counting the tensors a block actually has to keep gives " +
+                    ACTC.linear + " bytes per token per hidden dimension — " +
+                    BY(actLinearPerLayer(CFG.seq, CFG.batch)) + " a block at " +
+                    CFG.seq + " tokens."
+                  : "There are on the order of ten of them per block.") +
+            " All of it kept from forward to backward."), "f-right")
+        ])
+      ])
+    ];
+  }
+});
+
+/* ---------------------------------------------------------- the seq² term */
+S({
+  chapter: "Transformer", plain: "The one genuinely new term: seq² attention",
+  notes: "This is the only thing in a transformer that has no analogue in the " +
+    "toy model. The activation accounting" +
+    (XA ? " — " + XA.source + " — " : " ") +
+    "splits into two terms: one linear in sequence length, one quadratic. At " +
+    CFG.seq + " tokens and " + CFG.heads + " heads the quadratic term is " +
+    BY(actQuadPerLayer(CFG.seq, 1)) + " for a single layer and a single " +
+    "sequence, an order of magnitude more than the linear term. Double the " +
+    "sequence and it quadruples. FlashAttention removes it from memory " +
+    "entirely — it never writes the score matrix to HBM, keeping only " +
+    "per-row softmax statistics, and recomputes tiles in the backward pass. " +
+    "The FLOPs do not go away; the memory does.",
+  build: function () {
+    /* the published slider range goes to 131072; past 32768 the linear
+       x-axis squashes everything interesting into the left margin */
+    const seqs = (XA && XA.slider_ranges ? XA.slider_ranges.seq.choices
+                                         : [512, 1024, 2048, 4096, 8192, 16384, 32768])
+                 .filter(function (q) { return q <= 32768; });
+    const quadPts  = seqs.map(function (q) { return [q, actQuadPerLayer(q, 1) / GBD]; });
+    const linPts   = seqs.map(function (q) { return [q, actLinearPerLayer(q, 1) / GBD]; });
+    const flashPts = seqs.map(function (q) { return [q, actFlashPerLayer(q, 1) / GBD]; });
+    return [
+      kicker("Transformer · attention"),
+      title("Everything else is linear in sequence length. This is not.", true),
+      d("cols wide-r", [
+        d("stack", [
+          frag(NN.formula({ rule: "linear term · " + (ACTC ? ACTC.linear : "≈10×2") +
+              " bytes per token per hidden dim",
+            sub: CFG.seq + " × " + CFG.batch + " × " + CFG.d +
+                 " × " + (ACTC ? ACTC.linear : 20),
+            result: BY(actLinearPerLayer(CFG.seq, CFG.batch)) + " per layer",
+            cls: "activation" }), "f-left"),
+          frag(NN.formula({ rule: "quadratic term · heads × seq² × " +
+              (ACTC ? ACTC.quad : BF16B),
+            sub: CFG.heads + " × " + CFG.seq + "² × " + CFG.batch +
+                 " × " + (ACTC ? ACTC.quad : BF16B),
+            result: BY(actQuadPerLayer(CFG.seq, CFG.batch)) + " per layer",
+            cls: "activation" }), "f-left"),
+          frag(NN.formula({ rule: "the whole stack · " + CFG.layers + " layers",
+            sub: "materialised " + BY(CFG.actFullSeq) + "  ·  with FlashAttention " +
+                 BY(CFG.actFlashSeq),
+            result: f(CFG.actFullSeq / CFG.actFlashSeq, 1) + "× less memory",
+            cls: "activation" }), "f-left"),
+          frag(NN.callout("warn", "Quadratic beats you eventually",
+            "Going from " + CFG.seq + " to " + (CFG.seq * 2) + " tokens multiplies " +
+            "the weight memory by exactly 1 and this term by 4."), "f-left")
+        ]),
+        d("stack", [
+        frag(d("panel a", [ph("GB per layer, bf16, batch " + CFG.batch +
+          " · " + MODEL.name + " has " + CFG.heads + " heads, d = " + CFG.d),
+          NN.chart.line({
+            series: [
+              { name: "attention scores (seq²)", color: "var(--activation)", points: quadPts },
+              { name: "everything else (linear)", color: "var(--accent)", points: linPts },
+              { name: "FlashAttention softmax stats", color: "var(--warning)", points: flashPts }
+            ],
+            width: 560, height: 250, xlabel: "sequence length", ylabel: "GB", logY: true
+          }),
+          chartKey([{ name: "score matrix · quadratic", color: "var(--activation)" },
+                    { name: "all other saved tensors · linear", color: "var(--accent)" },
+                    { name: "what FlashAttention keeps instead", color: "var(--warning)" }]),
+          XA ? h("small muted", XA.source + " " + XA.assumes) : null]), "f-right"),
+        frag(NN.callout("why", "What FlashAttention actually does",
+          (XA ? XA.flash.what : "It never materialises the score matrix.") +
+          " <b>" + (XA ? XA.flash.caveat : "") + "</b>"), "f-right")
+        ])
+      ])
+    ];
+  }
+});
+
+/* ====================================================== scaling numbers */
+/* The world size and the batch size are the two SCENARIO choices in this
+   deck — they are not facts about the model or the hardware, so they are
+   not in the trace. Both are stated on the slides that use them. */
+const NGPU  = 8;
+const R_W    = R_MIX.components.weight;             /* bf16 weights      */
+const R_G    = R_MIX.components.gradient;           /* bf16 gradients    */
+const OPTB   = R_MIX.components.optimizer;          /* fp32 master + m,v */
+const BPP = {
+  ddp:  BPP_MIXED,
+  z1:   R_W + R_G + OPTB / NGPU,
+  z2:   R_W + (R_G + OPTB) / NGPU,
+  z3:   BPP_MIXED / NGPU
+};
+const perGPU = function (bpp) { return CFG.params * bpp / GBD; };   /* GB */
+
+/* ------------------------------------------------------- 70B parameters */
+S({
+  chapter: "Scale · " + MODEL.name, plain: "Where " + bn(CFG.params) + " parameters come from",
+  notes: "Before pricing it, count it — and count it properly. The famous " +
+    "shortcut is 12·d²·L, which for this model gives " +
+    (XR ? bn(XR.naive.total) + ", only " +
+          f(XR.naive.fraction_of_exact * 100, 1) + "% of the real figure"
+        : "a rough approximation") + ". It is wrong in five specific ways, " +
+    "listed on the slide: grouped-query attention makes K and V narrow, " +
+    "SwiGLU needs three MLP matrices not two, RMSNorm has no bias, the " +
+    "embeddings are not tied, and embeddings sit outside the per-layer formula " +
+    "entirely. Do it term by term and you land at " + bn(P_EXACT) +
+    " against a published " + bn(CFG.params) + " — within " +
+    (XR ? f(Math.abs(1 - XR.exact_vs_published) * 100, 2) : f(Math.abs(P_EXACT - CFG.params) / CFG.params * 100, 2)) +
+    "%. The MLP is about four fifths of every block, which surprises people " +
+    "who assume attention dominates.",
+  build: function () {
+    return [
+      kicker("Scale · " + MODEL.name),
+      title("Counting a " + bn(CFG.params) + " model, term by term"),
+      frag(d("cols4", [
+        panel("w", [ph("attention, per block"),
+          h("midnum v-weight", NN.count(P_ATTN)),
+          h("small muted", XR
+            ? XR.exact.attn_in_d2 + "·d² — GQA narrows K and V to " +
+              CFG.kv_heads + " of " + CFG.heads + " heads"
+            : "2·d² + 2·d·d_kv, d = " + CFG.d)]),
+        panel("w", [ph("MLP, per block"),
+          h("midnum v-weight", NN.count(P_MLP)),
+          h("small muted", XR
+            ? XR.exact.mlp_in_d2 + "·d² — " + XR.family_spec.mlp_matrices +
+              " matrices, d_ff = " + CFG.d_ff
+            : "3 · d · d_ff, d_ff = " + CFG.d_ff)]),
+        panel("w", [ph("× " + CFG.layers + " blocks"),
+          h("midnum v-weight", NN.count(CFG.layers * P_LAYER)),
+          h("small muted", NN.count(P_LAYER) + " per block · MLP is " +
+            (XR ? f(XR.exact.mlp_share_of_layer * 100, 0) : "82") + "% of it")]),
+        panel("w", [ph("+ embed & output head"),
+          h("midnum v-weight", NN.count(P_EMBED)),
+          h("small muted", XR && !XR.family_spec.tied_embeddings
+            ? "not tied — vocab × d, twice" : "vocab × d")])
+      ]), "f-pop"),
+      frag(d("cols", [
+        NN.formula({ rule: "the shortcut everyone quotes: 12·d²·L",
+          sub: XR ? XR.naive.total_formula : "12 · d² · n_layers",
+          result: XR ? bn(XR.naive.total) + "  (" +
+                       f(XR.naive.fraction_of_exact * 100, 1) + "% of the truth)"
+                     : "—", cls: "weight" }),
+        NN.formula({ rule: "term by term, this family's conventions",
+          sub: CFG.layers + " × " + NN.count(P_LAYER) + " + " + NN.count(P_EMBED) + " + norms",
+          result: bn(P_EXACT) + "  vs published " + bn(CFG.params), cls: "weight" })
+      ]), "f-fade"),
+      frag(XR
+        ? NN.callout("key", "Why the shortcut misses",
+            "<ul style='margin:4px 0 0 18px;padding:0'>" +
+            XR.omissions.map(function (o) { return "<li>" + o + "</li>"; }).join("") +
+            "</ul>")
+        : NN.callout("key", "Same seven matrices, eighty times",
+            "There is no new kind of tensor here — only more of the ones we " +
+            "already traced."), "f-fade"),
+      frag(sourceNote(XR
+        ? "The family conventions behind this count are <em>inferred</em> from " +
+          "the presence of <span class='mono'>n_kv_heads</span> — " +
+          XF.real.family_inference.rule + " — and the evidence that the guess " +
+          "is right is that the total lands within " +
+          f(Math.abs(1 - XR.exact_vs_published) * 100, 2) + "% of the published figure."
+        : ""), "f-fade")
+    ];
+  }
+});
+
+/* ---------------------------------------------------------- the 70B bill */
+S({
+  chapter: "Scale · the bill", plain: "The bill: " + BY(CFG.stateB) + " against one " + GPUD.name,
+  notes: bn(CFG.params) + " parameters at " + BPP_MIXED + " bytes each is " +
+    BY(CFG.stateB) + " of persistent state — before a single activation, " +
+    "before the attention scores, before any fragmentation. One " + GPUD.name +
+    " holds " + CAP(GPU_B) + ", which is " +
+    ((GPU_B / BPP_MIXED) / 1e9).toFixed(1) + "B parameters' worth. You need " +
+    GPUS + " cards just to park the state, and they must cooperate on every " +
+    "step. This is the entire reason distributed training exists — not speed, " +
+    "capacity.",
+  build: function () {
+    const items = [
+      { label: "bf16 weights", value: CFG.params * R_MIX.components.weight / GBD,
+        color: "var(--weight)" },
+      { label: "bf16 gradients", value: CFG.params * R_MIX.components.gradient / GBD,
+        color: "var(--gradient)" },
+      { label: "fp32 master copy", value: CFG.params * FP32B / GBD, color: "var(--optimizer)" },
+      { label: "Adam m + v (fp32)", value: CFG.params * OPT_TENSORS * FP32B / GBD,
+        color: "var(--optimizer)" },
+      { label: "TOTAL persistent state", value: CFG.stateB / GBD, color: "var(--accent)" }
+    ];
+    return [
+      kicker("Scale · the bill"),
+      title("<span class='v-optimizer'>" + BY(CFG.stateB) +
+            "</span> of state. One " + GPUD.name + " has " + CAP(GPU_B) + ".", true),
+      d("cols", [
+        frag(d("panel crit", [ph("GB (10⁹ bytes), whole model, " + R_MIX.name),
+          NN.chart.bars({ items: items, unit: "GB",
+            limit: { value: GPU_B / GBD,
+                     label: "one " + GPUD.name + ", " + GBY(GPU_B) } })]), "f-left"),
+        d("stack", [
+          frag(NN.tiles([
+            { k: "parameters", v: bn(CFG.params), s: MODEL.name, cls: "weight" },
+            { k: "bytes / param", v: String(BPP_MIXED), s: "from the toy model", cls: "optimizer" },
+            { k: "state", v: BY(CFG.stateB), s: bn(CFG.params) + " × " + BPP_MIXED + " B" },
+            { k: GPUD.name + " cards to hold it", v: String(GPUS),
+              s: "before activations", cls: "gradient" }
+          ]), "f-right"),
+          frag(NN.callout("warn", "And that is the floor, not the peak",
+            "Add activations: roughly " +
+            BY(CFG.actPerSeq) + " for a single sequence at " + CFG.seq +
+            " tokens with FlashAttention on, or " + BY(CFG.actFullSeq) +
+            " if the score matrix is materialised" +
+            (XA ? " (" + XA.source.split(",")[0] + " accounting)" : "") +
+            ". That already exceeds the " + BY(CFG.gradB) + " of bf16 " +
+            "gradients — which is why, unlike the toy model, the peak here " +
+            "really is at the forward/backward boundary."), "f-right")
+        ])
+      ])
+    ];
+  }
+});
+
+/* ------------------------------------------------------------------ DDP */
+S({
+  chapter: "Scale · DDP", plain: "DDP shards the batch — and nothing else",
+  notes: "Start with what people reach for first. Data parallelism replicates " +
+    "the entire model on every GPU and splits the batch. Each replica computes " +
+    "gradients on its own shard of data, then an all-reduce averages them so " +
+    "every replica applies the same update. It buys throughput and it buys " +
+    "nothing at all in memory: every GPU still holds the full " + BPP_MIXED +
+    " bytes per parameter, which for " + MODEL.name + " is " +
+    BY(CFG.params * BPP.ddp) + " against " + CAP(GPU_B) + " of HBM.",
+  build: function () {
+    return [
+      kicker("Distributed · data parallel"),
+      title("Replicate everything, split the data"),
+      frag(d("cols4", [1, 2, 3, 4].map(function (i) {
+        return panel("w", [ph("GPU " + i),
+          NN.memstrip([
+            { cls: "weight", bytes: R_W, label: "w" },
+            { cls: "gradient", bytes: R_G, label: "g" },
+            { cls: "optimizer", bytes: OPTB, label: "master + m,v" }
+          ], BPP_MIXED),
+          h("small muted", "full copy · batch shard " + i)]);
+      })), "f-pop"),
+      frag(d("cols", [
+        NN.callout("key", "What it costs on the wire",
+          "One all-reduce of the gradients per step: " +
+          BY(CFG.params * R_G) + " of traffic, overlappable with the backward " +
+          "pass by bucketing, which is what makes DDP fast in practice."),
+        NN.callout("warn", "What it saves in memory",
+          "Nothing. Per-GPU state stays at " + BPP_MIXED + " bytes per parameter " +
+          "— " + BY(CFG.params * BPP.ddp) + " for " + bn(CFG.params) +
+          " on a card with " + BY(GPU_B) + " (" + GBY(GPU_B) + "). " +
+          "DDP alone cannot train this model at any cluster size.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* ---------------------------------------------------------- ZeRO stages */
+S({
+  chapter: "Scale · ZeRO", plain: "ZeRO 1 → 2 → 3: shard the redundant copies",
+  notes: "The ZeRO insight: in DDP every GPU holds an identical copy of state " +
+    "it only needs a slice of. Stage 1 shards the optimizer state — each GPU " +
+    "updates only its slice of parameters, then all-gathers the results. Stage " +
+    "2 also shards the gradients, using reduce-scatter instead of all-reduce, " +
+    "at no extra communication volume. Stage 3 shards the parameters " +
+    "themselves, all-gathering each layer just before it is used and dropping " +
+    "it again straight after. With " + NGPU + " GPUs that takes " + BPP_MIXED +
+    " bytes per parameter down to " + BPP.z3.toFixed(1) + ".",
+  build: function (ctx) {
+    ctx.host = el("div", { style: { minHeight: "250px" } });
+    ctx.stages = [
+      { k: "DDP", bpp: BPP.ddp,
+        d: "every GPU holds weights, gradients, optimizer state in full" },
+      { k: "ZeRO-1", bpp: BPP.z1,
+        d: "optimizer state sharded across " + NGPU + " GPUs (master + m + v)" },
+      { k: "ZeRO-2", bpp: BPP.z2,
+        d: "gradients sharded too — reduce-scatter replaces all-reduce" },
+      { k: "ZeRO-3 / FSDP", bpp: BPP.z3,
+        d: "parameters sharded too — all-gather each layer just in time" }
+    ];
+    ctx.note = h("say", "");
+    return [
+      kicker("Distributed · ZeRO, " + NGPU + " × " + GPUD.name),
+      title("Remove the redundancy, one class at a time"),
+      d("cols wide-l", [
+        d("panel o", [ph("GB per GPU · " + MODEL.name + " · " + NGPU + "-way"), ctx.host]),
+        d("stack", [
+          frag(d("pill", "1 · shard the optimizer state → " + BPP.z1.toFixed(1) + " B/param"), "f-right"),
+          frag(d("pill", "2 · shard the gradients → " + BPP.z2.toFixed(1) + " B/param"), "f-right"),
+          frag(d("pill hot", "3 · shard the parameters → " + BPP.z3.toFixed(1) + " B/param"), "f-right"),
+          frag(NN.callout("mem", "Linear in the world size",
+            "At ZeRO-3 the per-GPU state is <span class='mono'>" + BPP_MIXED +
+            " / N</span> bytes per parameter. With " + NGPU + " GPUs that is " +
+            BPP.z3.toFixed(1) + "; with 64 it is " + (BPP_MIXED / 64).toFixed(2) +
+            ", or " + BY(CFG.params * BPP_MIXED / 64) +
+            " each. Memory stops being the constraint and bandwidth starts."), "f-right"),
+          ctx.note
+        ])
+      ]),
+      NN.legend(["weight", "gradient", "optimizer"])
+    ];
+  },
+  render: function (n, ctx) {
+    const k = NN.clamp(n, 0, ctx.stages.length - 1);
+    ctx.host.innerHTML = "";
+    ctx.host.appendChild(NN.chart.bars({
+      items: ctx.stages.slice(0, k + 1).map(function (s, i) {
+        return { label: s.k, value: CFG.params * s.bpp / GBD,
+                 color: i === k ? "var(--warning)" : "var(--accent)",
+                 sub: "· " + s.bpp.toFixed(2) + " B/param" };
+      }),
+      unit: "GB", max: perGPU(BPP.ddp) * 1.05,
+      limit: { value: GPU_B / GBD, label: "one " + GPUD.name + ", " + GBY(GPU_B) }
+    }));
+    ctx.note.innerHTML = "<b>" + ctx.stages[k].k + "</b> — " + ctx.stages[k].d;
+  }
+});
+
+/* ------------------------------------------------------------ FSDP detail */
+S({
+  chapter: "Scale · FSDP", plain: "FSDP: what ZeRO-3 actually does per layer",
+  notes: "FSDP is ZeRO-3 in PyTorch, and it is worth spelling out the " +
+    "mechanics because they explain the cost. Each layer's parameters live " +
+    "sharded. Just before the layer runs, an all-gather reconstructs the full " +
+    "weight; the layer computes; the full copy is freed immediately. In " +
+    "backward the same all-gather happens again, then a reduce-scatter sends " +
+    "each gradient slice to its owner. Memory becomes proportional to the " +
+    "largest single layer rather than the whole model — at the price of two " +
+    "extra collectives per layer per step, which is why FSDP wants fast " +
+    "interconnect and aggressive prefetch overlap.",
+  build: function () {
+    const seq = [
+      ["all-gather", "reconstruct layer i's full weight from " + NGPU + " shards", "weight"],
+      ["compute", "run the layer forward; save its activations", "activation"],
+      ["free", "drop the full weight — keep only your shard", "weight"],
+      ["backward", "all-gather again, compute gradients", "gradient"],
+      ["reduce-scatter", "each GPU keeps only its slice of the gradient", "gradient"],
+      ["step", "update your slice of the parameters, locally", "optimizer"]
+    ];
+    return [
+      kicker("Distributed · FSDP = ZeRO-3"),
+      title("Materialise a layer, use it, throw it away", true),
+      frag(d("rowflex", seq.map(function (s, i) {
+        return d("panel " + (s[2] === "weight" ? "w" : s[2] === "gradient" ? "g" :
+                             s[2] === "activation" ? "a" : "o") + " tight",
+          [ph((i + 1) + " · " + s[0]), h("small", s[1])]);
+      })), "f-pop"),
+      frag(d("cols", [
+        NN.callout("mem", "Peak memory becomes a layer, not a model",
+          "Persistent state is " + BPP.z3.toFixed(1) + " B/param, plus one " +
+          "transient full layer: " + BY(CFG.layer_par * R_W) + " for a block " +
+          "of this size. That is the trade — " + BY(CFG.stateB) + " spread over " +
+          NGPU + " GPUs instead of demanded from one."),
+        NN.callout("warn", "You pay for it in collectives",
+          "Two all-gathers and one reduce-scatter per layer per step. If the " +
+          "interconnect cannot overlap them with compute, the GPUs idle. This is " +
+          "why ZeRO-3 lives inside a node or on fast fabric, and why people stop " +
+          "at ZeRO-1 or ZeRO-2 when they can afford to.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* --------------------------------------------------------------- TP & PP */
+S({
+  chapter: "Scale · TP & PP", plain: "Tensor and pipeline parallelism: split the layer, split the stack",
+  notes: "ZeRO shards storage but every GPU still computes whole layers. The " +
+    "other two axes split the computation itself. Tensor parallelism cuts each " +
+    "weight matrix into column and row halves and gives each GPU a slice — it " +
+    "shards activations too, which ZeRO does not, but it needs two all-reduces " +
+    "per block, so it stays inside a node on NVLink. Pipeline parallelism gives " +
+    "each GPU a contiguous run of layers and streams microbatches through, " +
+    "which is cheap on the wire but introduces the bubble. Real " +
+    bn(CFG.params) + "-scale training " +
+    "uses all of these at once — that is what '3D parallelism' means.",
+  build: function () {
+    const card = function (cls, ttl, shards, comm, cost) {
+      return panel(cls, [ph(ttl),
+        h("small", "<b>shards:</b> " + shards),
+        h("small", "<b>communicates:</b> " + comm),
+        h("small muted", cost)]);
+    };
+    return [
+      kicker("Distributed · the other two axes"),
+      title("What each strategy actually shards"),
+      frag(d("cols4", [
+        card("w", "Data parallel (DDP)", "the batch",
+          "one all-reduce of gradients per step",
+          "no memory saving at all"),
+        card("o", "ZeRO / FSDP", "optimizer state → gradients → parameters",
+          "reduce-scatter + all-gather per layer",
+          "memory ÷ N, more collectives"),
+        card("a", "Tensor parallel (TP)", "each weight matrix, and the activations with it",
+          "two all-reduces per block, on the critical path",
+          "keep it inside one NVLink domain"),
+        card("g", "Pipeline parallel (PP)", "the layer stack into contiguous stages",
+          "activations at stage boundaries only",
+          "cheap on the wire, costs a bubble")
+      ]), "f-pop"),
+      frag(d("cols", [
+        NN.callout("key", "They compose, and in production they always do",
+          "A " + bn(CFG.params) + " run typically looks like TP=8 inside a node, PP across a few " +
+          "nodes, and ZeRO-1 data parallelism across the rest — each axis " +
+          "attacking a different one of the four tensor classes we traced."),
+        NN.callout("why", "Choose by what is scarce",
+          "Short of memory for state: ZeRO. Short of memory for a single huge " +
+          "layer's activations: TP. Short of memory for the depth of the model: " +
+          "PP. Short of throughput and nothing else: DDP.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* --------------------------------------------------------------- closing */
+S({
+  chapter: "Close", plain: "Four things to remember",
+  notes: "Close on the four claims the deck actually proved, each on a model " +
+    "small enough to verify by hand. Then point people at the interactive " +
+    "pages, where they can step through the same trace themselves and poke at " +
+    "NN.T in the console. Take questions on the memory curve slide — press G " +
+    "and jump back to it.",
+  build: function () {
+    const links = NN.PAGES.map(function (p) {
+      return el("a", { class: "pill", href: "../site/" + p.file, title: p.blurb },
+                p.n + " · " + p.title);
+    });
+    return [
+      kicker("Close"),
+      title("Four things to remember"),
+      frag(d("cols4", [
+        panel("w", [ph("one"), h("say",
+          "A parameter is <b>" + FP32B + " bytes</b> at an address. A model is " +
+          "nothing but a large number of them — " + NPARAM + " here, " +
+          bn(CFG.params) + " there.")]),
+        panel("a", [ph("two"), h("say",
+          "The backward pass <b>re-reads what the forward pass wrote</b>. That " +
+          "is why activations must be kept, and why memory scales with batch " +
+          "and sequence, not just with the model.")]),
+        panel("o", [ph("three"), h("say",
+          "Weights are the <b>small part of the bill</b>: " + R_W + " of " +
+          BPP_MIXED + " bytes per parameter. Gradients and optimizer state are " +
+          "the rest.")]),
+        panel("g", [ph("four"), h("say",
+          "Distributed training exists because " + BY(CFG.stateB) +
+          " does not fit in " + CAP(GPU_B) + ". Every strategy is a decision " +
+          "about <b>which class to stop replicating</b>.")])
+      ]), "f-pop"),
+      frag(d("stack", [
+        h("small muted", "Work through the same trace interactively:"),
+        d("rowflex", links)
+      ]), "f-fade"),
+      frag(h("small muted",
+        "Every number in this deck came from <span class='mono'>NN.T</span>, " +
+        "generated by <span class='mono'>code/ground_truth.py</span>. Gradients " +
+        "agree with finite differences to " + f(T.gradcheck.max_abs_error, 1) +
+        ". Open the console and type <span class='mono'>NN.T</span>."), "f-fade")
+    ];
+  }
+});
+
+
+/* ====================================================== build the deck */
+const deck   = document.getElementById("deck");
+const nodes  = [];
+
+SLIDES.forEach(function (def, idx) {
+  const sec   = d("slide");
+  sec.setAttribute("aria-hidden", "true");
+  const stage = d("stage");
+  const inner = d("inner");
+  const fit   = d("fit");
+  const ctx   = {};
+  const kids  = def.build ? def.build(ctx) : [];
+  (Array.isArray(kids) ? kids : [kids]).forEach(function (k, i) {
+    if (!k) return;
+    k.style.setProperty("--i", i);
+    fit.appendChild(k);
+  });
+  inner.appendChild(fit); stage.appendChild(inner); sec.appendChild(stage);
+  deck.appendChild(sec);
+  sec._frags = NN.$$(".fragment", fit);
+  sec._ctx   = ctx;
+  sec._def   = def;
+  sec._fit   = fit;
+  /* Render every slide once, fully, so that slides which draw their content
+     in render() have something in them before they are first visited — the
+     overview thumbnails and the fit-to-box measurement both need it. */
+  if (def.render) def.render(sec._frags.length, ctx);
+  nodes.push(sec);
+});
+
+const COUNT = nodes.length;
+document.getElementById("cTot").textContent = String(COUNT);
+
+/* ======================================================= layout / fit */
+let _fitRaf = null;
+function relayout() {
+  const bottom = 52 + (notesOpen ? 176 : 0);
+  document.documentElement.style.setProperty("--deckbottom", bottom + "px");
+  const availH = window.innerHeight - 49 - bottom - 22;
+  const k = Math.min((window.innerWidth - 56) / 1280, availH / 720);
+  document.documentElement.style.setProperty("--k", Math.max(0.25, k));
+  if (_fitRaf) cancelAnimationFrame(_fitRaf);
+  _fitRaf = requestAnimationFrame(function () {
+    nodes.forEach(function (s) {
+      const hgt = s._fit.offsetHeight;
+      s._fit.style.setProperty("--fit", hgt > 686 ? (686 / hgt).toFixed(4) : "1");
+    });
+  });
+}
+window.addEventListener("resize", relayout);
+
+/* ============================================================== state */
+let cur = 0, fragN = 0, notesOpen = false, gridOpen = false,
+    helpOpen = false, blacked = false, hashLock = false, pending = null;
+
+const pbar     = document.getElementById("pbar");
+const cNum     = document.getElementById("cNum");
+const chapEl   = document.getElementById("chap");
+const dotsEl   = document.getElementById("fragdots");
+const notesEl  = document.getElementById("notes");
+const nHead    = document.getElementById("notesHead");
+const nBody    = document.getElementById("notesBody");
+const nNext    = document.getElementById("notesNext");
+const btnPrev  = document.getElementById("btnPrev");
+const btnNext  = document.getElementById("btnNext");
+
+function totalFrags(i) { return nodes[i]._frags.length; }
+
+function paintFrags() {
+  const s = nodes[cur];
+  s._frags.forEach(function (e, i) { e.classList.toggle("on", i < fragN); });
+  dotsEl.innerHTML = "";
+  for (let i = 0; i < s._frags.length; i++) {
+    dotsEl.appendChild(el("i", { class: i < fragN ? "on" : "" }));
+  }
+  if (s._def.render) s._def.render(fragN, s._ctx);
+  btnPrev.disabled = (cur === 0 && fragN === 0);
+  btnNext.disabled = (cur === COUNT - 1 && fragN === totalFrags(cur));
+}
+
+function paintSlide() {
+  nodes.forEach(function (s, i) {
+    s.classList.toggle("current", i === cur);
+    s.classList.toggle("past", i < cur);
+    s.setAttribute("aria-hidden", i === cur ? "false" : "true");
+  });
+  const def = nodes[cur]._def;
+  cNum.textContent = String(cur + 1);
+  chapEl.textContent = def.chapter || "";
+  pbar.style.width = (COUNT === 1 ? 100 : (cur / (COUNT - 1)) * 100) + "%";
+  nHead.textContent = "Slide " + (cur + 1) + " — " + (def.plain || "notes");
+  nBody.innerHTML = def.notes || "<em class='muted'>No notes.</em>";
+  nNext.textContent = cur < COUNT - 1
+    ? "Next up: " + (nodes[cur + 1]._def.plain || "") +
+      "   ·   " + totalFrags(cur) + " build step" + (totalFrags(cur) === 1 ? "" : "s") + " on this slide"
+    : "Last slide.";
+  NN.$$(".thumb", thumbsEl).forEach(function (t, i) {
+    t.classList.toggle("current", i === cur);
+  });
+  relayout();
+}
+
+function go(i, frag) {
+  const t = NN.clamp(i, 0, COUNT - 1);
+  const nf = frag === "all" ? totalFrags(t) : NN.clamp(frag || 0, 0, totalFrags(t));
+  if (t !== cur) { cur = t; fragN = nf; paintSlide(); paintFrags(); }
+  else { fragN = nf; paintFrags(); }
+  writeHash();
+}
+function writeHash() {
+  const want = "#" + (cur + 1);
+  if (location.hash !== want) { hashLock = true; location.hash = want; }
+}
+function next() {
+  if (fragN < totalFrags(cur)) { fragN++; paintFrags(); return; }
+  if (cur < COUNT - 1) { pending = 0; go(cur + 1, 0); }
+}
+function prev() {
+  if (fragN > 0) { fragN--; paintFrags(); return; }
+  if (cur > 0) { pending = "all"; go(cur - 1, "all"); }
+}
+function nextSlide() { if (cur < COUNT - 1) go(cur + 1, 0); }
+function prevSlide() { if (cur > 0) go(cur - 1, 0); }
+
+window.addEventListener("hashchange", function () {
+  if (hashLock) { hashLock = false; return; }
+  const i = parseInt(location.hash.replace("#", ""), 10);
+  if (!isNaN(i)) go(i - 1, pending === null ? "all" : pending);
+  pending = null;
+});
+
+/* =============================================================== grid */
+const gridEl   = document.getElementById("gridview");
+const thumbsEl = document.getElementById("thumbs");
+let thumbsBuilt = false;
+function buildThumbs() {
+  if (thumbsBuilt) return;
+  thumbsBuilt = true;
+  nodes.forEach(function (s, i) {
+    /* draw the slide in its finished state before taking the snapshot */
+    if (s._def.render) s._def.render(s._frags.length, s._ctx);
+    const tw = d("tw");
+    const clone = s.querySelector(".stage").cloneNode(true);
+    clone.style.transform = "none";
+    clone.style.setProperty("--k", 1);
+    tw.appendChild(clone);
+    const t = d("thumb", [tw, h("tn", "<b>" + (i + 1) + "</b><span>" +
+      (s._def.plain || "").replace(/&/g, "&amp;").replace(/</g, "&lt;") + "</span>")]);
+    t.addEventListener("click", function () { toggleGrid(false); go(i, "all"); });
+    thumbsEl.appendChild(t);
+  });
+  /* put the live slide back into its current build state */
+  paintFrags();
+  scaleThumbs();
+}
+function scaleThumbs() {
+  NN.$$(".thumb", thumbsEl).forEach(function (t) {
+    const w = t.clientWidth || 248;
+    t.querySelector(".tw").style.transform = "scale(" + (w / 1280) + ")";
+  });
+}
+function toggleGrid(on) {
+  gridOpen = on === undefined ? !gridOpen : on;
+  if (gridOpen) { buildThumbs(); scaleThumbs(); }
+  gridEl.classList.toggle("open", gridOpen);
+  document.getElementById("btnGrid").classList.toggle("on", gridOpen);
+  if (gridOpen) {
+    const c = NN.$$(".thumb", thumbsEl)[cur];
+    if (c && c.scrollIntoView) {
+      c.scrollIntoView({ block: "center", behavior: RM ? "auto" : "smooth" });
+    }
+  }
+}
+window.addEventListener("resize", function () { if (thumbsBuilt) scaleThumbs(); });
+
+/* ============================================================== notes */
+function toggleNotes(on) {
+  notesOpen = on === undefined ? !notesOpen : on;
+  notesEl.classList.toggle("open", notesOpen);
+  document.getElementById("btnNotes").classList.toggle("on", notesOpen);
+  relayout();
+}
+
+/* =============================================================== help */
+const helpEl = document.getElementById("help");
+const KEYS = [
+  ["→ · Space · Page Down · Enter", "next build step, then next slide"],
+  ["← · Backspace · Page Up", "previous build step, then previous slide"],
+  ["↓ / ↑", "skip to next / previous slide, ignoring builds"],
+  ["Home / End", "first / last slide"],
+  ["G", "overview grid — click a thumbnail to jump"],
+  ["Esc", "open the grid, or close whatever is open"],
+  ["S", "speaker notes panel"],
+  ["F", "fullscreen"],
+  ["B or .", "blackout the screen"],
+  ["T", "light / dark theme"],
+  ["?", "this list"],
+  ["click", "right third = forward, left third = back"]
+];
+(function () {
+  const list = document.getElementById("keysList");
+  KEYS.forEach(function (k) {
+    list.appendChild(el("div", {}, k[0].split(" · ").map(function (x, i) {
+      return el("span", {}, [i ? " · " : "", el("kbd", {}, x)]);
+    })));
+    list.appendChild(el("div", { class: "muted", text: k[1] }));
+  });
+})();
+function toggleHelp(on) {
+  helpOpen = on === undefined ? !helpOpen : on;
+  helpEl.classList.toggle("open", helpOpen);
+}
+
+/* ========================================================== blackout */
+const blackEl = document.getElementById("black");
+function toggleBlack() { blacked = !blacked; blackEl.classList.toggle("on", blacked); }
+
+/* ========================================================== keyboard */
+document.addEventListener("keydown", function (e) {
+  if (/input|textarea|select/i.test(e.target.tagName)) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key;
+  if (blacked && k !== "b" && k !== "B" && k !== "." && k !== "Escape") { return; }
+  switch (k) {
+    case "ArrowRight": case " ": case "PageDown": case "Enter":
+      e.preventDefault(); next(); break;
+    case "ArrowLeft": case "PageUp": case "Backspace":
+      e.preventDefault(); prev(); break;
+    case "ArrowDown": e.preventDefault(); nextSlide(); break;
+    case "ArrowUp":   e.preventDefault(); prevSlide(); break;
+    case "Home": e.preventDefault(); go(0, 0); break;
+    case "End":  e.preventDefault(); go(COUNT - 1, "all"); break;
+    case "g": case "G": toggleGrid(); break;
+    case "s": case "S": toggleNotes(); break;
+    case "f": case "F":
+      if (!document.fullscreenElement) { document.documentElement.requestFullscreen(); }
+      else { document.exitFullscreen(); }
+      break;
+    case "b": case "B": case ".": e.preventDefault(); toggleBlack(); break;
+    case "t": case "T": document.getElementById("themeToggle").click(); break;
+    case "?": toggleHelp(); break;
+    case "Escape":
+      if (helpOpen) toggleHelp(false);
+      else if (blacked) toggleBlack();
+      else toggleGrid();
+      break;
+  }
+});
+
+/* ===================================================== click / pointer */
+const NOCLICK = "a,button,input,select,textarea,svg,.tensor,.chart,.no-nav,.memstrip,.bits";
+deck.addEventListener("click", function (e) {
+  if (e.target.closest && e.target.closest(NOCLICK)) return;
+  const third = window.innerWidth / 3;
+  if (e.clientX > third * 2) next();
+  else if (e.clientX < third) prev();
+});
+const ehL = document.getElementById("ehL"), ehR = document.getElementById("ehR");
+document.addEventListener("mousemove", function (e) {
+  if (gridOpen || helpOpen) { ehL.classList.remove("show"); ehR.classList.remove("show"); return; }
+  const third = window.innerWidth / 3;
+  ehL.classList.toggle("show", e.clientX < third * .6 && cur > 0);
+  ehR.classList.toggle("show", e.clientX > window.innerWidth - third * .6);
+});
+btnNext.addEventListener("click", next);
+btnPrev.addEventListener("click", prev);
+document.getElementById("btnGrid").addEventListener("click", function () { toggleGrid(); });
+document.getElementById("btnNotes").addEventListener("click", function () { toggleNotes(); });
+document.getElementById("btnHelp").addEventListener("click", function () { toggleHelp(); });
+helpEl.addEventListener("click", function () { toggleHelp(false); });
+
+/* touch: swipe */
+let tx = null, ty = null;
+deck.addEventListener("touchstart", function (e) {
+  tx = e.changedTouches[0].clientX; ty = e.changedTouches[0].clientY;
+}, { passive: true });
+deck.addEventListener("touchend", function (e) {
+  if (tx === null) return;
+  const dx = e.changedTouches[0].clientX - tx, dy = e.changedTouches[0].clientY - ty;
+  if (Math.abs(dx) > 55 && Math.abs(dx) > Math.abs(dy)) { dx < 0 ? next() : prev(); }
+  tx = null;
+});
+
+/* redraw charts that read CSS variables when the theme flips */
+window.addEventListener("nn:theme", function () {
+  const s = nodes[cur];
+  if (s._def.render) s._def.render(fragN, s._ctx);
+});
+
+/* ============================================================== start */
+const startHash = parseInt(location.hash.replace("#", ""), 10);
+cur = (!isNaN(startHash) && startHash >= 1 && startHash <= COUNT) ? startHash - 1 : 0;
+fragN = 0;
+paintSlide(); paintFrags(); relayout();
+window.addEventListener("load", relayout);
+setTimeout(relayout, 250);
+
+/* expose for the console */
+NN.deck = { go: go, next: next, prev: prev, slides: SLIDES };
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,1578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 08 Scaling to 70B</title>
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* page-local layout only; every colour comes from design.css custom properties */
+.ctlgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(248px, 1fr)); gap: 13px; margin: 16px 0; }
+.panel { background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 8px; padding: 12px 14px; }
+.panel h4 { margin: 0 0 10px; font-family: var(--mono); font-size: .7rem; letter-spacing: .13em;
+            text-transform: uppercase; color: var(--ink-muted); font-weight: 700; }
+.fld { margin: 0 0 11px; }
+.fld:last-child { margin-bottom: 0; }
+.fld > label { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+               font-family: var(--mono); font-size: .74rem; color: var(--ink-2); margin-bottom: 3px; }
+.fld .rv { color: var(--ink); font-weight: 700; font-variant-numeric: tabular-nums; }
+.fld select, .fld input[type="range"] { width: 100%; }
+.fld select {
+  background: var(--surface-3); color: var(--ink); border: 1px solid var(--hairline);
+  border-radius: 6px; padding: 5px 7px; font-family: var(--mono); font-size: .8rem;
+}
+.fld select:disabled { opacity: .4; }
+.fld.chk > label { justify-content: flex-start; align-items: center; cursor: pointer; }
+.fld.chk input { accent-color: var(--weight); margin-right: 7px; }
+.hint { font-size: .68rem; color: var(--ink-muted); font-family: var(--mono); }
+
+.verdict { border-radius: 8px; padding: 15px 20px; margin: 16px 0; border: 1px solid var(--hairline);
+           background: var(--surface-2); display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px; }
+.verdict .big { font-size: 1.85rem; font-weight: 800; letter-spacing: -.02em; line-height: 1.1; }
+.verdict .det { font-family: var(--mono); font-size: .88rem; color: var(--ink-2); }
+.verdict.ok  { border-left: 4px solid var(--good); }
+.verdict.ok .big  { color: var(--good); }
+.verdict.bad { border-left: 4px solid var(--critical); }
+.verdict.bad .big { color: var(--critical); }
+
+.gpugrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(178px, 1fr)); gap: 11px; margin: 14px 0; }
+.gpu { background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 8px; padding: 10px 12px; }
+.gpu.idle { opacity: .42; }
+.gpu .id { font-family: var(--mono); font-size: .72rem; color: var(--ink-muted); margin-bottom: 9px; font-weight: 700; }
+.slot { margin-bottom: 8px; }
+.slot .nm { font-family: var(--mono); font-size: .64rem; color: var(--ink-2);
+            display: flex; justify-content: space-between; gap: 6px; }
+.slot .nm em { font-style: normal; color: var(--ink-muted); }
+.shards { display: flex; gap: 2px; margin-top: 3px; }
+.sh { flex: 1; height: 13px; border-radius: 2px; border: 1px dashed var(--hairline); background: var(--surface-3); }
+.sh.on { border-style: solid; }
+.sh.tmp { opacity: .34; border-style: solid; }
+.sh.w.on, .sh.w.tmp { background: var(--weight);     border-color: var(--weight); }
+.sh.g.on, .sh.g.tmp { background: var(--gradient);   border-color: var(--gradient); }
+.sh.o.on, .sh.o.tmp { background: var(--optimizer);  border-color: var(--optimizer); }
+.sh.a.on, .sh.a.tmp { background: var(--activation); border-color: var(--activation); }
+
+.segbtns { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 4px; }
+table.data tr.hi { background: var(--surface-3); }
+table.data td.wrap, table.data th.wrap { white-space: normal; max-width: 280px; }
+.arith { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .8rem;
+         font-variant-numeric: tabular-nums; margin: 6px 0 0; }
+.arith td { padding: 5px 8px; border-bottom: 1px solid var(--hairline-2); white-space: nowrap; }
+.arith td.r { text-align: right; }
+.arith td.term { color: var(--ink-2); }
+.arith tr.sum td { border-top: 1px solid var(--hairline); border-bottom: none;
+                   font-weight: 700; color: var(--ink); padding-top: 8px; }
+.arith .op { color: var(--ink-muted); }
+.scrollx { overflow-x: auto; }
+@media (max-width: 860px) {
+  .verdict .big { font-size: 1.45rem; }
+  .gpugrid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+}
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 08</div>
+    <h1>Scaling to 70B: Why ZeRO, FSDP, TP and PP Exist</h1>
+    <p class="lede">The 13-parameter model held four classes of tensor. So does a 70B model — the
+      arithmetic is identical, the constants are the same, only the parameter count moved by nine
+      orders of magnitude. That single change is why an entire subfield of distributed systems
+      engineering exists. This page is a calculator, and the prose is written from its output.</p>
+    <noscript><p class="callout warn">This page computes every number in the browser.
+      With JavaScript disabled you will see an empty shell.</p></noscript>
+  </div>
+
+  <section class="block" id="bill">
+    <h2>1 · The 70B bill, term by term</h2>
+    <div id="billBody"></div>
+  </section>
+
+  <section class="block" id="calc">
+    <h2>2 · The calculator</h2>
+    <div id="calcBody"></div>
+  </section>
+
+  <section class="block" id="techniques">
+    <h2>3 · Each technique: what it shards, what it costs</h2>
+    <div id="techBody"></div>
+  </section>
+
+  <section class="block" id="acts">
+    <h2>4 · Activations are the other half</h2>
+    <div id="actBody"></div>
+  </section>
+
+  <section class="block" id="recipe">
+    <h2>5 · A recipe that actually lands: 70B on 64 × H100</h2>
+    <div id="recipeBody"></div>
+  </section>
+
+  <section class="block" id="caveats">
+    <h2>6 · What this model leaves out</h2>
+    <div id="caveatBody"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+  const T = NN.T;
+  const el = NN.el;
+
+  /* ======================================================================
+     UNITS
+     GB = 10^9 bytes throughout this page, because that is how every paper
+     and every vendor spec sheet quotes both model memory and HBM capacity.
+     NN.bytes() is the same base, so fsize() below and the shared helper agree;
+     fsize exists only for this page's slightly different rounding. Where a
+     device capacity is stated in binary units, use NN.gibytes and say GiB.
+     ====================================================================== */
+  const GB = 1e9, TB = 1e12;
+
+  function fsize(b) {
+    if (b >= TB)   return NN.fmt(b / TB, 2) + " TB";
+    if (b >= GB)   return NN.fmt(b / GB, b / GB < 10 ? 2 : 1) + " GB";
+    if (b >= 1e6)  return NN.fmt(b / 1e6, 1) + " MB";
+    if (b >= 1e3)  return NN.fmt(b / 1e3, 1) + " kB";
+    return NN.fmt(b, 0) + " B";
+  }
+  const gbn = function (b) { return b / GB; };
+  const x = "×", div = "÷", arrow = "→", approx = "≈";
+
+  /* ====================================================================== */
+  /* CATALOGUES                                                             */
+  /* ====================================================================== */
+
+  /* Byte widths are read from the trace (T.memory.dtype_bytes), never typed here.
+     Optimizer costs are built out of those same widths: momentum is one fp32
+     buffer, Adam is two, 8-bit Adam is two int8 buffers. */
+  const DTB = T.memory.dtype_bytes;
+  const MASTER_B = DTB.fp32;           // the fp32 master copy is, by definition, fp32
+
+  const WDT = {};
+  ["bf16", "fp16", "fp32"].forEach(function (k) { WDT[k] = { b: DTB[k], label: k }; });
+  const GDT = {};
+  ["bf16", "fp32"].forEach(function (k) { GDT[k] = { b: DTB[k], label: k }; });
+
+  const OPTS = {
+    sgd:   { b: 0,            label: "SGD (plain)",    detail: "no state kept between steps" },
+    mom:   { b: DTB.fp32,     label: "SGD + momentum", detail: "one fp32 buffer per parameter" },
+    adam:  { b: 2 * DTB.fp32, label: "Adam / AdamW",   detail: "m and v, fp32 each" },
+    adam8: { b: 2 * DTB.int8, label: "8-bit Adam",     detail: "m and v, quantised to 1 byte each" }
+  };
+
+  /* ---------------------------------------------------------------------
+     Reference model and GPU specs come from T.reference_configs, which is
+     quoted public architecture data, not derived from the toy model.
+     --------------------------------------------------------------------- */
+  const REF = T.reference_configs;
+  const MODELS = REF.models;
+  const GPUS = REF.gpus;
+
+  function modelByName(n) {
+    const h = MODELS.filter(function (m) { return m.name === n; });
+    return h.length ? h[0] : MODELS[MODELS.length - 1];
+  }
+  function gpuByName(n) {
+    const h = GPUS.filter(function (g) { return g.name === n; });
+    return h.length ? h[0] : GPUS[GPUS.length - 1];
+  }
+  /** Turn a published architecture into the shape parameters this page uses. */
+  function shapeOf(m) {
+    return {
+      P: m.params,
+      d: m.d_model,
+      L: m.n_layers,
+      s: m.seq,
+      headDim: m.d_model / m.n_heads,
+      kvRatio: (m.n_kv_heads || m.n_heads) / m.n_heads,
+      dffRatio: (m.d_ff || 4 * m.d_model) / m.d_model,
+      vocab: m.vocab
+    };
+  }
+
+  /* Activation accounting for one pre-norm transformer layer, in BYTES per
+     (token x d_model) at 2-byte activations. The architecture-independent part:
+
+       2 LayerNorm inputs                  4
+       QKV projection input                2
+       attention-over-V output             2
+       attention out-proj dropout mask     1
+       MLP first linear input              2
+       MLP dropout mask                    1
+       ----------------------------------- 12
+
+     plus two parts that depend on the architecture:
+
+       Q stored                            2
+       K and V stored          4 x (n_kv_heads / n_heads)   -- 4 under MHA, 0.5 under Llama-3 GQA
+       MLP internals           4 x (d_ff / d_model)         -- 16 when d_ff = 4d
+
+     which sum to the familiar 34 for a GPT-style layer with MHA and a 4x MLP.
+     Separately the attention score matrix, which is not (token x d) shaped:
+       softmax out 2 + dropout mask 1 + dropout out 2 = 5 bytes per (head x s^2)
+     Every term scales linearly with the activation dtype width.             */
+  const ACT_FIXED  = 12;
+  const ACT_Q      = 2;    // the query tensor; GQA never shrinks it
+  const ACT_KV     = 4;    // K and V together, scaled by n_kv_heads / n_heads
+  const ACT_MLP    = 4;    // x (d_ff / d_model)
+  const ACT_ATT    = 5;    // bytes per (b*heads*s*s) per layer
+  const ACT_LIN_REPL = 10; // of the linear total, this much is not split by TP without SP
+  const ACT_BOUND  = 2;    // bytes per (b*s*d): the layer-input tensor a checkpoint keeps
+
+  /** Bytes per (token x d_model) per layer, at 2-byte activations. */
+  function actLinCoef(c) {
+    return ACT_FIXED + ACT_Q + ACT_KV * c.kvRatio + ACT_MLP * c.dffRatio;
+  }
+  /** KV cache for one sequence, inference only. GQA shrinks it by kvRatio. */
+  function kvCacheBytes(c, dtypeBytes) {
+    const heads = Math.max(1, Math.round(c.d / c.headDim));
+    const kvHeads = Math.max(1, Math.round(heads * c.kvRatio));
+    return 2 * c.L * c.s * kvHeads * c.headDim * dtypeBytes;
+  }
+
+  /** Parameter counts: exact to one decimal at billion scale. */
+  function pfmt(P) {
+    if (P < 1e9) return NN.count(P);
+    const b = P / 1e9;
+    return NN.fmt(b, Math.abs(b - Math.round(b)) < 1e-9 ? 0 : 1) + "B";
+  }
+
+  const STRAT = {
+    none: { label: "Single GPU",
+      p: "full", g: "full", o: "full", a: "full",
+      shards: "nothing",
+      comm: "none",
+      drawback: "Only works if the entire bill fits on one device." },
+    ddp: { label: "DDP",
+      p: "replicated", g: "replicated", o: "replicated", a: "own micro-batch",
+      shards: "the DATA, and only the data",
+      comm: "all-reduce of gradients once per step",
+      drawback: "Every GPU pays the full model-state bill. Adding GPUs adds throughput and zero memory relief." },
+    z1: { label: "ZeRO-1",
+      p: "replicated", g: "replicated", o: div + " DP", a: "own micro-batch",
+      shards: "OPTIMIZER STATE only",
+      comm: "reduce-scatter gradients + all-gather updated parameters",
+      drawback: "Gradients and parameters are still full size on every GPU. Biggest single win for Adam, no win at all for plain SGD." },
+    z2: { label: "ZeRO-2",
+      p: "replicated", g: div + " DP", o: div + " DP", a: "own micro-batch",
+      shards: "optimizer state + GRADIENTS",
+      comm: "reduce-scatter gradients (bucketed as they are produced) + all-gather parameters",
+      drawback: "Parameters are still replicated, so the floor is still the full weight copy. Gradient buckets must be reduced the moment they exist, which constrains overlap." },
+    z3: { label: "ZeRO-3 / FSDP",
+      p: div + " DP", g: div + " DP", o: div + " DP", a: "own micro-batch",
+      shards: "optimizer state + gradients + PARAMETERS",
+      comm: "all-gather parameters per layer in forward, again in backward, plus reduce-scatter of gradients",
+      drawback: "About 1.5" + x + " the communication of DDP, and a per-layer all-gather sits directly on the critical path. Wants fast interconnect and deep prefetch." }
+  };
+
+  /* ====================================================================== */
+  /* THE MODEL                                                              */
+  /* ====================================================================== */
+
+  /** Bytes per parameter, split into the classes that shard differently. */
+  function perParam(c) {
+    const w = WDT[c.wdtype].b;
+    const g = GDT[c.gdtype].b;
+    const o = OPTS[c.opt].b;
+    // an fp32 master copy is only a separate array if the weights are narrower
+    const m = (c.master && w < MASTER_B) ? MASTER_B : 0;
+    return { w: w, g: g, o: o, master: m, optTotal: o + m, all: w + g + o + m };
+  }
+
+  /* --------- T.memory.recipes is the source of truth for bytes/param ------ */
+  function recipeComponents(r) {
+    const c = r.components || {};
+    return { weight: c.weight || 0, gradient: c.gradient || 0, optimizer: c.optimizer || 0 };
+  }
+  function componentsOf(cfg) {
+    const p = perParam(cfg);
+    return { weight: p.w, gradient: p.g, optimizer: p.optTotal };
+  }
+  function sameComponents(a, b) {
+    return a.weight === b.weight && a.gradient === b.gradient && a.optimizer === b.optimizer;
+  }
+  /** The trace recipe this control setting reproduces, if any. */
+  function traceRecipeFor(cfg) {
+    const me = componentsOf(cfg);
+    const hit = T.memory.recipes.filter(function (r) {
+      return sameComponents(recipeComponents(r), me);
+    });
+    return hit.length ? hit[0] : null;
+  }
+  /** Every control combination that reproduces a given trace recipe exactly. */
+  function settingsFor(r) {
+    const target = recipeComponents(r);
+    const out = [];
+    Object.keys(WDT).forEach(function (w) {
+      Object.keys(GDT).forEach(function (g) {
+        Object.keys(OPTS).forEach(function (o) {
+          [true, false].forEach(function (m) {
+            const cfg = { wdtype: w, gdtype: g, opt: o, master: m };
+            if (sameComponents(componentsOf(cfg), target)) out.push(cfg);
+          });
+        });
+      });
+    });
+    // prefer bf16 and an explicit master toggle when several settings agree
+    out.sort(function (a, b) {
+      return ((a.wdtype === "bf16" ? 0 : 2) + (a.master ? 0 : 1)) -
+             ((b.wdtype === "bf16" ? 0 : 2) + (b.master ? 0 : 1));
+    });
+    return out;
+  }
+  function ctlText(cfg) {
+    return cfg.wdtype + " w / " + cfg.gdtype + " g / " + OPTS[cfg.opt].label +
+           (cfg.master ? " / master on" : " / master off");
+  }
+
+  /** Whole-model state in bytes, ignoring all parallelism. Used by section 1. */
+  function modelState(c) {
+    const pp = perParam(c);
+    return {
+      weight:    c.P * pp.w,
+      gradient:  c.P * pp.g,
+      master:    c.P * pp.master,
+      optimizer: c.P * pp.o,
+      optClass:  c.P * pp.optTotal,
+      total:     c.P * pp.all,
+      perParam:  pp
+    };
+  }
+
+  /** Which divisor the ZeRO ladder applies to each class. */
+  function zeroDiv(strat, cls, dp) {
+    if (strat === "z1") return cls === "opt" ? dp : 1;
+    if (strat === "z2") return (cls === "opt" || cls === "grad") ? dp : 1;
+    if (strat === "z3") return dp;
+    return 1;   // none, ddp
+  }
+
+  /** Per-GPU activation memory, with every intermediate exposed. */
+  function activations(c) {
+    const ab = WDT[c.wdtype].b;
+    const scale = ab / 2;
+    const heads = Math.max(1, Math.round(c.d / c.headDim));
+    const tp = c.tp, pp = c.pp;
+
+    // TP splits the per-(b*s*d) work. Without sequence parallelism the norms
+    // and dropouts stay replicated; with it, everything is split.
+    const coefFull = actLinCoef(c);
+    const repl = Math.min(ACT_LIN_REPL, coefFull);
+    const linCoef = c.sp ? (coefFull / tp) : (repl + (coefFull - repl) / tp);
+    const lin = linCoef * scale * c.b * c.s * c.d;
+    const att = c.flash ? 0 : (ACT_ATT / tp) * scale * c.b * heads * c.s * c.s;
+    const full = lin + att;                                        // one layer, one micro-batch
+    const bound = (ACT_BOUND / (c.sp ? tp : 1)) * scale * c.b * c.s * c.d;
+
+    const stored = c.ckpt ? bound : full;
+    const layersPerStage = Math.ceil(c.L / pp);
+    const inflight = Math.min(pp, c.micro);   // 1F1B: the first stage holds pp micro-batches
+    const total = layersPerStage * inflight * stored + (c.ckpt ? full : 0);
+
+    return { ab: ab, heads: heads, coefFull: coefFull, linCoef: linCoef, lin: lin, att: att,
+             full: full, bound: bound, stored: stored, layersPerStage: layersPerStage,
+             inflight: inflight, total: total };
+  }
+
+  /** The whole calculation. Everything on the page is rendered from this. */
+  function calc(c) {
+    const single = c.strat === "none";
+    const tp = single ? 1 : c.tp;
+    const pp = single ? 1 : c.pp;
+    const modelShards = tp * pp;
+    const enoughGpus = c.gpus >= modelShards;
+    const dp = single ? 1 : Math.max(1, Math.floor(c.gpus / modelShards));
+    const usedGpus = single ? 1 : dp * modelShards;
+
+    const cc = Object.assign({}, c, { tp: tp, pp: pp });
+    const st = modelState(cc);
+    const ppm = st.perParam;
+
+    const Plocal = c.P / modelShards;     // parameters physically resident, pre-ZeRO
+    const dW = zeroDiv(c.strat, "param", dp);
+    const dG = zeroDiv(c.strat, "grad", dp);
+    const dO = zeroDiv(c.strat, "opt", dp);
+
+    const bWeight = Plocal * ppm.w / dW;
+    const bGrad   = Plocal * ppm.g / dG;
+    const bOptM   = Plocal * ppm.master / dO;
+    const bOptS   = Plocal * ppm.o / dO;
+    const bOpt    = bOptM + bOptS;
+
+    const act = activations(cc);
+    const bAct = act.total;
+
+    const total = bWeight + bGrad + bOpt + bAct;
+    const cap = c.cap;
+
+    /* -------- the arithmetic, term by term -------- */
+    function shardText(dModel, dZero, zeroName) {
+      const parts = [];
+      if (tp > 1) parts.push(div + " TP " + tp);
+      if (pp > 1) parts.push(div + " PP " + pp);
+      if (dZero > 1) parts.push(div + " " + zeroName + " " + dZero);
+      return parts.length ? parts.join(" ") : "—";
+    }
+    const zn = c.strat === "z1" ? "ZeRO-1 DP" : c.strat === "z2" ? "ZeRO-2 DP"
+             : c.strat === "z3" ? "ZeRO-3 DP" : "DP";
+
+    const terms = [];
+    terms.push({ cls: "weight", name: "weights",
+      expr: pfmt(c.P) + " " + x + " " + ppm.w + " B (" + WDT[c.wdtype].label + ")",
+      full: st.weight, shard: shardText(modelShards, dW, zn), per: bWeight });
+    if (ppm.master > 0) terms.push({ cls: "optimizer", name: "fp32 master copy",
+      expr: pfmt(c.P) + " " + x + " " + MASTER_B + " B",
+      full: st.master, shard: shardText(modelShards, dO, zn), per: bOptM });
+    if (ppm.o > 0) terms.push({ cls: "optimizer", name: OPTS[c.opt].label + " state",
+      expr: pfmt(c.P) + " " + x + " " + ppm.o + " B",
+      full: st.optimizer, shard: shardText(modelShards, dO, zn), per: bOptS });
+    terms.push({ cls: "gradient", name: "gradients",
+      expr: pfmt(c.P) + " " + x + " " + ppm.g + " B (" + GDT[c.gdtype].label + ")",
+      full: st.gradient, shard: shardText(modelShards, dG, zn), per: bGrad });
+    terms.push({ cls: "activation", name: "activations",
+      expr: act.layersPerStage + " layer" + (act.layersPerStage === 1 ? "" : "s") +
+            (act.inflight > 1 ? " " + x + " " + act.inflight + " in flight" : "") +
+            " " + x + " " + fsize(act.stored) + (c.ckpt ? " + 1 recompute" : ""),
+      full: null, shard: "—", per: bAct });
+
+    /* -------- communication per optimizer step, per GPU -------- */
+    const commParts = [];
+    let commBytes = 0;
+    if (!single && dp > 1) {
+      if (c.strat === "ddp" || c.strat === "z1" || c.strat === "z2") {
+        const v = 2 * Plocal * ppm.g;
+        commBytes += v;
+        commParts.push("2 " + x + " " + pfmt(Plocal) + " params " + x + " " + ppm.g +
+                       " B = " + fsize(v) + " (gradient all-reduce, or its reduce-scatter + all-gather equivalent)");
+      } else if (c.strat === "z3") {
+        const vp = 2 * Plocal * ppm.w, vg = Plocal * ppm.g;
+        commBytes += vp + vg;
+        commParts.push("2 " + x + " " + fsize(Plocal * ppm.w) +
+                       " parameter all-gather (forward, then backward) + " +
+                       fsize(vg) + " gradient reduce-scatter = " + fsize(vp + vg));
+      }
+    }
+    let tpBytes = 0;
+    if (tp > 1) {
+      tpBytes = 4 * act.layersPerStage * c.micro * (2 * (tp - 1) / tp) *
+                c.b * c.s * c.d * act.ab / (c.sp ? 1 : 1);
+      commBytes += tpBytes;
+      commParts.push("4 all-reduces per layer per micro-batch " + x + " " + act.layersPerStage +
+                     " layers " + x + " " + c.micro + " micro-batches = " + fsize(tpBytes) +
+                     " (inside the layer, on the critical path)");
+    }
+    let ppBytes = 0;
+    if (pp > 1) {
+      ppBytes = 2 * c.micro * c.b * c.s * c.d * act.ab;
+      commBytes += ppBytes;
+      commParts.push(fsize(ppBytes) + " point-to-point across stage boundaries (cheap in volume)");
+    }
+    const bubble = pp > 1 ? (pp - 1) / (c.micro + pp - 1) : 0;
+
+    return {
+      cfg: cc, single: single, tp: tp, pp: pp, dp: dp, modelShards: modelShards,
+      enoughGpus: enoughGpus, usedGpus: usedGpus, Plocal: Plocal,
+      perParam: ppm, state: st, act: act,
+      bytes: { weight: bWeight, gradient: bGrad, optimizer: bOpt, activation: bAct },
+      modelStatePerGpu: bWeight + bGrad + bOpt,
+      total: total, cap: cap, fits: total <= cap,
+      headroom: cap - total, over: total - cap, ratio: total / cap,
+      terms: terms, commBytes: commBytes, commParts: commParts, bubble: bubble,
+      dW: dW, dG: dG, dO: dO
+    };
+  }
+
+  /* ====================================================================== */
+  /* SMALL RENDER HELPERS                                                   */
+  /* ====================================================================== */
+
+  function classColor(cls) { return "var(--" + cls + ")"; }
+
+  /** Stacked memory strip in decimal-GB units (design.css .memstrip classes). */
+  function strip(segs, capBytes) {
+    const used = segs.reduce(function (a, s) { return a + s.bytes; }, 0);
+    const cap = Math.max(capBytes || used, used);
+    const map = { weight: "w", gradient: "g", activation: "a", optimizer: "o" };
+    const root = el("div", { class: "memstrip" });
+    segs.forEach(function (s) {
+      if (s.bytes <= 0) return;
+      root.appendChild(el("div", {
+        class: "memseg " + map[s.cls],
+        style: { flexGrow: String(s.bytes) },
+        title: s.label + " — " + fsize(s.bytes)
+      }, s.bytes / cap > 0.10 ? s.label : ""));
+    });
+    if (cap > used) {
+      root.appendChild(el("div", {
+        class: "memseg free", style: { flexGrow: String(cap - used) },
+        title: "free — " + fsize(cap - used)
+      }, (cap - used) / cap > 0.10 ? "free" : ""));
+    }
+    return root;
+  }
+
+  /** The term-by-term arithmetic table. */
+  function arithTable(r, showShard) {
+    const t = el("table", { class: "arith" });
+    const body = el("tbody");
+    r.terms.forEach(function (tm) {
+      body.appendChild(el("tr", {}, [
+        el("td", { class: "term" }, [
+          el("span", { class: "v-" + tm.cls, style: { fontWeight: "700" } }, tm.name)
+        ]),
+        el("td", { class: "op" }, tm.expr),
+        el("td", { class: "r" }, tm.full === null ? "" : fsize(tm.full)),
+        showShard === false ? null : el("td", { class: "r op" }, tm.shard),
+        el("td", { class: "r v-" + tm.cls, style: { fontWeight: "700" } }, fsize(tm.per))
+      ]));
+    });
+    body.appendChild(el("tr", { class: "sum" }, [
+      el("td", {}, "per GPU"),
+      el("td", { class: "op" }, "sum of the terms above"),
+      el("td", { class: "r" }, ""),
+      showShard === false ? null : el("td", {}, ""),
+      el("td", { class: "r" }, fsize(r.total))
+    ]));
+    t.appendChild(body);
+    return el("div", { class: "scrollx" }, t);
+  }
+
+  function outputBlock(r) {
+    const capGB = gbn(r.cap);
+    const box = el("div");
+
+    /* verdict */
+    const v = el("div", { class: "verdict " + (r.fits ? "ok" : "bad") }, [
+      el("div", { class: "big" }, r.fits ? "FITS" : "DOES NOT FIT"),
+      el("div", { class: "det" },
+        fsize(r.total) + " per GPU  /  " + fsize(r.cap) + " of HBM  " + arrow + "  " +
+        (r.fits
+          ? fsize(r.headroom) + " free (" + NN.fmt(100 * r.headroom / r.cap, 0) + "% headroom)"
+          : "over by " + fsize(r.over) + " (" + NN.fmt(r.ratio, 2) + x + " the device)"))
+    ]);
+    box.appendChild(v);
+
+    if (!r.enoughGpus) {
+      box.appendChild(NN.callout("warn", "Impossible configuration",
+        "TP " + r.tp + " " + x + " PP " + r.pp + " = " + r.modelShards +
+        " model shards, but only " + r.cfg.gpus + " GPUs were selected. " +
+        "The numbers below assume the model shards exist anyway, with a data-parallel degree of " +
+        r.dp + "."));
+    }
+
+    box.appendChild(strip([
+      { cls: "weight",     bytes: r.bytes.weight,     label: "weights" },
+      { cls: "gradient",   bytes: r.bytes.gradient,   label: "gradients" },
+      { cls: "optimizer",  bytes: r.bytes.optimizer,  label: "optimizer" },
+      { cls: "activation", bytes: r.bytes.activation, label: "activations" }
+    ], r.cap));
+    box.appendChild(el("div", { class: "hint" },
+      "One device. Bar is to scale against " + fsize(r.cap) + " of HBM" +
+      (r.total > r.cap ? " — the strip is saturated because the request exceeds the device." : ".")));
+
+    box.appendChild(NN.legend(["weight", "gradient", "optimizer", "activation"]));
+
+    box.appendChild(NN.chart.bars({
+      items: [
+        { label: "weights",         value: gbn(r.bytes.weight),     color: classColor("weight"),
+          sub: "· " + fsize(r.bytes.weight) },
+        { label: "gradients",       value: gbn(r.bytes.gradient),   color: classColor("gradient"),
+          sub: "· " + fsize(r.bytes.gradient) },
+        { label: "optimizer state", value: gbn(r.bytes.optimizer),  color: classColor("optimizer"),
+          sub: "· " + fsize(r.bytes.optimizer) },
+        { label: "activations",     value: gbn(r.bytes.activation), color: classColor("activation"),
+          sub: "· " + fsize(r.bytes.activation) },
+        { label: "TOTAL per GPU",   value: gbn(r.total),            color: "var(--accent)",
+          sub: "· " + fsize(r.total) }
+      ],
+      unit: "GB",
+      max: Math.max(gbn(r.total), capGB) * 1.06,
+      limit: { value: capGB, label: "device limit" }
+    }));
+
+    box.appendChild(el("h3", {}, "The arithmetic"));
+    box.appendChild(arithTable(r));
+
+    /* topology + comms */
+    const topo = [];
+    topo.push({ k: "data parallel", v: String(r.dp), s: r.single ? "single device" : "replica groups" });
+    topo.push({ k: "tensor parallel", v: String(r.tp), s: r.tp > 1 ? "matrices split" : "off" });
+    topo.push({ k: "pipeline parallel", v: String(r.pp), s: r.pp > 1 ? r.act.layersPerStage + " layers/stage" : "off" });
+    topo.push({ k: "model state / GPU", v: fsize(r.modelStatePerGpu), s: "weights + grads + optimizer" });
+    topo.push({ k: "aggregate model state", v: fsize(r.state.total), s: "one copy, cluster-wide" });
+    if (r.pp > 1) topo.push({ k: "pipeline bubble", v: NN.fmt(100 * r.bubble, 1) + "%",
+      s: r.cfg.micro + " micro-batches" });
+    box.appendChild(NN.tiles(topo));
+
+    if (r.commParts.length) {
+      box.appendChild(el("div", { class: "formula" }, [
+        el("div", { html: "<b>Communication per optimizer step, per GPU</b>" }),
+        el("div", { class: "sub", html: r.commParts.map(function (p) { return "· " + p; }).join("<br>") }),
+        el("div", { class: "sub", html: "total " + approx + " <b>" + fsize(r.commBytes) + "</b> moved per GPU per step" })
+      ]));
+    }
+    return box;
+  }
+
+  /* ====================================================================== */
+  /* STATE + CONTROLS                                                       */
+  /* ====================================================================== */
+
+  /** Merge the reference models' own values into each slider's landmark list. */
+  function withRef(list, key) {
+    const seen = {};
+    MODELS.forEach(function (m) { seen[shapeOf(m)[key]] = true; });
+    list.forEach(function (v) { seen[v] = true; });
+    return Object.keys(seen).map(Number).sort(function (a, b) { return a - b; });
+  }
+
+  const P_LIST = withRef([1, 1.5, 2, 3, 4, 5, 7, 10, 13, 20, 25, 30, 34, 40, 50, 65, 70,
+                          90, 100, 120, 140, 200, 235, 300, 340, 480, 540, 600, 700]
+                         .map(function (v) { return v * 1e9; }), "P");
+  const S_LIST = withRef([512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072], "s");
+  const D_LIST = withRef([1024, 2048, 3072, 4096, 5120, 6144, 6656, 8192, 12288, 16384, 18432], "d");
+  const L_LIST = withRef([2, 6, 12, 24, 32, 40, 48, 60, 64, 80, 96, 110, 126, 160], "L");
+  const B_LIST = [1, 2, 4, 8, 16, 32, 64];
+  const N_LIST = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384];
+  const M_LIST = [1, 2, 4, 8, 16, 32, 64, 128, 256];
+
+  const DEFAULT_MODEL = modelByName(REF.default_model);
+  const DEFAULT_GPU   = gpuByName(REF.default_gpu);
+
+  const state = Object.assign({
+    mdl: DEFAULT_MODEL.name,
+    wdtype: "bf16", gdtype: "bf16", opt: "adam", master: true,
+    b: 1, ckpt: false, flash: true, sp: true,
+    gpus: 64, strat: "ddp", tp: 1, pp: 1, micro: 8,
+    gpu: DEFAULT_GPU.name, cap: DEFAULT_GPU.hbm_bytes,
+    diag: "ddp"
+  }, shapeOf(DEFAULT_MODEL));
+
+  const syncers = [];   // push state back into widgets after a programmatic change
+  const SHAPE_KEYS = ["P", "s", "L", "d"];
+  const CUSTOM = "custom";
+
+  function fldRange(panel, label, key, list, fmtFn, hint) {
+    const rv = el("span", { class: "rv" }, fmtFn(state[key]));
+    const inp = el("input", {
+      type: "range", min: 0, max: list.length - 1, step: 1,
+      value: String(Math.max(0, list.indexOf(state[key])))
+    });
+    inp.addEventListener("input", function () {
+      state[key] = list[Number(inp.value)];
+      if (SHAPE_KEYS.indexOf(key) >= 0) state.mdl = CUSTOM;
+      rv.textContent = fmtFn(state[key]);
+      syncers.forEach(function (f) { f(); });
+      render();
+    });
+    syncers.push(function () {
+      const i = list.indexOf(state[key]);
+      if (i >= 0) inp.value = String(i);
+      rv.textContent = fmtFn(state[key]);
+    });
+    panel.appendChild(el("div", { class: "fld" }, [
+      el("label", {}, [el("span", {}, label), rv]),
+      inp,
+      hint ? el("div", { class: "hint" }, hint) : null
+    ]));
+  }
+
+  function fldSelect(panel, label, key, options, hint, coerce) {
+    const sel = el("select");
+    options.forEach(function (o) {
+      sel.appendChild(el("option", { value: String(o.v) }, o.label));
+    });
+    sel.value = String(state[key]);
+    sel.addEventListener("change", function () {
+      state[key] = coerce ? coerce(sel.value) : sel.value;
+      if (SHAPE_KEYS.indexOf(key) >= 0) state.mdl = CUSTOM;
+      if (key === "mdl" && state.mdl !== CUSTOM) Object.assign(state, shapeOf(modelByName(state.mdl)));
+      if (key === "gpu") state.cap = gpuByName(state.gpu).hbm_bytes;
+      if (key === "strat") state.diag = state[key] === "none" ? "ddp" : state[key];
+      if (key === "tp" && state.tp > 1) state.diag = "tp";
+      if (key === "pp" && state.pp > 1) state.diag = "pp";
+      syncers.forEach(function (f) { f(); });
+      render();
+    });
+    syncers.push(function () { sel.value = String(state[key]); });
+    panel.appendChild(el("div", { class: "fld" }, [
+      el("label", {}, [el("span", {}, label)]),
+      sel,
+      hint ? el("div", { class: "hint" }, hint) : null
+    ]));
+  }
+
+  function fldCheck(panel, label, key, hint) {
+    const inp = el("input", { type: "checkbox" });
+    inp.checked = !!state[key];
+    inp.addEventListener("change", function () { state[key] = inp.checked; render(); });
+    syncers.push(function () { inp.checked = !!state[key]; });
+    panel.appendChild(el("div", { class: "fld chk" }, [
+      el("label", {}, [inp, el("span", {}, label)]),
+      hint ? el("div", { class: "hint" }, hint) : null
+    ]));
+  }
+
+  function buildControls() {
+    const grid = el("div", { class: "ctlgrid" });
+
+    const pm = el("div", { class: "panel" }, [el("h4", {}, "Model")]);
+    fldSelect(pm, "preset", "mdl",
+      MODELS.map(function (m) { return { v: m.name, label: m.name + "  (" + pfmt(m.params) + ")" }; })
+            .concat([{ v: CUSTOM, label: "custom" }]),
+      "published architectures, from T.reference_configs");
+    fldRange(pm, "parameters", "P", P_LIST, function (v) { return pfmt(v); },
+             pfmt(P_LIST[0]) + " to " + pfmt(P_LIST[P_LIST.length - 1]) + ", log-spaced landmarks");
+    fldSelect(pm, "layers", "L", L_LIST.map(function (v) { return { v: v, label: String(v) }; }),
+              null, Number);
+    fldSelect(pm, "d_model", "d", D_LIST.map(function (v) { return { v: v, label: String(v) }; }),
+              "head_dim held at the preset's value", Number);
+    grid.appendChild(pm);
+
+    const pp = el("div", { class: "panel" }, [el("h4", {}, "Precision & optimizer")]);
+    fldSelect(pp, "weight dtype", "wdtype", Object.keys(WDT).map(function (k) {
+      return { v: k, label: WDT[k].label + "  (" + WDT[k].b + " B/param)" }; }));
+    fldSelect(pp, "gradient dtype", "gdtype", Object.keys(GDT).map(function (k) {
+      return { v: k, label: GDT[k].label + "  (" + GDT[k].b + " B/param)" }; }));
+    fldSelect(pp, "optimizer", "opt", Object.keys(OPTS).map(function (k) {
+      return { v: k, label: OPTS[k].label + "  (" + OPTS[k].b + " B/param)" }; }));
+    fldCheck(pp, "keep fp32 master weights", "master",
+             "ignored when the weights are already fp32");
+    grid.appendChild(pp);
+
+    const pa = el("div", { class: "panel" }, [el("h4", {}, "Activations")]);
+    fldSelect(pa, "micro-batch per GPU", "b", B_LIST.map(function (v) { return { v: v, label: String(v) }; }),
+              null, Number);
+    fldRange(pa, "sequence length", "s", S_LIST, function (v) { return String(v); },
+             "the s² term lives here");
+    fldCheck(pa, "gradient checkpointing", "ckpt", "store layer inputs, recompute the rest");
+    fldCheck(pa, "FlashAttention", "flash", "never materialise the s×s score matrix");
+    fldCheck(pa, "sequence parallelism", "sp", "splits the norms and dropouts that TP alone leaves whole");
+    grid.appendChild(pa);
+
+    const pc = el("div", { class: "panel" }, [el("h4", {}, "Cluster")]);
+    fldSelect(pc, "GPUs", "gpus", N_LIST.map(function (v) { return { v: v, label: String(v) }; }),
+              null, Number);
+    fldSelect(pc, "strategy", "strat", [
+      { v: "none", label: "none (single GPU)" },
+      { v: "ddp",  label: "DDP" },
+      { v: "z1",   label: "ZeRO-1" },
+      { v: "z2",   label: "ZeRO-2" },
+      { v: "z3",   label: "ZeRO-3 / FSDP" }
+    ]);
+    fldSelect(pc, "tensor parallel (TP)", "tp",
+      [1, 2, 4, 8, 16].map(function (v) { return { v: v, label: v === 1 ? "off" : String(v) }; }),
+      null, Number);
+    fldSelect(pc, "pipeline parallel (PP)", "pp",
+      [1, 2, 4, 8, 16, 32].map(function (v) { return { v: v, label: v === 1 ? "off" : String(v) }; }),
+      null, Number);
+    fldSelect(pc, "micro-batches / step", "micro",
+      M_LIST.map(function (v) { return { v: v, label: String(v) }; }),
+      "only matters once PP is on", Number);
+    fldSelect(pc, "device", "gpu",
+      GPUS.map(function (g) { return { v: g.name, label: g.name + "  (" + fsize(g.hbm_bytes) + ")" }; }),
+      "HBM read from T.reference_configs.gpus — real GiB, not the marketing round number");
+    grid.appendChild(pc);
+
+    return grid;
+  }
+
+  /* ====================================================================== */
+  /* SECTION 1 — THE 70B BILL                                               */
+  /* ====================================================================== */
+
+  /* The recipe is not chosen here — it is looked up in the trace by its
+     component costs, and the control settings that reproduce it are searched
+     for. If ground_truth.py changes a byte width, this section follows. */
+  const BILL_MODEL = DEFAULT_MODEL;
+  const BILL_P = BILL_MODEL.params;
+  const BILL_RECIPE = T.memory.recipes.filter(function (r) {
+    const c = recipeComponents(r);
+    return c.weight === DTB.bf16 && c.gradient === DTB.bf16 &&
+           c.optimizer === MASTER_B + 2 * DTB.fp32;
+  })[0];
+  const billCfg = Object.assign({ P: BILL_P },
+    BILL_RECIPE ? settingsFor(BILL_RECIPE)[0]
+                : { wdtype: "bf16", gdtype: "bf16", opt: "adam", master: true });
+  const billCfg32 = Object.assign({}, billCfg, { gdtype: "fp32" });
+  const BILL_RECIPE32 = traceRecipeFor(billCfg32);
+
+  function buildBill() {
+    const host = NN.$("#billBody");
+    const a = modelState(billCfg);      // bf16 gradients
+    const b = modelState(billCfg32);    // fp32 gradients
+    const h100 = DEFAULT_GPU.hbm_bytes;
+    const inference = a.weight;
+    const nH100_a = Math.ceil(a.total / h100);
+    const nH100_b = Math.ceil(b.total / h100);
+    const rc = recipeComponents(BILL_RECIPE);
+
+    host.appendChild(el("p", { html:
+      "Take <b>" + BILL_MODEL.name + "</b> &mdash; " + pfmt(BILL_P) + " parameters, " +
+      BILL_MODEL.n_layers + " layers, d_model " + BILL_MODEL.d_model + ", " +
+      BILL_MODEL.n_heads + " query heads over " + (BILL_MODEL.n_kv_heads || BILL_MODEL.n_heads) +
+      " KV heads &mdash; trained the way essentially every large model is trained today. " +
+      "The trace already knows what that recipe costs per parameter: " +
+      "<code>T.memory.recipes</code> lists it as <b>&ldquo;" + BILL_RECIPE.name + "&rdquo;</b>, " +
+      "at " + rc.weight + " B of weight, " + rc.gradient + " B of gradient and " + rc.optimizer +
+      " B of optimizer state per parameter" +
+      (BILL_RECIPE.note ? " &mdash; " + BILL_RECIPE.note : "") + ". All this section does is " +
+      "multiply those three numbers by " + pfmt(BILL_P) + "." }));
+
+    host.appendChild(NN.tiles([
+      { k: "parameters", v: pfmt(BILL_P), s: NN.fmt(BILL_P / 1e9, 1) + " × 10⁹" },
+      { k: "bf16 weights", v: fsize(a.weight), s: rc.weight + " B/param", cls: "weight" },
+      { k: "fp32 master copy", v: fsize(a.master), s: MASTER_B + " B/param", cls: "optimizer" },
+      { k: "Adam m + v", v: fsize(a.optimizer), s: a.perParam.o + " B/param", cls: "optimizer" },
+      { k: "gradients (bf16)", v: fsize(a.gradient), s: rc.gradient + " B/param", cls: "gradient" },
+      { k: "model state", v: fsize(a.total), s: a.perParam.all + " B/param" }
+    ]));
+
+    const tbl = el("table", { class: "arith" });
+    const tb = el("tbody");
+    [
+      ["weight",    "bf16 weights",     a.perParam.w,  a.weight,        "the matmul copy"],
+      ["optimizer", "fp32 master copy", MASTER_B,      a.master,        "so 1e-8 updates survive"],
+      ["optimizer", "Adam m (fp32)",    a.perParam.o / 2, a.optimizer / 2, "first moment"],
+      ["optimizer", "Adam v (fp32)",    a.perParam.o / 2, a.optimizer / 2, "second moment"],
+      ["gradient",  "gradients (bf16)", a.perParam.g,  a.gradient,
+       "or " + b.perParam.g + " B in fp32 " + arrow + " " + fsize(b.gradient)]
+    ].forEach(function (row) {
+      tb.appendChild(el("tr", {}, [
+        el("td", { class: "term" }, [el("span", { class: "v-" + row[0], style: { fontWeight: "700" } }, row[1])]),
+        el("td", { class: "op" }, pfmt(BILL_P) + " " + x + " " + row[2] + " B"),
+        el("td", { class: "r", style: { fontWeight: "700" } }, fsize(row[3])),
+        el("td", { class: "op" }, row[4])
+      ]));
+    });
+    tb.appendChild(el("tr", { class: "sum" }, [
+      el("td", {}, "total"),
+      el("td", { class: "op" }, pfmt(BILL_P) + " " + x + " " + a.perParam.all + " B"),
+      el("td", { class: "r" }, fsize(a.total)),
+      el("td", { class: "op" }, "to " + fsize(b.total) + " with fp32 gradients")
+    ]));
+    tbl.appendChild(tb);
+    host.appendChild(el("div", { class: "scrollx" }, tbl));
+
+    host.appendChild(strip([
+      { cls: "weight",    bytes: a.weight,   label: "weights" },
+      { cls: "optimizer", bytes: a.optClass, label: "master + Adam m,v" },
+      { cls: "gradient",  bytes: a.gradient, label: "gradients" }
+    ], a.total));
+    host.appendChild(NN.legend(["weight", "gradient", "optimizer"]));
+
+    host.appendChild(NN.formula({
+      rule: "model state = P " + x + " (weight + optimizer + gradient)   [components from T.memory.recipes]",
+      sub: pfmt(BILL_P) + " " + x + " (" + rc.weight + " + " + rc.optimizer + " + " + rc.gradient +
+           ") B, where the " + rc.optimizer + " is master " + MASTER_B + " + m " + (a.perParam.o / 2) +
+           " + v " + (a.perParam.o / 2) + " = " + pfmt(BILL_P) + " " + x + " " + a.perParam.all + " B",
+      result: fsize(a.total),
+      cls: "optimizer"
+    }));
+
+    host.appendChild(el("p", { html:
+      "That is <b>" + fsize(a.total) + " to " + fsize(b.total) + "</b> before a single activation " +
+      "tensor is allocated, before the first token of the batch is embedded. " +
+      "A " + DEFAULT_GPU.name + " has " + fsize(h100) + " of HBM — the real figure, " +
+      "80 × 1024³ bytes, not the round 80 × 10⁹ the marketing number implies. " +
+      "The model state alone is <b>" + NN.fmt(a.total / h100, 1) + x +
+      "</b> a single one &mdash; you need <b>" + nH100_a + " of them</b> (" + nH100_b +
+      " with fp32 gradients) just to <em>hold</em> it, with nothing left over to compute with." }));
+
+    host.appendChild(NN.tiles([
+      { k: "devices to hold it", v: String(nH100_a), s: DEFAULT_GPU.name + ", zero headroom" },
+      { k: "inference needs", v: fsize(inference), s: "the bf16 weights, and that is all", cls: "weight" },
+      { k: "training / inference", v: NN.fmt(a.total / inference, 1) + x + " to " +
+            NN.fmt(b.total / inference, 1) + x, s: "same model, same weights" }
+    ]));
+
+    host.appendChild(NN.callout("key", "Inference is a different problem",
+      "Serving that model needs the weights and nothing else: <b>" + fsize(inference) +
+      "</b> in bf16, which fits on " + Math.ceil(inference / h100) + " " + DEFAULT_GPU.name +
+      "s with room to spare. " +
+      "There is no gradient, no fp32 master copy, no m, no v, and activations are freed the instant " +
+      "each layer is done because nothing will be backpropagated through them. " +
+      "The gap between training and serving the identical model is <b>" +
+      NN.fmt(a.total / inference, 1) + x + " to " + NN.fmt(b.total / inference, 1) + x +
+      "</b>. Almost all of it is the optimizer: " + fsize(a.optClass) + " of the " +
+      fsize(a.total) + " total, or " + NN.fmt(100 * a.optClass / a.total, 0) + "%. " +
+      "This is why people who have only ever run inference are surprised by training clusters."));
+
+    host.appendChild(NN.callout("mem", "The same five arrays, " + NN.count(BILL_P / T.memory.n_params) + " times bigger",
+      "The toy model on this site has <b>" + T.memory.n_params + " parameters</b>. Under this exact " +
+      "recipe its model state is " + NN.count(T.memory.n_params) + " " + x + " " +
+      modelState(Object.assign({}, billCfg, { P: T.memory.n_params })).perParam.all + " B = <b>" +
+      NN.bytes(modelState(Object.assign({}, billCfg, { P: T.memory.n_params })).total) +
+      "</b> &mdash; it fits in a cache line's worth of registers and you can print all of it. " +
+      "Nothing structural changes between there and " + fsize(a.total) + ". The dead ReLU unit whose " +
+      "gradient row is exactly [0, 0] still costs its " + a.perParam.g + " bytes of gradient storage, " +
+      "still gets an m and a v, still gets all-reduced across the cluster. Scale does not simplify " +
+      "anything; it only removes your ability to look."));
+
+    /* ---- why bf16 and not fp16, from T.formats ---- */
+    const F = T.formats;
+    host.appendChild(NN.callout("why", "Why the weight dtype is bf16 and not fp16",
+      "Both are " + F.bf16.bytes + " bytes, so they cost the same " + fsize(a.weight) +
+      ". They spend those bytes differently. bf16 keeps fp32's <b>" + F.bf16.exponent_bits +
+      " exponent bits</b> and gives up mantissa (" + F.bf16.mantissa_bits + " bits, " +
+      NN.fmt(F.bf16.decimal_digits, 2) + " decimal digits); fp16 keeps " + F.fp16.mantissa_bits +
+      " mantissa bits but only " + F.fp16.exponent_bits + " exponent bits. " +
+      "The consequence is range: bf16 spans " + NN.fmt(F.bf16.decades_of_range, 1) +
+      " decades, the same as fp32, while fp16 spans " + NN.fmt(F.fp16.decades_of_range, 1) +
+      " and saturates at " + NN.fmt(F.fp16.max_finite, 0) + " with its smallest normal at " +
+      NN.fmt(F.fp16.min_normal, 8) + ". Gradients in a large model routinely sit below that, so " +
+      "fp16 training needs a loss-scaling loop to drag them into range and bf16 does not. " +
+      "You pay for it in precision &mdash; bf16's epsilon is " + NN.fmt(F.bf16.epsilon, 6) +
+      " against fp16's " + NN.fmt(F.fp16.epsilon, 8) + " &mdash; which is exactly why the " +
+      MASTER_B + "-byte fp32 master copy in the table above exists."));
+
+    /* ---- closing the loop: every trace recipe is reachable from the controls ---- */
+    host.appendChild(el("h3", {}, "Cross-check: the calculator against the trace"));
+    host.appendChild(el("p", { html:
+      "<code>T.memory.recipes</code> holds " + T.memory.recipes.length + " training recipes with " +
+      "their per-parameter costs. Every one of them is reachable from the calculator's dtype, " +
+      "optimizer and master-weight controls, and the calculator reproduces its components exactly. " +
+      "If they ever disagreed, one of the two would be wrong." }));
+
+    const vt = el("table", { class: "data" });
+    vt.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "recipe (from the trace)"),
+      el("th", {}, "w"), el("th", {}, "g"), el("th", {}, "opt"), el("th", {}, "B/param"),
+      el("th", { class: "wrap" }, "calculator settings"),
+      el("th", {}, "match"),
+      el("th", {}, "at " + pfmt(BILL_P))
+    ])));
+    const vb = el("tbody");
+    let allOk = true;
+    T.memory.recipes.forEach(function (rr) {
+      const want = recipeComponents(rr);
+      const opts = settingsFor(rr);
+      const cfg = opts[0];
+      const got = cfg ? componentsOf(cfg) : null;
+      const ok = !!got && sameComponents(got, want);
+      if (!ok) allOk = false;
+      const totalB = (want.weight + want.gradient + want.optimizer) * BILL_P;
+      const load = el("button", { class: "btn", style: { padding: "2px 8px", fontSize: ".74rem" } }, "load");
+      if (cfg) load.addEventListener("click", function () {
+        Object.assign(state, cfg);
+        syncers.forEach(function (f) { f(); });
+        render();
+        const c = document.getElementById("calc");
+        if (c && c.scrollIntoView) c.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+      vb.appendChild(el("tr", {}, [
+        el("td", {}, rr.name),
+        el("td", { class: "n v-weight" }, String(want.weight)),
+        el("td", { class: "n v-gradient" }, String(want.gradient)),
+        el("td", { class: "n v-optimizer" }, String(want.optimizer)),
+        el("td", { class: "n" }, String(want.weight + want.gradient + want.optimizer)),
+        el("td", { class: "wrap" }, cfg ? ctlText(cfg) : "unreachable"),
+        el("td", { class: "n", style: { color: ok ? "var(--good)" : "var(--critical)" } },
+           ok ? "✓" : "✗"),
+        el("td", { class: "n" }, [el("span", {}, fsize(totalB) + "  "), load])
+      ]));
+    });
+    vt.appendChild(vb);
+    host.appendChild(el("div", { class: "scrollx" }, vt));
+    host.appendChild(el("div", { class: "hint" },
+      allOk
+        ? "All " + T.memory.recipes.length + " recipes reproduced exactly by the controls above. " +
+          "Byte widths themselves come from T.memory.dtype_bytes (" +
+          Object.keys(DTB).map(function (k) { return k + " " + DTB[k]; }).join(", ") + ")."
+        : "MISMATCH — the calculator and T.memory.recipes disagree. Trust neither."));
+  }
+
+  /* ====================================================================== */
+  /* SECTION 3 — TECHNIQUES: TABLE + 4-GPU DIAGRAM                          */
+  /* ====================================================================== */
+
+  const DIAGS = {
+    ddp: { title: "DDP — replicate everything, split the data",
+      slots: { param: "full", grad: "full", opt: "full", act: "own" },
+      note: "Four full copies of the model state. The only thing that differs between GPUs is which " +
+            "micro-batch they saw. Gradients are all-reduced at the end of backward so all four copies " +
+            "step identically." },
+    z1: { title: "ZeRO-1 — shard the optimizer state",
+      slots: { param: "full", grad: "full", opt: "shard", act: "own" },
+      note: "GPU k owns the master weights and Adam moments for 1/4 of the parameters, and updates only " +
+            "that quarter. The updated quarters are all-gathered back into the full bf16 weights. " +
+            "Parameters and gradients are untouched." },
+    z2: { title: "ZeRO-2 — shard the optimizer state and the gradients",
+      slots: { param: "full", grad: "shard", opt: "shard", act: "own" },
+      note: "The gradient all-reduce becomes a reduce-scatter: GPU k ends up with the summed gradient " +
+            "for its quarter only, which is exactly the quarter it needs to update. Parameters are " +
+            "still four full copies." },
+    z3: { title: "ZeRO-3 / FSDP — shard the parameters too",
+      slots: { param: "gather", grad: "shard", opt: "shard", act: "own" },
+      note: "GPU k permanently owns 1/4 of the weights. To run layer i it all-gathers that layer's " +
+            "full weights from all four GPUs, does the matmul, and frees the gathered copy immediately. " +
+            "Peak parameter memory is one shard plus one layer in flight, not the whole model." },
+    tp: { title: "Tensor parallel — split each weight MATRIX",
+      slots: { param: "slice", grad: "slice", opt: "slice", act: "slice" },
+      note: "Every matrix is cut: the MLP up-projection by columns, the down-projection by rows, " +
+            "attention by heads. GPU k holds a permanent 1/4 slice of every matrix and never needs the " +
+            "others. The price is an all-reduce of activations twice per layer in forward and twice in " +
+            "backward, on the critical path." },
+    pp: { title: "Pipeline parallel — split the LAYERS",
+      slots: { param: "stage", grad: "stage", opt: "stage", act: "stage" },
+      note: "GPU k holds layers [kL/4, (k+1)L/4) and nothing else. Communication is one activation " +
+            "tensor handed to the next stage. The cost is not bandwidth, it is idleness: while stage 0 " +
+            "works on micro-batch 1, stages 1-3 have nothing to do." }
+  };
+
+  function shardRow(kind, k, cls, label) {
+    const on = [];
+    let text;
+    if (kind === "full")        { for (let i = 0; i < 4; i++) on.push("on");  text = "full copy"; }
+    else if (kind === "shard")  { for (let i = 0; i < 4; i++) on.push(i === k ? "on" : "");  text = "shard " + (k + 1) + "/4"; }
+    else if (kind === "gather") { for (let i = 0; i < 4; i++) on.push(i === k ? "on" : "tmp"); text = "shard " + (k + 1) + "/4 + 1 layer gathered"; }
+    else if (kind === "slice")  { for (let i = 0; i < 4; i++) on.push(i === k ? "on" : "");  text = "slice " + (k + 1) + "/4 of every matrix"; }
+    else if (kind === "stage")  { for (let i = 0; i < 4; i++) on.push(i === k ? "on" : "");  text = "layers of stage " + (k + 1); }
+    else if (kind === "own")    { for (let i = 0; i < 4; i++) on.push(i === k ? "on" : "");  text = "micro-batch " + (k + 1); }
+    else                        { for (let i = 0; i < 4; i++) on.push(""); text = "—"; }
+
+    const glyph = { weight: "w", gradient: "g", optimizer: "o", activation: "a" }[cls];
+    return el("div", { class: "slot" }, [
+      el("div", { class: "nm" }, [el("span", {}, label), el("em", {}, text)]),
+      el("div", { class: "shards" }, on.map(function (st) {
+        return el("div", { class: "sh " + glyph + (st ? " " + st : "") });
+      }))
+    ]);
+  }
+
+  function buildDiagram(key) {
+    const d = DIAGS[key] || DIAGS.ddp;
+    const wrap = el("div");
+    wrap.appendChild(el("h3", {}, d.title));
+    const grid = el("div", { class: "gpugrid" });
+    for (let k = 0; k < 4; k++) {
+      grid.appendChild(el("div", { class: "gpu" }, [
+        el("div", { class: "id" }, "GPU " + k),
+        shardRow(d.slots.param, k, "weight",     "parameters"),
+        shardRow(d.slots.grad,  k, "gradient",   "gradients"),
+        shardRow(d.slots.opt,   k, "optimizer",  "optimizer"),
+        shardRow(d.slots.act,   k, "activation", "activations")
+      ]));
+    }
+    wrap.appendChild(grid);
+    wrap.appendChild(el("div", { class: "hint" },
+      "Solid = resident on that GPU. Dashed = lives elsewhere. Faded = held transiently, then freed."));
+    wrap.appendChild(el("p", { html: d.note }));
+    return wrap;
+  }
+
+  function buildTechniques() {
+    const host = NN.$("#techBody");
+    host.innerHTML = "";
+
+    host.appendChild(el("p", { html:
+      "Every technique below answers the same question &mdash; <em>which of the four classes do I " +
+      "refuse to store " + state.gpus + " times?</em> &mdash; and every one " +
+      "of them pays for the answer in communication. The table is computed against your current " +
+      "calculator settings, so the last column is what each strategy would actually give you right now." }));
+
+    /* ---- comparison table, rows computed live ---- */
+    const tpDemo = state.tp > 1 ? state.tp : 8;
+    const ppDemo = state.pp > 1 ? state.pp : 4;
+    const rows = [
+      { key: "none", tp: 1, pp: 1 },
+      { key: "ddp",  tp: 1, pp: 1 },
+      { key: "z1",   tp: 1, pp: 1 },
+      { key: "z2",   tp: 1, pp: 1 },
+      { key: "z3",   tp: 1, pp: 1 },
+      { key: "z3",   tp: tpDemo, pp: 1,      label: "ZeRO-3 + TP=" + tpDemo },
+      { key: "z3",   tp: tpDemo, pp: ppDemo, label: "ZeRO-3 + TP=" + tpDemo + " + PP=" + ppDemo }
+    ];
+
+    const tbl = el("table", { class: "data" });
+    tbl.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "strategy"),
+      el("th", {}, "params"),
+      el("th", {}, "grads"),
+      el("th", {}, "optimizer"),
+      el("th", {}, "activations"),
+      el("th", {}, "per-GPU now"),
+      el("th", {}, "vs " + fsize(state.cap))
+    ])));
+    const tb = el("tbody");
+    rows.forEach(function (rw) {
+      const r = calc(Object.assign({}, state, { strat: rw.key, tp: rw.tp, pp: rw.pp }));
+      const s = STRAT[rw.key];
+      const isCurrent = rw.key === state.strat && rw.tp === state.tp && rw.pp === state.pp;
+      const actTxt = rw.pp > 1 ? "1F1B: no relief" : rw.tp > 1 ? div + " TP " + rw.tp + " (SP)" : s.a;
+      const pTxt = rw.tp > 1 || rw.pp > 1
+        ? (s.p === "replicated" ? "" : s.p + " ") + div + " " + (rw.tp * rw.pp) + " shards"
+        : s.p;
+      tb.appendChild(el("tr", { class: isCurrent ? "hi" : null }, [
+        el("td", {}, (rw.label || s.label) + (isCurrent ? "  ◀ current" : "")),
+        el("td", { class: "n" }, pTxt),
+        el("td", { class: "n" }, s.g),
+        el("td", { class: "n" }, s.o),
+        el("td", { class: "n" }, actTxt),
+        el("td", { class: "n" }, fsize(r.total)),
+        el("td", { class: "n", style: { color: r.fits ? "var(--good)" : "var(--critical)" } },
+           r.fits ? "fits" : NN.fmt(r.ratio, 1) + x + " over")
+      ]));
+    });
+    tbl.appendChild(tb);
+    host.appendChild(el("div", { class: "scrollx" }, tbl));
+    host.appendChild(el("div", { class: "hint" },
+      "Note what the last two rows do and do not change. TP " + x + " PP " + x +
+      " DP always multiplies out to the " + state.gpus + " GPUs you have, so once ZeRO-3 is sharding " +
+      "across whatever data-parallel degree is left over, the model state per GPU is the same " +
+      "however you slice it. What TP and PP change is the activation bill and the communication " +
+      "pattern, not the model-state divisor."));
+
+    /* ---- prose per technique, with computed comms ---- */
+    const r = calc(state);
+    const ppm = r.perParam;
+    const list = el("table", { class: "data" });
+    list.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "technique"),
+      el("th", { class: "wrap" }, "what it splits"),
+      el("th", { class: "wrap" }, "communication it adds"),
+      el("th", { class: "wrap" }, "main drawback")
+    ])));
+    const lb = el("tbody");
+    ["ddp", "z1", "z2", "z3"].forEach(function (k) {
+      const s = STRAT[k];
+      lb.appendChild(el("tr", {}, [
+        el("td", {}, s.label),
+        el("td", { class: "wrap" }, s.shards),
+        el("td", { class: "wrap" }, s.comm),
+        el("td", { class: "wrap" }, s.drawback)
+      ]));
+    });
+    lb.appendChild(el("tr", {}, [
+      el("td", {}, "Tensor parallel"),
+      el("td", { class: "wrap" }, "individual weight MATRICES, across GPUs"),
+      el("td", { class: "wrap" }, "2 all-reduces of activations in forward and 2 in backward, per layer — " +
+        NN.fmt(4 * Math.ceil(state.L / state.pp), 0) + " collectives per micro-batch at your current depth"),
+      el("td", { class: "wrap" }, "Sits inside the layer, so it cannot be overlapped with compute. Wants " +
+        "NVLink-class bandwidth and is normally kept strictly inside one node (TP ≤ 8).")
+    ]));
+    lb.appendChild(el("tr", {}, [
+      el("td", {}, "Pipeline parallel"),
+      el("td", { class: "wrap" }, "LAYERS, across GPUs"),
+      el("td", { class: "wrap" }, "one activation tensor per stage boundary per micro-batch — tiny volume, " +
+        "tolerates Ethernet"),
+      el("td", { class: "wrap" }, "The bubble. With " + state.micro + " micro-batches and PP=" +
+        (state.pp > 1 ? state.pp : ppDemo) + " the bubble is " +
+        NN.fmt(100 * ((state.pp > 1 ? state.pp : ppDemo) - 1) /
+               (state.micro + (state.pp > 1 ? state.pp : ppDemo) - 1), 1) +
+        "% of wall-clock. And under 1F1B the first stage holds one micro-batch of activations per " +
+        "stage in flight, so PP buys little activation relief on the stage that matters.")
+    ]));
+    list.appendChild(lb);
+    host.appendChild(el("div", { class: "scrollx" }, list));
+
+    host.appendChild(NN.callout("warn", "ZeRO-3 does not make the model smaller",
+      "This is the most common misreading. The " + fsize(r.state.total) + " of model state still " +
+      "exists; ZeRO-3 stores <em>one</em> copy of it spread over " + r.dp + " data-parallel ranks " +
+      "instead of " + r.dp + " copies each sitting whole on one rank. Aggregate model state across " +
+      "the cluster never drops below " + fsize(r.state.total) + " no matter what you do. What falls " +
+      "is per-GPU residency: " + fsize(calc(Object.assign({}, state, { strat: "ddp" })).modelStatePerGpu) +
+      " under DDP down to " + fsize(calc(Object.assign({}, state, { strat: "z3" })).modelStatePerGpu) +
+      " under ZeRO-3 at your current settings. You pay for that with roughly 1.5" + x +
+      " DDP's communication, and with an all-gather that must complete before layer <i>i</i> can run."));
+
+    /* ---- the switchable 4-GPU diagram ---- */
+    host.appendChild(el("h3", {}, "What each of 4 GPUs actually holds"));
+    const btns = el("div", { class: "segbtns" });
+    [["ddp", "DDP"], ["z1", "ZeRO-1"], ["z2", "ZeRO-2"], ["z3", "ZeRO-3 / FSDP"],
+     ["tp", "Tensor parallel"], ["pp", "Pipeline parallel"]].forEach(function (pair) {
+      const on = state.diag === pair[0];
+      const b = el("button", {
+        class: "btn" + (on ? " primary" : ""), "aria-pressed": on ? "true" : "false"
+      }, (on ? "▸ " : "") + pair[1]);
+      b.addEventListener("click", function () {
+        state.diag = pair[0];
+        if (pair[0] === "tp")      { state.tp = 4; state.pp = 1; if (state.strat === "none") state.strat = "ddp"; }
+        else if (pair[0] === "pp") { state.pp = 4; state.tp = 1; if (state.strat === "none") state.strat = "ddp"; }
+        else                       { state.strat = pair[0]; state.tp = 1; state.pp = 1; }
+        syncers.forEach(function (f) { f(); });
+        render();
+      });
+      btns.appendChild(b);
+    });
+    host.appendChild(btns);
+    host.appendChild(el("div", { class: "hint" },
+      "These buttons drive the calculator above as well — changing the strategy there changes the " +
+      "picture here."));
+    host.appendChild(buildDiagram(state.diag));
+    host.appendChild(NN.legend(["weight", "gradient", "optimizer", "activation"]));
+  }
+
+  /* ====================================================================== */
+  /* SECTION 4 — ACTIVATIONS                                                */
+  /* ====================================================================== */
+
+  function buildActs() {
+    const host = NN.$("#actBody");
+    host.innerHTML = "";
+    const r = calc(state);
+    const a = r.act;
+
+    host.appendChild(el("p", { html:
+      "Page 07 ended on a term that grows as <span class='mono'>s²</span>. Here is what that term " +
+      "costs. A transformer layer keeps two shapes of activation for the backward pass: things shaped " +
+      "like <span class='mono'>(b " + x + " s " + x + " d)</span>, which grow linearly in sequence " +
+      "length, and the attention score matrix shaped <span class='mono'>(b " + x + " heads " + x +
+      " s " + x + " s)</span>, which does not." }));
+
+    const kvHeads = Math.max(1, Math.round(a.heads * state.kvRatio));
+    host.appendChild(NN.formula({
+      rule: "per layer = " + NN.fmt(a.coefFull, 2) + " " + x + " b " + x + " s " + x + " d" +
+            "  +  " + ACT_ATT + " " + x + " b " + x + " heads " + x + " s²   [bytes, 2-byte activations]",
+      sub: "fixed terms (" + ACT_FIXED + "): 2 LayerNorm inputs (4) + QKV input (2) + attn output (2) " +
+           "+ 2 dropout masks (2) + MLP first-linear input (2)" +
+           "<br>Q, K, V (" + NN.fmt(ACT_Q + ACT_KV * state.kvRatio, 2) + "): Q is " + ACT_Q +
+           ", and K + V are " + ACT_KV + " " + x + " " + kvHeads + "/" + a.heads + " KV heads = " +
+           NN.fmt(ACT_KV * state.kvRatio, 2) + " under GQA" +
+           "<br>MLP internals (" + NN.fmt(ACT_MLP * state.dffRatio, 2) + "): " + ACT_MLP + " " + x +
+           " d_ff/d_model = " + ACT_MLP + " " + x + " " + NN.fmt(state.dffRatio, 2) +
+           "<br>score terms: softmax output (2) + dropout mask (1) + dropout output (2) = " + ACT_ATT +
+           " per (head " + x + " s²)",
+      result: fsize(a.full) + " per layer, per micro-batch, on this GPU",
+      cls: "activation"
+    }));
+
+    host.appendChild(NN.tiles([
+      { k: "heads", v: a.heads + " q / " + kvHeads + " kv",
+        s: "head_dim " + state.headDim + (state.kvRatio < 1 ? ", GQA" : ", MHA") },
+      { k: "linear term", v: fsize(a.lin), s: NN.fmt(a.linCoef, 2) + " B per (token " + x + " d) per layer", cls: "activation" },
+      { k: "s² score term", v: state.flash ? "0 B" : fsize(a.att),
+        s: state.flash ? "FlashAttention never materialises it" : "turn on FlashAttention", cls: "activation" },
+      { k: "stored per layer", v: fsize(a.stored), s: state.ckpt ? "checkpointed: layer input only" : "everything" },
+      { k: "activations / GPU", v: fsize(a.total),
+        s: a.layersPerStage + " layers" + (a.inflight > 1 ? " " + x + " " + a.inflight + " in flight" : ""), cls: "activation" },
+      { k: "vs weights / GPU", v: NN.fmt(a.total / Math.max(r.bytes.weight, 1), 2) + x,
+        s: "activations ÷ resident weights" }
+    ]));
+
+    /* ---- activation memory vs sequence length ---- */
+    const seqs = [1024, 2048, 4096, 8192, 16384, 32768];
+    host.appendChild(el("h3", {}, "Activation memory against sequence length"));
+    host.appendChild(NN.chart.bars({
+      items: seqs.map(function (s) {
+        const rr = calc(Object.assign({}, state, { s: s }));
+        return { label: "s = " + s, value: gbn(rr.act.total), color: classColor("activation"),
+                 sub: "· " + fsize(rr.act.total) };
+      }),
+      unit: "GB",
+      limit: { value: gbn(r.bytes.weight), label: "resident weights on this GPU" }
+    }));
+    host.appendChild(el("div", { class: "hint" },
+      "Everything else held at your current settings: b=" + state.b + ", L=" + state.L +
+      ", d=" + state.d + ", TP=" + r.tp + ", checkpointing " + (state.ckpt ? "on" : "off") +
+      ", FlashAttention " + (state.flash ? "on" : "off") + ". Compare each bar against the " +
+      fsize(r.bytes.weight) + " of weights this GPU is holding."));
+
+    /* ---- what each mitigation is worth ---- */
+    const variants = [
+      { label: "no FlashAttention, no checkpointing", o: { flash: false, ckpt: false, sp: false } },
+      { label: "FlashAttention only",                 o: { flash: true,  ckpt: false, sp: false } },
+      { label: "Flash + sequence parallel",           o: { flash: true,  ckpt: false, sp: true } },
+      { label: "Flash + SP + checkpointing",          o: { flash: true,  ckpt: true,  sp: true } }
+    ];
+    host.appendChild(el("h3", {}, "What each mitigation is worth, at s = " + state.s));
+    host.appendChild(NN.chart.bars({
+      items: variants.map(function (v) {
+        const rr = calc(Object.assign({}, state, v.o));
+        return { label: v.label, value: gbn(rr.act.total), color: classColor("activation"),
+                 sub: "· " + fsize(rr.act.total) };
+      }),
+      unit: "GB",
+      limit: { value: gbn(state.cap), label: "device limit" }
+    }));
+    host.appendChild(el("div", { class: "hint" },
+      "Sequence parallelism only does anything when TP > 1; it is currently TP=" + r.tp + "."));
+
+    host.appendChild(NN.callout("why", "Three different problems, three different fixes",
+      "<b>FlashAttention</b> attacks the <span class='mono'>s²</span> term by tiling the softmax " +
+      "so the score matrix is never written to HBM at all &mdash; at s=" + state.s + ", d=" + state.d +
+      " that term alone is " + fsize(calc(Object.assign({}, state, { flash: false })).act.att) +
+      " per layer. <b>Gradient checkpointing</b> attacks the linear term by keeping only the layer " +
+      "input (" + fsize(a.bound) + ") and recomputing the rest during backward: it trades roughly " +
+      "30% more FLOPs for an order of magnitude less activation memory. <b>Sequence parallelism</b> " +
+      "attacks what tensor parallelism leaves behind &mdash; the LayerNorms and dropouts that TP alone " +
+      "cannot split, worth " + ACT_LIN_REPL + " of the " + NN.fmt(a.coefFull, 2) + " bytes &mdash; by " +
+      "splitting them along the sequence axis instead. And <b>grouped-query attention</b>, which " +
+      state.mdl + " uses, is a fourth: " + kvHeads + " KV heads against " + a.heads +
+      " query heads takes the K and V storage term from " + ACT_KV + " B to " +
+      NN.fmt(ACT_KV * state.kvRatio, 2) + " B per (token " + x + " d). None of the four touches the " +
+      "optimizer state. They are solving a different half of the bill."));
+
+    host.appendChild(NN.callout("mem", "Where this comes from in the toy model",
+      "The " + T.memory.n_activation_elements + " activation elements this site traces &mdash; " +
+      "<span class='mono'>x</span>, <span class='mono'>z1</span>, <span class='mono'>a1</span>, " +
+      "<span class='mono'>z2</span> &mdash; exist for exactly one reason: page 04 needed " +
+      "<span class='mono'>a1</span> to compute <span class='mono'>dL/dW2</span> and " +
+      "<span class='mono'>x</span> to compute <span class='mono'>dL/dW1</span>. That is the same " +
+      "reason a " + pfmt(state.P) + " model holds " + fsize(a.total) + " of them. Checkpointing is nothing more " +
+      "than choosing to recompute <span class='mono'>a1</span> instead of remembering it."));
+  }
+
+  /* ====================================================================== */
+  /* SECTION 5 — RECIPE                                                     */
+  /* ====================================================================== */
+
+  /* The real Llama 3 70B shape and the real H100 HBM figure, both from
+     T.reference_configs — no round numbers. */
+  const RECIPE = Object.assign({ mdl: DEFAULT_MODEL.name },
+    shapeOf(DEFAULT_MODEL),
+    billCfg.wdtype ? { wdtype: billCfg.wdtype, gdtype: billCfg.gdtype,
+                       opt: billCfg.opt, master: billCfg.master } : {},
+    { b: 4, ckpt: true, flash: true, sp: true,
+      gpus: 64, strat: "z3", tp: 8, pp: 1, micro: 8,
+      gpu: DEFAULT_GPU.name, cap: DEFAULT_GPU.hbm_bytes });
+
+  function buildRecipe() {
+    const host = NN.$("#recipeBody");
+    host.innerHTML = "";
+    const r = calc(RECIPE);
+    const noCkpt = calc(Object.assign({}, RECIPE, { ckpt: false }));
+    const noTp   = calc(Object.assign({}, RECIPE, { tp: 1 }));
+    const ddp    = calc(Object.assign({}, RECIPE, { strat: "ddp", tp: 1 }));
+    const z3only = calc(Object.assign({}, RECIPE, { tp: 1, ckpt: false }));
+
+    host.appendChild(el("p", { html:
+      "Concrete, and with the real published numbers rather than round ones: <b>" +
+      DEFAULT_MODEL.name + "</b> at " + pfmt(RECIPE.P) + " parameters, " + RECIPE.L +
+      " layers, d_model " + RECIPE.d + ", " + DEFAULT_MODEL.n_heads + " query heads over " +
+      (DEFAULT_MODEL.n_kv_heads || DEFAULT_MODEL.n_heads) + " KV heads, d_ff " +
+      (DEFAULT_MODEL.d_ff || 4 * RECIPE.d) + ", sequence length " + RECIPE.s +
+      ", micro-batch " + RECIPE.b + " per GPU, on " + RECIPE.gpus + " " + RECIPE.gpu +
+      " at " + fsize(RECIPE.cap) + " each (" + fsize(RECIPE.cap * RECIPE.gpus) +
+      " of HBM in the cluster). The combination is " +
+      "<b>ZeRO-3 + TP=" + RECIPE.tp + " + sequence parallelism + FlashAttention + gradient " +
+      "checkpointing</b>. TP=" + RECIPE.tp + " stays inside a node because it all-reduces mid-layer; " +
+      "ZeRO-3 spans the " + (RECIPE.gpus / RECIPE.tp) +
+      " nodes because its collectives can be prefetched and overlapped." }));
+
+    host.appendChild(NN.formula({
+      rule: "TP " + RECIPE.tp + " " + x + " DP " + r.dp + " = " + RECIPE.gpus + " GPUs",
+      sub: "each GPU holds 1/" + RECIPE.tp + " of every matrix (TP), and ZeRO-3 shards that slice " +
+           "again across the " + r.dp + " data-parallel ranks " + arrow + " " +
+           div + " " + (RECIPE.tp * r.dp) + " on every model-state class",
+      result: fsize(r.state.total) + " " + div + " " + (RECIPE.tp * r.dp) + " = " + fsize(r.modelStatePerGpu) + " of model state per GPU",
+      cls: "weight"
+    }));
+
+    host.appendChild(arithTable(r));
+
+    host.appendChild(el("p", { html:
+      "The activation line deserves its own arithmetic. Checkpointing means each layer stores only its " +
+      "input tensor: <span class='mono'>" + ACT_BOUND + " B " + x + " b " + RECIPE.b + " " + x + " s " +
+      RECIPE.s + " " + x + " d " + RECIPE.d + " " + div + " TP " + RECIPE.tp + " = " +
+      fsize(r.act.bound) + "</span> per layer, times " + r.act.layersPerStage + " layers = " +
+      fsize(r.act.bound * r.act.layersPerStage) + ", plus one layer's full activations held while " +
+      "it is recomputed (" + fsize(r.act.full) + "). Total <b>" + fsize(r.act.total) + "</b>." }));
+
+    host.appendChild(strip([
+      { cls: "weight",     bytes: r.bytes.weight,     label: "weights" },
+      { cls: "gradient",   bytes: r.bytes.gradient,   label: "gradients" },
+      { cls: "optimizer",  bytes: r.bytes.optimizer,  label: "optimizer" },
+      { cls: "activation", bytes: r.bytes.activation, label: "activations" }
+    ], r.cap));
+    host.appendChild(NN.legend(["weight", "gradient", "optimizer", "activation"]));
+
+    host.appendChild(NN.tiles([
+      { k: "per GPU", v: fsize(r.total), s: "of " + fsize(r.cap) },
+      { k: "headroom", v: fsize(r.headroom), s: NN.fmt(100 * r.headroom / r.cap, 0) + "% left" },
+      { k: "verdict", v: r.fits ? "FITS" : "DOES NOT FIT", s: "first-order estimate" },
+      { k: "comms / step / GPU", v: fsize(r.commBytes), s: "ZeRO-3 collectives + TP all-reduces" }
+    ]));
+
+    host.appendChild(el("h3", {}, "Pull one piece out and it stops fitting"));
+    const tbl = el("table", { class: "data" });
+    tbl.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "configuration"), el("th", {}, "model state"),
+      el("th", {}, "activations"), el("th", {}, "total / GPU"), el("th", {}, "verdict")
+    ])));
+    const tb = el("tbody");
+    [["the recipe", r], ["drop checkpointing", noCkpt], ["drop TP (ZeRO-3 alone)", noTp],
+     ["ZeRO-3 alone, no checkpointing", z3only], ["plain DDP", ddp]].forEach(function (p) {
+      const rr = p[1];
+      tb.appendChild(el("tr", {}, [
+        el("td", {}, p[0]),
+        el("td", { class: "n" }, fsize(rr.modelStatePerGpu)),
+        el("td", { class: "n" }, fsize(rr.bytes.activation)),
+        el("td", { class: "n" }, fsize(rr.total)),
+        el("td", { class: "n", style: { color: rr.fits ? "var(--good)" : "var(--critical)" } },
+           rr.fits ? "fits" : NN.fmt(rr.ratio, 1) + x + " over")
+      ]));
+    });
+    tbl.appendChild(tb);
+    host.appendChild(el("div", { class: "scrollx" }, tbl));
+
+    const load = el("button", { class: "btn primary" }, "Load this recipe into the calculator ↑");
+    load.addEventListener("click", function () {
+      Object.keys(RECIPE).forEach(function (k) { state[k] = RECIPE[k]; });
+      state.diag = "z3";
+      syncers.forEach(function (f) { f(); });
+      render();
+      const c = document.getElementById("calc");
+      if (c && c.scrollIntoView) c.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    host.appendChild(el("div", { class: "controls" }, [load,
+      el("span", { class: "hint" }, "then take checkpointing off and watch it break")]));
+
+    host.appendChild(NN.callout("key", "Why the headroom is deliberate",
+      "This lands at " + fsize(r.total) + " of " + fsize(r.cap) + ", leaving " +
+      NN.fmt(100 * r.headroom / r.cap, 0) + "% unused, and that is not slack you should spend. " +
+      "A real run of this shape measures far closer to the limit than " + fsize(r.total) +
+      " because of everything in the next section. Engineers size to roughly 70-80% of nominal " +
+      "capacity on a first-order estimate and then measure."));
+  }
+
+  /* ====================================================================== */
+  /* SECTION 6 — CAVEATS                                                    */
+  /* ====================================================================== */
+
+  function buildCaveats() {
+    const host = NN.$("#caveatBody");
+    const r = calc(RECIPE);
+
+    host.appendChild(el("p", { html:
+      "Everything above is a first-order estimate. It counts the tensors you asked for. A real " +
+      "process holds several things it did not ask for, and they are not small." }));
+
+    const tbl = el("table", { class: "data" });
+    tbl.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "not counted"), el("th", { class: "wrap" }, "what it is"),
+      el("th", { class: "wrap" }, "rough scale")
+    ])));
+    const tb = el("tbody");
+    [
+      ["CUDA context + kernels",
+       "The driver's per-process context, cuBLAS/cuDNN workspaces, and every kernel image loaded into " +
+       "the device. Charged the moment you touch the GPU, before any tensor exists.",
+       "0.5–2 GB per process"],
+      ["Allocator fragmentation",
+       "PyTorch's caching allocator keeps freed blocks in size-classed pools. Long runs with varying " +
+       "sequence lengths leave holes: memory that is reserved but unusable for the next request. " +
+       "This is the difference between torch.cuda.memory_allocated() and memory_reserved().",
+       "5–20% of peak, and it grows"],
+      ["Communication buffers",
+       "NCCL's ring/tree buffers, ZeRO's flattened gradient buckets, the destination buffer for every " +
+       "in-flight all-gather. ZeRO-3 with deep prefetch holds several layers' worth of gathered " +
+       "parameters at once, not one.",
+       "hundreds of MB to several GB"],
+      ["Kernel workspace",
+       "Scratch that a fused kernel demands transiently — FlashAttention's tile buffers, " +
+       "cuBLAS split-k workspaces, the softmax reductions. Peak memory is set by the worst " +
+       "instantaneous moment, not the steady state.",
+       "hundreds of MB, spiky"],
+      ["Logits and the vocabulary projection",
+       "Not a transformer-block term, which is why this page's per-layer formula omits it, but for a " +
+       "large vocabulary it is enormous: b " + x + " s " + x + " vocab in fp32 for the loss. At b=" +
+       RECIPE.b + ", s=" + RECIPE.s + ", vocab " + RECIPE.vocab + " that is " +
+       fsize(RECIPE.b * RECIPE.s * RECIPE.vocab * DTB.fp32) + " for one tensor — more than " +
+       NN.fmt((RECIPE.b * RECIPE.s * RECIPE.vocab * DTB.fp32) / calc(RECIPE).act.full, 0) +
+       " of this recipe's layers.",
+       "can exceed many layers"],
+      ["KV cache (inference only)",
+       "Serving keeps K and V for every past token of every layer: 2 " + x + " layers " + x +
+       " s " + x + " (kv_heads " + x + " head_dim) " + x + " dtype per sequence. At " + RECIPE.L +
+       " layers, s=" + RECIPE.s + ", bf16, " + DEFAULT_MODEL.name + "'s " +
+       (DEFAULT_MODEL.n_kv_heads || DEFAULT_MODEL.n_heads) + " KV heads give " +
+       fsize(kvCacheBytes(RECIPE, DTB.bf16)) + " per concurrent sequence. The same model with full " +
+       "multi-head attention — " + DEFAULT_MODEL.n_heads + " KV heads — would need " +
+       fsize(kvCacheBytes(Object.assign({}, RECIPE, { kvRatio: 1 }), DTB.bf16)) + ", a " +
+       NN.fmt(1 / RECIPE.kvRatio, 0) + x + " difference. GQA is a memory optimisation of exactly " +
+       "the kind this page is about, applied to the one class training does not have.",
+       "dominates serving at high concurrency"],
+      ["SwiGLU's third matrix",
+       "The MLP term here assumes the classic two-matrix MLP, so it charges " + ACT_MLP + " " + x +
+       " d_ff/d_model bytes. A gated MLP (SwiGLU, as in Llama) has gate, up and down projections and " +
+       "keeps one more d_ff-wide tensor, so its real MLP activation term is roughly 1.5" + x +
+       " what this page charges.",
+       "adds ~" + NN.fmt(0.5 * ACT_MLP * RECIPE.dffRatio, 1) + " B per (token " + x + " d) per layer"],
+      ["Fixed micro-batch assumption",
+       "This page treats the batch-size control as the per-GPU micro-batch, so data-parallel degree " +
+       "does not change activation memory. Real schedulers vary micro-batch by stage and by step.",
+       "changes activations directly"],
+      ["Where the reference specs come from",
+       "T.reference_configs is, in its own words: “" + REF._source + "”. Model shapes and HBM " +
+       "capacities on this page are quoted public figures, external to the toy model this site " +
+       "traces, and not verified by ground_truth.py the way every other number here is.",
+       "quoted, not derived"]
+    ].forEach(function (row) {
+      tb.appendChild(el("tr", {}, [
+        el("td", {}, row[0]),
+        el("td", { class: "wrap" }, row[1]),
+        el("td", { class: "wrap" }, row[2])
+      ]));
+    });
+    tbl.appendChild(tb);
+    host.appendChild(el("div", { class: "scrollx" }, tbl));
+
+    host.appendChild(NN.callout("warn", "Do not read these numbers as precise",
+      "The model-state terms &mdash; weights, gradients, master copy, optimizer moments &mdash; are " +
+      "exact: they are a parameter count times a byte width, and nothing about them is estimated. " +
+      "The activation terms are a good structural model of a standard pre-norm transformer block and " +
+      "will be within tens of percent of a real implementation, not within a percent: different " +
+      "libraries fuse different things, keep different intermediates, and store dropout masks " +
+      "differently. Everything in the table above is on top. If this calculator says " +
+      fsize(r.total) + ", expect a real run to measure meaningfully higher. Use it to decide " +
+      "<em>which strategy</em>, then measure."));
+
+    host.appendChild(NN.callout("why", "The one thing that does not change",
+      "From " + T.memory.n_params + " parameters to " + pfmt(BILL_P) + ", the taxonomy held. " +
+      "Four classes: " + "weights that live the whole run, gradients born in backward and freed at " +
+      "the step, activations born in forward and freed during backward, optimizer state that lives " +
+      "the whole run. Every technique on this page is a decision about which of those four to stop " +
+      "replicating. ZeRO-1 picked optimizer state. ZeRO-2 added gradients. ZeRO-3 added parameters. " +
+      "Tensor parallel cut the matrices themselves. Pipeline parallel cut the layer list. " +
+      "Checkpointing chose to recompute activations rather than remember them. There is no fifth " +
+      "idea, because there is no fifth class."));
+  }
+
+  /* ====================================================================== */
+  /* RENDER                                                                 */
+  /* ====================================================================== */
+
+  const calcOut = el("div");
+
+  function render() {
+    // strategy 'none' makes TP/PP meaningless
+    const r = calc(state);
+    calcOut.innerHTML = "";
+    calcOut.appendChild(outputBlock(r));
+    buildTechniques();
+    buildActs();
+  }
+
+  function buildCalc() {
+    const host = NN.$("#calcBody");
+    host.appendChild(el("p", { html:
+      "Every number in the rest of this page comes out of the same function this calculator calls. " +
+      "Change anything and the prose below changes with it. Model-state terms are exact arithmetic; " +
+      "activation terms are a structural model of a pre-norm transformer block — see section 6 " +
+      "for what is deliberately not counted." }));
+    host.appendChild(buildControls());
+    host.appendChild(calcOut);
+  }
+
+  /* ---------------------------------------------------------------- boot */
+  buildBill();
+  buildCalc();
+  buildRecipe();
+  buildCaveats();
+  render();
+
+  NN.page("scaling");
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,946 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 03 Loss</title>
+<link rel="stylesheet" href="../assets/css/design.css">
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 03</div>
+    <h1>Loss: One Number to Minimise</h1>
+    <p class="lede">The forward pass ended with a prediction. Training needs a
+      complaint — a single scalar that says how wrong that prediction was, and
+      whose derivative points somewhere useful. This page builds that scalar,
+      argues why it has to be exactly one, and then draws the surface it makes.</p>
+    <noscript>
+      <p class="callout warn"><b>This page needs JavaScript.</b> Every number,
+      chart and control here is generated at load time from
+      <code>assets/data/trace.js</code>. With JS off you get the headings and
+      nothing else.</p>
+    </noscript>
+  </div>
+
+  <section class="block" id="error"></section>
+
+  <section class="block" id="scalar"></section>
+
+  <section class="block" id="landscape"></section>
+
+  <section class="block" id="curve"></section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T   = NN.T;
+  const el  = NN.el;
+  const svg = NN.svg;
+  const F   = T.forward;
+  const NP  = T.param_names.length;
+
+  /* ====================================================================
+     0.  A FORWARD PASS, REIMPLEMENTED IN JS
+     --------------------------------------------------------------------
+     The heatmap below needs the loss at thousands of parameter settings
+     that the trace does not contain, so the forward pass has to be
+     recomputed here. Nothing about the model is typed in: the shapes come
+     from T.param_layout, the input from T.forward.x, the target from
+     T.forward.y. The result is checked against every theta the trace
+     recorded before any of it is drawn.
+     ==================================================================== */
+
+  const LAYOUT = T.param_layout;          // [{name:'W1',shape:[3,2]}, ...]
+
+  /** theta (flat, in T.param_names order) -> {W1,b1,W2,b2} */
+  function unpack(theta) {
+    let k = 0; const p = {};
+    LAYOUT.forEach(function (l) {
+      if (l.shape.length === 2) {
+        const m = [];
+        for (let i = 0; i < l.shape[0]; i++) {
+          const r = [];
+          for (let j = 0; j < l.shape[1]; j++) r.push(theta[k++]);
+          m.push(r);
+        }
+        p[l.name] = m;
+      } else {
+        const v = [];
+        for (let i = 0; i < l.shape[0]; i++) v.push(theta[k++]);
+        p[l.name] = v;
+      }
+    });
+    return p;
+  }
+
+  /** {W1,b1,W2,b2} -> flat theta, same order as T.param_names */
+  function flatten(init) {
+    const out = [];
+    LAYOUT.forEach(function (l) {
+      const v = init[l.name];
+      if (l.shape.length === 2) v.forEach(function (row) { row.forEach(function (x) { out.push(x); }); });
+      else v.forEach(function (x) { out.push(x); });
+    });
+    return out;
+  }
+
+  /** z1 = W1x + b1 ; a1 = relu(z1) ; z2 = W2a1 + b2 ; L = (z2 - y)^2 */
+  function forward(theta) {
+    const p = unpack(theta);
+    const x = F.x, y = F.y;
+    const z1 = [], a1 = [], mask = [];
+    for (let i = 0; i < p.W1.length; i++) {
+      let s = 0;
+      for (let j = 0; j < x.length; j++) s += p.W1[i][j] * x[j];
+      s += p.b1[i];
+      z1.push(s); a1.push(s > 0 ? s : 0); mask.push(s > 0 ? 1 : 0);
+    }
+    let z2 = 0;
+    for (let j = 0; j < a1.length; j++) z2 += p.W2[0][j] * a1[j];
+    z2 += p.b2[0];
+    const e = z2 - y;
+    return { z1: z1, a1: a1, relu_mask: mask, z2: z2, yhat: z2, error: e, loss: e * e };
+  }
+
+  const THETA0 = flatten(T.init);
+
+  /* ---- the anti-drift check -------------------------------------- */
+  function verify() {
+    const r = forward(THETA0);
+    const same = function (a, b) { return a.length === b.length && a.every(function (v, i) { return v === b[i]; }); };
+    const initOK = r.loss === F.loss && r.yhat === F.yhat && r.error === F.error &&
+                   same(r.z1, F.z1) && same(r.a1, F.a1);
+    let total = 0, matched = 0;
+    Object.keys(T.runs).forEach(function (k) {
+      T.runs[k].history.forEach(function (h) {
+        total++;
+        const q = forward(h.theta);
+        if (q.loss === h.loss && q.yhat === h.yhat) matched++;
+      });
+    });
+    return { initOK: initOK, ok: initOK && matched === total, total: total, matched: matched, r: r };
+  }
+
+  const CHK = verify();
+  console.assert(CHK.initOK,
+    "03-loss: JS forward does NOT reproduce T.forward", CHK.r, F);
+  console.assert(CHK.matched === CHK.total,
+    "03-loss: JS forward does NOT reproduce every recorded theta",
+    CHK.matched + "/" + CHK.total);
+  console.log("03-loss · forward reimplementation vs trace: loss " + CHK.r.loss +
+              " === " + F.loss + "  ->  " + (CHK.r.loss === F.loss) +
+              " | " + CHK.matched + "/" + CHK.total + " recorded theta reproduced bit-exactly");
+
+  function badge() {
+    return el("span", {
+      style: {
+        display: "inline-flex", alignItems: "center", gap: "7px",
+        fontFamily: "var(--mono)", fontSize: ".76rem", fontWeight: "700",
+        padding: "3px 11px 3px 9px", borderRadius: "999px",
+        border: "1px solid " + (CHK.ok ? "var(--good)" : "var(--critical)"),
+        color: CHK.ok ? "var(--good)" : "var(--critical)",
+        background: "var(--surface-2)", whiteSpace: "nowrap"
+      },
+      title: "forward(T.init).loss === T.forward.loss, and every theta in " +
+             "T.runs.*.history replays to its recorded loss with === equality"
+    }, (CHK.ok ? "✓ " : "✗ ") + "reproduces trace · " +
+       CHK.matched + "/" + CHK.total + " θ exact");
+  }
+
+  /* ====================================================================
+     1.  FROM PREDICTION TO ERROR
+     ==================================================================== */
+  (function () {
+    const s = NN.$("#error");
+    s.appendChild(el("h2", {}, "From a prediction to a complaint"));
+
+    s.appendChild(el("p", { html:
+      "The forward pass stopped at <span class='num v-activation'>ŷ = " +
+      NN.fmt(F.yhat) + "</span>. The house actually sold for " +
+      "<span class='num'>y = " + NN.fmt(F.y) + "</span> (" + T.meta.input.y_meaning +
+      "). Those two numbers are the whole input to this page. Everything else " +
+      "is arithmetic on them." }));
+
+    s.appendChild(NN.tiles([
+      { k: "prediction ŷ", v: NN.fmt(F.yhat),         s: T.meta.input.y_meaning, cls: "activation" },
+      { k: "target y",          v: NN.fmt(F.y),            s: "the label" },
+      { k: "error ŷ − y", v: NN.fmtSigned(F.error), s: "signed, so direction survives" },
+      { k: "loss L",            v: NN.fmt(F.loss),         s: "(ŷ − y)²" }
+    ]));
+
+    s.appendChild(NN.formula({
+      rule: "error = ŷ − y",
+      sub: "(" + NN.fmt(F.yhat) + ") − (" + NN.fmt(F.y) + ")",
+      result: NN.fmt(F.error),
+      cls: "activation"
+    }));
+
+    s.appendChild(NN.formula({
+      rule: "L = (ŷ − y)²",
+      sub: "(" + NN.fmt(F.error) + ")²",
+      result: NN.fmt(F.loss),
+      cls: "activation"
+    }));
+
+    s.appendChild(el("h3", {}, "Why the square, specifically"));
+
+    s.appendChild(el("p", { html:
+      "Three properties, and the model needs all three. Take them in order." }));
+
+    s.appendChild(el("p", { html:
+      "<b>1. It is differentiable everywhere.</b> The obvious alternative, " +
+      "<span class='mono'>|ŷ − y|</span>, has the same value here — " +
+      "<span class='num'>" + NN.fmt(Math.abs(F.error)) + "</span> — but its slope " +
+      "is −1 on one side of zero and +1 on the other, with nothing defined at " +
+      "the point you are trying to reach. The square has a slope that exists at " +
+      "every input and goes smoothly to zero at the target. That slope is the " +
+      "first link of the chain in the next chapter:" }));
+
+    s.appendChild(NN.formula({
+      rule: "dL/dŷ = 2(ŷ − y)",
+      sub: "2 × (" + NN.fmt(F.error) + ")",
+      result: NN.fmtSigned(T.backward.dL_dyhat),
+      cls: "gradient"
+    }));
+
+    s.appendChild(el("p", { html:
+      "That value is <span class='num v-gradient'>" + NN.fmtSigned(T.backward.dL_dyhat) +
+      "</span> — negative, meaning L falls as ŷ rises, which is right: the " +
+      "prediction is below the target. Note also that the derivative shrinks as " +
+      "the error shrinks, so a squared loss automatically takes smaller steps as " +
+      "it converges, without anyone scheduling that." }));
+
+    s.appendChild(el("p", { html:
+      "<b>2. It punishes large errors disproportionately.</b> Doubling the error " +
+      "quadruples the loss. An error of " + NN.fmt(Math.abs(F.error)) +
+      " costs " + NN.fmt(F.loss) + "; an error of " + NN.fmt(Math.abs(F.error) / 2) +
+      " costs " + NN.fmt(F.loss / 4) + ", a quarter as much. The optimiser therefore " +
+      "spends its budget on the worst cases first. That is a modelling choice, not a " +
+      "law — it also makes squared error sensitive to outliers, which is why " +
+      "robust regression uses absolute or Huber losses instead." }));
+
+    s.appendChild(el("p", { html:
+      "<b>3. It is never negative.</b> L ≥ 0 for every possible ŷ, with equality " +
+      "only at ŷ = y. Without that floor, \"minimise the loss\" would have no " +
+      "answer — a signed error could be driven to −∞ by predicting " +
+      "absurdly low, and the optimiser would happily do it. The square gives the " +
+      "problem a bottom to fall to." }));
+
+    s.appendChild(NN.callout("why", "Squared error is a modelling assumption",
+      "Minimising <span class='mono'>(ŷ − y)²</span> is the maximum-likelihood " +
+      "estimate under the assumption that the label is the model's output plus " +
+      "Gaussian noise of constant variance. Different noise assumption, different " +
+      "loss: Laplace noise gives absolute error, a categorical label gives " +
+      "cross-entropy. The loss is where you state what you believe about the data, " +
+      "and it is the only place in the whole training loop where that belief appears."));
+  })();
+
+  /* ====================================================================
+     2.  WHY EXACTLY ONE NUMBER
+     ==================================================================== */
+  (function () {
+    const s = NN.$("#scalar");
+    s.appendChild(el("h2", {}, "Why it has to collapse to one number"));
+
+    s.appendChild(el("p", { html:
+      "This model holds <span class='num v-weight'>" + NP + "</span> learnable " +
+      "parameters (" + T.param_layout.map(function (l) {
+        return l.name + " " + l.shape.join("×");
+      }).join(" + ") + "). The loss is <span class='num'>1</span> number. That " +
+      "asymmetry is not an accident of this toy — it is the precondition for " +
+      "everything in the next three chapters." }));
+
+    /* 13 params -> 1 scalar, drawn */
+    const paramRow = el("div", {
+      style: { display: "flex", flexWrap: "wrap", gap: "4px", maxWidth: "560px" }
+    }, T.param_names.map(function (n, i) {
+      return el("div", {
+        class: "cell is-weight",
+        style: { minWidth: "0", padding: "5px 7px", fontSize: ".7rem" },
+        title: n + " = " + THETA0[i]
+      }, n);
+    }));
+
+    const collapse = el("div", {
+      style: {
+        display: "flex", alignItems: "center", gap: "18px",
+        flexWrap: "wrap", margin: "18px 0"
+      }
+    }, [
+      el("div", {}, [
+        el("div", { class: "small muted mono", style: { marginBottom: "6px" } },
+          "θ ∈ ℝ^" + NP),
+        paramRow
+      ]),
+      el("div", { class: "mono", style: { fontSize: "1.6rem", color: "var(--ink-muted)" } }, "→"),
+      el("div", {}, [
+        el("div", { class: "small muted mono", style: { marginBottom: "6px" } },
+          "L(θ) ∈ ℝ"),
+        el("div", {
+          class: "cell is-activation",
+          style: { minWidth: "108px", fontSize: "1.25rem", fontWeight: "700", padding: "12px 14px" }
+        }, NN.fmt(F.loss))
+      ])
+    ]);
+    s.appendChild(collapse);
+
+    const z2cls = T.memory.per_tensor.filter(function (t) { return t.name === "z2"; })[0].cls;
+    s.appendChild(NN.legend(["weight", z2cls]));
+    s.appendChild(el("p", { class: "small muted", html:
+      "The θ cells are the " + NN.CLASSES.weight.label.toLowerCase() + " class. L takes the " +
+      NN.CLASSES[z2cls].label.toLowerCase() + " class because it is a function of " +
+      "<span class='mono'>z2</span>, which <code>T.memory.per_tensor</code> classifies as " +
+      NN.CLASSES[z2cls].label.toLowerCase() + " — born in the forward pass, needed by the " +
+      "backward pass, then free." }));
+
+    s.appendChild(el("p", { html:
+      "The reason is that <b>\"downhill\" is only defined for a scalar</b>. " +
+      "Ask \"which way should I move θ to make things better?\" and the question " +
+      "only parses if \"better\" is a total order — if for any two settings of " +
+      "θ you can say which one wins. The real numbers have that order. " +
+      "ℝⁿ, for n > 1, does not: given two candidate outputs you often " +
+      "cannot say which is larger, so there is no direction of steepest descent to " +
+      "find. A vector-valued objective has a Pareto front, not a minimum." }));
+
+    s.appendChild(el("p", { html:
+      "Concretely: the gradient <span class='mono v-gradient'>∇<sub>θ</sub>L</span> " +
+      "has <span class='num v-gradient'>" + NP + "</span> components, one per parameter, " +
+      "because it is the derivative of <i>one</i> output with respect to " + NP +
+      " inputs — a " + NP + "-vector. Had the output been a " + F.a1.length +
+      "-vector instead, the derivative would be a " + F.a1.length + "×" + NP +
+      " Jacobian, and there would be no single vector to step along. Backprop " +
+      "does not compute Jacobians; it computes one gradient, and it can only do " +
+      "that because it starts from a scalar with " +
+      "<span class='mono'>dL/dL = 1</span>." }));
+
+    s.appendChild(NN.formula({
+      rule: "L : ℝ<sup>" + NP + "</sup> → ℝ" +
+            "&nbsp;&nbsp;&nbsp;∇<sub>θ</sub>L : ℝ<sup>" + NP +
+            "</sup> → ℝ<sup>" + NP + "</sup>",
+      sub: "one scalar out, one gradient component back per parameter (" +
+           T.backward.dL_dW1.length * T.backward.dL_dW1[0].length + " + " +
+           T.backward.dL_db1.length + " + " +
+           T.backward.dL_dW2[0].length + " + " +
+           T.backward.dL_db2.length + " = " + NP + ")",
+      cls: "gradient"
+    }));
+
+    s.appendChild(el("p", { html:
+      "This is also why every real objective ends in a reduction. A network that " +
+      "emits one number per token, per position, per example in the batch still " +
+      "gets summed or averaged down to a single figure before <code>.backward()</code> " +
+      "is called. PyTorch enforces it: call <code>.backward()</code> on a non-scalar " +
+      "tensor and it refuses unless you hand it the vector to reduce with. The " +
+      "reduction is not a formality — it is what makes the question answerable." }));
+  })();
+
+  /* ====================================================================
+     3.  THE LOSS LANDSCAPE  (interactive)
+     ==================================================================== */
+  (function () {
+    const s = NN.$("#landscape");
+    s.appendChild(el("h2", {}, "The surface that one number makes"));
+
+    s.appendChild(el("p", { html:
+      "Freeze " + (NP - 2) + " of the " + NP + " parameters at their values in " +
+      "<code>T.init</code>, let two of them vary, and the loss becomes a height " +
+      "over a plane you can actually look at. Every cell below is a full forward " +
+      "pass — recomputed in this page, not read from the trace — shaded by " +
+      "the loss it produced. The " + T.meta.hyperparams.n_steps + "-step SGD run " +
+      "from <code>T.runs.sgd.history</code> is projected onto the same two axes." }));
+
+    const PAIRS = [
+      { a: 9,  b: 12, why: "Both feed the output linearly, so L is an exact parabola along " +
+                           "every straight line here. The floor is a trough, not a point: " +
+                           "with one training example and two free parameters, a whole line " +
+                           "of settings predicts y perfectly." },
+      { a: 9,  b: 10, why: "Two output weights. The trough runs at an angle set by the ratio " +
+                           "of the two activations they multiply — the steeper axis is " +
+                           "the one attached to the larger activation." },
+      { a: 10, b: 11, why: "The dead unit, seen from above. a1[2] is zero, so W2[0][2] " +
+                           "multiplies nothing and the loss does not change along the vertical " +
+                           "axis at all. Perfectly flat means gradient exactly 0 — the row " +
+                           "of zeros you will meet in the backward pass." },
+      { a: 0,  b: 1,  why: "First-layer weights, so ReLU is in the way. The surface is a " +
+                           "parabola while z1[0] stays positive and snaps to a flat plateau " +
+                           "the moment it goes negative and the unit switches off. The crease " +
+                           "between them is where the derivative is undefined." },
+      { a: 4,  b: 5,  why: "The dead unit's own input weights. Most of this plane is a flat " +
+                           "plateau: z1[2] is negative, the unit outputs zero, and nothing " +
+                           "these two weights do reaches the output. Cross the crease and the " +
+                           "unit wakes up and the loss starts moving again." },
+      { a: 6,  b: 12, why: "One bias in each layer. b1[0] only acts through a live ReLU, so " +
+                           "its half of the plane goes flat where unit 0 switches off, while " +
+                           "b2[0] moves the output no matter what." }
+    ].map(function (p) {
+      p.label = T.param_names[p.a] + "  vs  " + T.param_names[p.b];
+      return p;
+    });
+
+    /* Cell size is a whole number of user units on purpose: 480/60 = 8 and
+       360/60 = 6, so the rects tile exactly and the heatmap has no seams and
+       no double-painted overlaps (which would show as a faint grid). */
+    const N = 60;                                     /* grid cells per axis */
+    const LM = { t: 14, r: 116, b: 50, l: 66 };
+    const iw = 480, ih = 360;
+    const LW = iw + LM.l + LM.r, LH = ih + LM.t + LM.b;
+    const cw = iw / N, ch = ih / N;                   /* 8 x 6, exactly */
+
+    /* --- controls ------------------------------------------------- */
+    const sel = el("select", {
+      class: "btn",
+      style: { padding: "6px 10px", fontFamily: "var(--mono)", fontSize: ".82rem" },
+      "aria-label": "choose which two parameters form the axes"
+    }, PAIRS.map(function (p, i) {
+      return el("option", { value: String(i) }, p.label);
+    }));
+
+    const controls = el("div", { class: "controls" }, [
+      el("span", { class: "small muted mono" }, "axes:"),
+      sel,
+      el("span", { class: "small muted" }, "other " + (NP - 2) + " held at T.init"),
+      el("span", { style: { marginLeft: "auto" } }, badge())
+    ]);
+    s.appendChild(controls);
+
+    const host = el("div", { class: "scrollx" });
+    s.appendChild(host);
+
+    const readout = el("div", {
+      id: "probe", class: "small mono muted",
+      style: { minHeight: "1.5em", marginTop: "4px" }
+    });
+    const note = el("p", { class: "small", style: { color: "var(--ink-2)", marginTop: "10px" } });
+
+    const marks = el("div", {
+      class: "legend",
+      style: { marginTop: "10px" }
+    }, [
+      NN.chip("optimizer", "SGD trajectory"),
+      NN.chip("weight", "start: theta from T.init"),
+      el("span", {
+        class: "tclass",
+        style: { color: "var(--accent)", background: "var(--surface-2)" }
+      }, "○ lowest cell on grid"),
+      el("span", { class: "small muted" },
+        "shade = loss: faint near the minimum, saturated where L is large. " +
+        "One hue, spaced linearly in √L — that is, in |error|.")
+    ]);
+
+    s.appendChild(marks);
+    s.appendChild(readout);
+    s.appendChild(note);
+
+    /* --- build one landscape -------------------------------------- */
+    function build(pi) {
+      const P = PAIRS[pi];
+      const nameA = T.param_names[P.a], nameB = T.param_names[P.b];
+
+      /* trajectory in flat-theta space: start of every step, then the end */
+      const hist = T.runs.sgd.history;
+      const traj = hist.map(function (h) { return h.theta; })
+                       .concat([hist[hist.length - 1].theta_after]);
+
+      /* axis ranges: cover T.init and the whole trajectory, with padding */
+      function rangeOf(idx) {
+        let lo = THETA0[idx], hi = THETA0[idx];
+        traj.forEach(function (th) {
+          if (th[idx] < lo) lo = th[idx];
+          if (th[idx] > hi) hi = th[idx];
+        });
+        const c = (lo + hi) / 2;
+        const half = Math.max((hi - lo) * 0.85, 1.1);
+        return [c - half, c + half];
+      }
+      const rA = rangeOf(P.a), rB = rangeOf(P.b);
+
+      /* sample the grid: x = param a (columns), y = param b (rows) */
+      const theta = THETA0.slice();
+      const grid = new Array(N * N);
+      let lmin = Infinity, lmax = -Infinity, minI = 0, minJ = 0;
+      for (let j = 0; j < N; j++) {                       /* rows: param b */
+        const bv = rB[0] + (j + 0.5) / N * (rB[1] - rB[0]);
+        theta[P.b] = bv;
+        for (let i = 0; i < N; i++) {                     /* cols: param a */
+          const av = rA[0] + (i + 0.5) / N * (rA[1] - rA[0]);
+          theta[P.a] = av;
+          const L = forward(theta).loss;
+          grid[j * N + i] = L;
+          if (L < lmin) { lmin = L; minI = i; minJ = j; }
+          if (L > lmax) lmax = L;
+        }
+      }
+      theta[P.a] = THETA0[P.a]; theta[P.b] = THETA0[P.b];
+
+      /* does the loss actually depend on each axis? (exact ===, not a tolerance) */
+      let flatInA = true, flatInB = true;
+      for (let j = 0; j < N && flatInA; j++)
+        for (let i = 1; i < N; i++) if (grid[j * N + i] !== grid[j * N]) { flatInA = false; break; }
+      for (let i = 0; i < N && flatInB; i++)
+        for (let j = 1; j < N; j++) if (grid[j * N + i] !== grid[i]) { flatInB = false; break; }
+
+      /* how far does the projected trajectory travel on each axis? */
+      const span = function (idx) {
+        let lo = Infinity, hi = -Infinity;
+        traj.forEach(function (th) { if (th[idx] < lo) lo = th[idx]; if (th[idx] > hi) hi = th[idx]; });
+        return hi - lo;
+      };
+      const movA = span(P.a), movB = span(P.b);
+
+      /* sequential ramp: one hue (--weight), light -> dark.
+         Spaced in sqrt(L) = |error|, which is linear in these parameters,
+         so the bands come out evenly and the trough stays legible. */
+      const smin = Math.sqrt(lmin), smax = Math.sqrt(lmax);
+      function shade(L) {
+        const t = smax === smin ? 0 : (Math.sqrt(L) - smin) / (smax - smin);
+        return 0.05 + 0.93 * t;
+      }
+      function lossAtT(t) { const sv = smin + t * (smax - smin); return sv * sv; }
+
+      const X = function (v) { return LM.l + (v - rA[0]) / (rA[1] - rA[0]) * iw; };
+      const Y = function (v) { return LM.t + ih - (v - rB[0]) / (rB[1] - rB[0]) * ih; };
+
+      const root = svg("svg", {
+        class: "chart", viewBox: "0 0 " + LW + " " + LH,
+        width: "100%", height: LH, role: "img", style: "min-width:600px",
+        "aria-label": "loss surface over " + nameA + " and " + nameB
+      });
+
+      /* plate under the ramp so the palest cells still read as a surface */
+      root.appendChild(svg("rect", {
+        x: LM.l, y: LM.t, width: iw, height: ih, fill: "var(--surface-2)"
+      }));
+
+      /* ---- the heatmap ---- */
+      const cells = svg("g", { "shape-rendering": "crispEdges" });
+      for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+        cells.appendChild(svg("rect", {
+          x: LM.l + i * cw, y: LM.t + ih - (j + 1) * ch,
+          width: cw, height: ch,
+          fill: "var(--weight)",
+          "fill-opacity": shade(grid[j * N + i]).toFixed(3)
+        }));
+      }
+      root.appendChild(cells);
+
+      /* ---- axes, ticks ---- */
+      const NT = 4;
+      for (let k = 0; k <= NT; k++) {
+        const av = rA[0] + (rA[1] - rA[0]) * k / NT;
+        const bv = rB[0] + (rB[1] - rB[0]) * k / NT;
+        root.appendChild(svg("text", {
+          x: X(av), y: LM.t + ih + 15, "text-anchor": "middle"
+        })).textContent = NN.fmt(av, 2);
+        root.appendChild(svg("text", {
+          x: LM.l - 8, y: Y(bv) + 3.5, "text-anchor": "end"
+        })).textContent = NN.fmt(bv, 2);
+      }
+      root.appendChild(svg("rect", {
+        x: LM.l, y: LM.t, width: iw, height: ih,
+        fill: "none", stroke: "var(--hairline)"
+      }));
+      root.appendChild(svg("text", {
+        x: LM.l + iw / 2, y: LH - 6, "text-anchor": "middle"
+      })).textContent = nameA;
+      const yl = svg("text", {
+        x: -(LM.t + ih / 2), y: 13, transform: "rotate(-90)", "text-anchor": "middle"
+      });
+      yl.textContent = nameB; root.appendChild(yl);
+
+      /* ---- lowest sampled cell ---- */
+      root.appendChild(svg("circle", {
+        cx: (LM.l + (minI + 0.5) * cw).toFixed(2),
+        cy: (LM.t + ih - (minJ + 0.5) * ch).toFixed(2),
+        r: 5.5, fill: "none", stroke: "var(--ink)", "stroke-width": 1.4, opacity: 0.75
+      }));
+
+      /* ---- SGD trajectory ---- */
+      const d = traj.map(function (th, i) {
+        return (i ? "L" : "M") + X(th[P.a]).toFixed(2) + " " + Y(th[P.b]).toFixed(2);
+      }).join(" ");
+      root.appendChild(svg("path", {
+        d: d, fill: "none", stroke: "var(--page)", "stroke-width": 4.5,
+        "stroke-linejoin": "round", "stroke-linecap": "round", opacity: 0.55
+      }));
+      root.appendChild(svg("path", {
+        d: d, fill: "none", stroke: "var(--optimizer)", "stroke-width": 2,
+        "stroke-linejoin": "round", "stroke-linecap": "round"
+      }));
+      traj.forEach(function (th, i) {
+        const cx = X(th[P.a]), cy = Y(th[P.b]);
+        const last = i === traj.length - 1;
+        const dot = svg("circle", {
+          cx: cx.toFixed(2), cy: cy.toFixed(2), r: last ? 4.5 : 3,
+          fill: "var(--optimizer)", stroke: "var(--page)", "stroke-width": 1.4
+        });
+        const lv = last ? T.runs.sgd.final_loss : T.runs.sgd.history[i].loss;
+        dot.appendChild(svg("title")).textContent =
+          (last ? "after " + T.meta.hyperparams.n_steps + " steps" : "step " + (i + 1)) +
+          "  ·  " + nameA + " = " + NN.fmt(th[P.a], 4) +
+          "  ·  " + nameB + " = " + NN.fmt(th[P.b], 4) +
+          "  ·  full-model L = " + NN.fmt(lv, 5);
+        root.appendChild(dot);
+      });
+
+      /* ---- theta from T.init ---- */
+      const ix = X(THETA0[P.a]), iy = Y(THETA0[P.b]);
+      root.appendChild(svg("rect", {
+        x: (ix - 5).toFixed(2), y: (iy - 5).toFixed(2), width: 10, height: 10,
+        fill: "none", stroke: "var(--weight)", "stroke-width": 2.2
+      }));
+      root.appendChild(svg("rect", {
+        x: (ix - 7.5).toFixed(2), y: (iy - 7.5).toFixed(2), width: 15, height: 15,
+        fill: "none", stroke: "var(--page)", "stroke-width": 1.2, opacity: 0.7
+      }));
+
+      /* ---- legend ramp ---- */
+      const LX = LM.l + iw + 22, LWd = 15, NB = 40;     /* 360 / 40 = 9, exact */
+      for (let k = 0; k < NB; k++) {
+        const t = 1 - k / (NB - 1);
+        root.appendChild(svg("rect", {
+          x: LX, y: LM.t + k * (ih / NB),
+          width: LWd, height: ih / NB,
+          fill: "var(--weight)", "fill-opacity": (0.05 + 0.93 * t).toFixed(3)
+        }));
+      }
+      root.appendChild(svg("rect", {
+        x: LX, y: LM.t, width: LWd, height: ih,
+        fill: "none", stroke: "var(--hairline)"
+      }));
+      [0, 0.25, 0.5, 0.75, 1].forEach(function (t) {
+        const yy = LM.t + (1 - t) * ih;
+        root.appendChild(svg("line", {
+          x1: LX + LWd, x2: LX + LWd + 4, y1: yy, y2: yy, stroke: "var(--hairline)"
+        }));
+        root.appendChild(svg("text", {
+          x: LX + LWd + 7, y: yy + 3.5, "text-anchor": "start"
+        })).textContent = NN.fmt(lossAtT(t), 2);
+      });
+      const lt = svg("text", { x: LX + 2, y: LM.t - 4, "text-anchor": "start" });
+      lt.textContent = "L"; root.appendChild(lt);
+
+      /* ---- hover ---- */
+      const hx = svg("line", { stroke: "var(--ink)", "stroke-width": 1,
+        "stroke-dasharray": "3 3", opacity: 0 });
+      const hy = svg("line", { stroke: "var(--ink)", "stroke-width": 1,
+        "stroke-dasharray": "3 3", opacity: 0 });
+      const hd = svg("circle", { r: 3.5, fill: "none", stroke: "var(--ink)",
+        "stroke-width": 1.6, opacity: 0 });
+      root.appendChild(hx); root.appendChild(hy); root.appendChild(hd);
+
+      const hit = svg("rect", {
+        x: LM.l, y: LM.t, width: iw, height: ih, fill: "transparent",
+        style: "cursor:crosshair"
+      });
+      root.appendChild(hit);
+
+      hit.addEventListener("mousemove", function (e) {
+        const r = root.getBoundingClientRect();
+        const px = (e.clientX - r.left) / r.width * LW;
+        const py = (e.clientY - r.top) / r.height * LH;
+        const av = rA[0] + NN.clamp((px - LM.l) / iw, 0, 1) * (rA[1] - rA[0]);
+        const bv = rB[0] + NN.clamp((LM.t + ih - py) / ih, 0, 1) * (rB[1] - rB[0]);
+        const th = THETA0.slice(); th[P.a] = av; th[P.b] = bv;
+        const out = forward(th);
+        const live = out.relu_mask.reduce(function (a, m) { return a + m; }, 0);
+
+        const cx = X(av), cy = Y(bv);
+        hx.setAttribute("x1", LM.l); hx.setAttribute("x2", LM.l + iw);
+        hx.setAttribute("y1", cy); hx.setAttribute("y2", cy); hx.setAttribute("opacity", 0.5);
+        hy.setAttribute("y1", LM.t); hy.setAttribute("y2", LM.t + ih);
+        hy.setAttribute("x1", cx); hy.setAttribute("x2", cx); hy.setAttribute("opacity", 0.5);
+        hd.setAttribute("cx", cx); hd.setAttribute("cy", cy); hd.setAttribute("opacity", 1);
+
+        NN.tip.show(
+          "<div class='muted'>" + nameA + " = " + NN.fmt(av, 3) +
+          "<br>" + nameB + " = " + NN.fmt(bv, 3) + "</div>" +
+          "<div><span style='color:var(--activation)'>●</span> ŷ &nbsp;<b>" +
+          NN.fmt(out.yhat, 4) + "</b></div>" +
+          "<div><span style='color:var(--weight)'>■</span> L &nbsp;<b>" +
+          NN.fmt(out.loss, 4) + "</b></div>" +
+          "<div class='muted'>ReLU units live: " + live + " / " + out.a1.length + "</div>",
+          e.clientX, e.clientY);
+
+        readout.textContent =
+          nameA + " = " + NN.fmt(av, 3) + "   " + nameB + " = " + NN.fmt(bv, 3) +
+          "   →   ŷ = " + NN.fmt(out.yhat, 4) + "   L = " + NN.fmt(out.loss, 4);
+      });
+      hit.addEventListener("mouseleave", function () {
+        hx.setAttribute("opacity", 0); hy.setAttribute("opacity", 0);
+        hd.setAttribute("opacity", 0);
+        NN.tip.hide();
+        readout.textContent = defaultReadout(P, lmin, lmax);
+      });
+
+      /* facts about this slice, measured rather than asserted */
+      let extra = "";
+      if (flatInA || flatInB) extra +=
+        " <b>Measured:</b> every cell along <span class='mono'>" +
+        (flatInA ? nameA : nameB) + "</span> holds an identical loss — bitwise " +
+        "identical, not merely close — so the gradient in that direction is exactly zero " +
+        "across the whole plane.";
+      if (movA === 0 && movB === 0) extra +=
+        " The " + T.meta.hyperparams.n_steps + "-step run projects to a single dot here: " +
+        "neither parameter moves at any step, because neither ever receives a nonzero gradient.";
+      else if (movA === 0) extra +=
+        " <span class='mono'>" + nameA + "</span> never moves during the run, so the path is a " +
+        "vertical line.";
+      else if (movB === 0) extra +=
+        " <span class='mono'>" + nameB + "</span> never moves during the run, so the path is a " +
+        "horizontal line.";
+
+      host.innerHTML = "";
+      host.appendChild(root);
+      readout.textContent = defaultReadout(P, lmin, lmax);
+      note.innerHTML = "<b>" + nameA + " × " + nameB + ".</b> " + P.why + extra;
+    }
+
+    function defaultReadout(P, lmin, lmax) {
+      return "grid " + N + "×" + N + " = " + NN.count(N * N) +
+             " forward passes   ·   L ranges " + NN.fmt(lmin, 4) +
+             " … " + NN.fmt(lmax, 3) +
+             "   ·   L at T.init = " + NN.fmt(F.loss, 4) + "   (hover to probe)";
+    }
+
+    sel.addEventListener("change", function () { build(parseInt(sel.value, 10)); });
+    build(0);
+
+    /* what the trace says actually happens to this run -------------- */
+    const hist  = T.runs.sgd.history;
+    const dead  = hist.filter(function (h) { return h.relu_mask.every(function (m) { return m === 0; }); })[0];
+    const liveG = dead ? dead.grad.filter(function (g) { return g !== 0; }).length : 0;
+    const liveN = dead ? T.param_names[dead.grad.findIndex(function (g) { return g !== 0; })] : "";
+
+    s.appendChild(el("p", { html:
+      "The walk starts at the square marker — exactly <code>T.init</code>, because " +
+      "<code>history[0].theta</code> <i>is</i> <code>T.init</code>. Then something " +
+      "worth stopping on happens — take the first preset, <span class='mono'>" +
+      PAIRS[0].label + "</span>. Step 1 pushes up and to the right; " +
+      "step 2 lands far to the left, well past the trough; and from step " + dead.t +
+      " onward the path becomes a straight climb along one axis and nothing else " +
+      "moves at all. That is not a rendering artefact of the projection." }));
+
+    s.appendChild(el("p", { html:
+      "The overshoot at step 2 drove every pre-activation negative. " +
+      "<code>history[" + (dead.t - 1) + "].relu_mask</code> is " +
+      "<span class='mono'>[" + dead.relu_mask.join(", ") + "]</span> — all " +
+      dead.relu_mask.length + " hidden units off — so <span class='num v-activation'>a1 = [" +
+      dead.a1.map(function (v) { return NN.fmt(v); }).join(", ") + "]</span>, and " +
+      "every gradient that has to flow back through a ReLU is multiplied by zero. " +
+      "Exactly <span class='num v-gradient'>" + liveG + "</span> of the " + NP +
+      " gradient components is still nonzero, and it belongs to " +
+      "<span class='mono v-weight'>" + liveN + "</span>, the one parameter that " +
+      "reaches the output without passing through an activation. The network has " +
+      "collapsed to a constant predictor, and SGD spends its remaining " +
+      (hist.length - dead.t + 1) + " steps tuning that constant. The loss still goes " +
+      "down, which is the uncomfortable part: a loss curve falling nicely is not " +
+      "evidence that the model is learning anything." }));
+
+    s.appendChild(el("p", { html:
+      "One caveat on reading any of these pictures. The real step is taken in all " +
+      NP + " dimensions at once and what you see is its shadow on a plane, so the " +
+      "path is not obliged to run perpendicular to the shading — the shading was " +
+      "drawn with the other " + (NP - 2) + " coordinates pinned at <code>T.init</code>, " +
+      "while the moving point carries whatever values they have really reached. " +
+      "Where the two agree, as they do here after the collapse froze everything " +
+      "else, the picture is honest. Before that, it is a sketch." }));
+
+    s.appendChild(NN.callout("warn", "A picture that lies by omission",
+      "This is a 2-D slice of a " + NP + "-dimensional surface, and the shape you see " +
+      "is a property of the slice, not of the problem. Pick the two axes on the " +
+      "third preset and the surface is completely flat in one direction — the " +
+      "dead ReLU unit means <span class='mono'>W2[0][" + (F.a1.length - 1) +
+      "]</span> multiplies " +
+      "<span class='num v-activation'>" + NN.fmt(F.a1[F.a1.length - 1]) + "</span> and " +
+      "cannot affect the loss at all. Real loss surfaces at " + NN.count(7e10) +
+      " parameters are picked apart with random 2-D projections for exactly this " +
+      "reason: nobody can see the surface, so they look at shadows and try not to " +
+      "over-read them."));
+  })();
+
+  /* ====================================================================
+     4.  THE LOSS CURVE OVER TRAINING
+     ==================================================================== */
+  (function () {
+    const s = NN.$("#curve");
+    s.appendChild(el("h2", {}, "The same number, " + T.meta.hyperparams.n_steps + " steps in a row"));
+
+    const sgd = T.runs.sgd;
+    s.appendChild(el("p", { html:
+      "Recompute the loss after every parameter update and you get the only plot " +
+      "anyone actually watches during training. Learning rate " +
+      "<span class='num'>" + NN.fmt(T.meta.hyperparams.lr) + "</span>, plain SGD, " +
+      "the single example <span class='mono'>x = [" + F.x.join(", ") + "]</span>. " +
+      "Point <span class='num'>0</span> is the loss before any step — " +
+      NN.fmt(F.loss) + ", the number built at the top of this page." }));
+
+    function pts(run) {
+      const p = run.history.map(function (h, i) { return [i, h.loss]; });
+      p.push([run.history.length, run.final_loss]);
+      return p;
+    }
+
+    /* NN.chart.line puts 5 evenly spaced ticks across the padded range and
+       labels a log axis with the rounded exponent, so an arbitrary range
+       prints the same decade twice. Pick bounds that land the ticks on whole
+       decades after the component's own 8% padding: with DEC_HI - DEC_LO = 5
+       the tick step is exactly one decade. */
+    const DEC_LO = -4, DEC_HI = 1;
+    const dspan = (DEC_HI - DEC_LO) / 1.16;
+    const yMin = Math.pow(10, DEC_LO + 0.08 * dspan);
+    const yMax = Math.pow(10, DEC_HI - 0.08 * dspan);
+
+    const allLosses = ["sgd", "momentum", "adam"].flatMap(function (k) {
+      return T.runs[k].history.map(function (h) { return h.loss; })
+             .concat([T.runs[k].final_loss]);
+    });
+    console.assert(
+      Math.min.apply(null, allLosses) > Math.pow(10, DEC_LO) &&
+      Math.max.apply(null, allLosses) < Math.pow(10, DEC_HI),
+      "03-loss: loss curve leaves the 1e" + DEC_LO + "..1e" + DEC_HI + " window");
+
+    const chart = NN.chart.line({
+      series: [
+        { name: "SGD",      color: "var(--accent)",    points: pts(sgd) },
+        { name: "momentum", color: "var(--optimizer)", points: pts(T.runs.momentum), dash: "7 4" },
+        { name: "Adam",     color: "var(--optimizer)", points: pts(T.runs.adam),     dash: "2 4" }
+      ],
+      width: 700, height: 300, yMin: yMin, yMax: yMax,
+      xlabel: "completed steps", ylabel: "loss L  (log scale)", logY: true
+    });
+    s.appendChild(chart);
+
+    /* legend: hue alone does not separate momentum from Adam, dash does */
+    function swatch(color, dash, name) {
+      const sv = svg("svg", { width: 30, height: 10, viewBox: "0 0 30 10",
+        style: "vertical-align:middle" });
+      sv.appendChild(svg("line", {
+        x1: 1, x2: 29, y1: 5, y2: 5, stroke: color, "stroke-width": 2,
+        "stroke-dasharray": dash, "stroke-linecap": "round"
+      }));
+      return el("span", {
+        style: { display: "inline-flex", alignItems: "center", gap: "7px",
+                 fontFamily: "var(--mono)", fontSize: ".78rem", color: "var(--ink-2)" }
+      }, [sv, name]);
+    }
+    s.appendChild(el("div", { class: "legend" }, [
+      swatch("var(--accent)", null, "SGD"),
+      swatch("var(--optimizer)", "7 4", "momentum"),
+      swatch("var(--optimizer)", "2 4", "Adam")
+    ]));
+
+    s.appendChild(NN.tiles([
+      { k: "L at step 0", v: NN.fmt(F.loss, 4), s: "before any update" },
+      { k: "L after " + sgd.history.length, v: NN.fmt(sgd.final_loss, 5),
+        s: "T.runs.sgd.final_loss" },
+      { k: "reduction", v: "×" + NN.fmt(F.loss / sgd.final_loss, 0),
+        s: "L₀ / L_final" },
+      { k: "final ŷ", v: NN.fmt(sgd.final_yhat, 4),
+        s: "target y = " + NN.fmt(F.y), cls: "activation" }
+    ]));
+
+    const H = sgd.history;
+    const dead = H.filter(function (h) { return h.relu_mask.every(function (m) { return m === 0; }); })[0];
+    const ratio = H[H.length - 1].loss / H[H.length - 2].loss;
+    const lr = T.meta.hyperparams.lr;
+
+    s.appendChild(el("p", { html:
+      "The y-axis is logarithmic because the range is about " +
+      NN.fmt(Math.log10(F.loss / sgd.final_loss), 1) + " decades — on a linear " +
+      "axis the last " + (H.length - 3) + " steps would be a flat line on the floor " +
+      "and you could not tell progress from stall. Watch the second point: the loss " +
+      "goes <i>up</i> first, from " + NN.fmt(H[0].loss, 4) + " to " +
+      NN.fmt(H[1].loss, 4) + ". A learning rate of " + NN.fmt(lr) + " times a gradient " +
+      "this steep overshoots the trough and lands on the opposite wall — the same " +
+      "jump the landscape shows above." }));
+
+    s.appendChild(el("p", { html:
+      "After that the SGD curve is a perfectly straight line on the log axis, and a " +
+      "straight line on a log axis means a constant multiplicative factor per step. " +
+      "The factor is exactly <span class='num'>" + NN.fmt(ratio, 4) + "</span>, every " +
+      "step, to ten decimal places. It is straight because it is no longer really " +
+      "training: from step " + dead.t + " on, the mask is " +
+      "<span class='mono'>[" + dead.relu_mask.join(", ") + "]</span>, all " +
+      dead.relu_mask.length + " ReLU units are off, and the only live parameter is " +
+      "the output bias. The model is a constant, and the update collapses to one " +
+      "line of algebra:" }));
+
+    s.appendChild(NN.formula({
+      rule: "e ← e − lr · dL/db2 = e − lr · 2e = e(1 − 2·lr)",
+      sub: "1 − 2 × " + NN.fmt(lr) + " = " + NN.fmt(1 - 2 * lr) +
+           " per step on the error, so " + NN.fmt(1 - 2 * lr) + "² on the loss",
+      result: NN.fmt(Math.pow(1 - 2 * lr, 2), 4) + "  (observed: " + NN.fmt(ratio, 4) + ")",
+      cls: "gradient"
+    }));
+
+    s.appendChild(el("p", { html:
+      "Geometric convergence with ratio " + NN.fmt(Math.pow(1 - 2 * lr, 2), 2) +
+      " reaches " + NN.fmt(sgd.final_loss, 5) + " after " + H.length +
+      " steps and would never reach zero. That is the honest reading of this curve: " +
+      "a loss falling smoothly on a log plot can mean the model is learning, or it " +
+      "can mean " + (NP - 1) + " of its " + NP + " parameters are dead and one bias " +
+      "is doing all the work. The curve alone cannot tell you which. Chapter 04 opens " +
+      "up the gradient that produced it." }));
+
+    const lastOf = function (run) {
+      const h = run.history[run.history.length - 1];
+      return { nz: h.grad.filter(function (g) { return g !== 0; }).length, mask: h.relu_mask };
+    };
+    const lSgd = lastOf(sgd), lMom = lastOf(T.runs.momentum), lAdam = lastOf(T.runs.adam);
+
+    s.appendChild(el("p", { html:
+      "Momentum and Adam sit on the plot as a preview of chapter 05, and on final " +
+      "loss neither beats SGD — momentum " + NN.fmt(T.runs.momentum.final_loss, 5) +
+      ", Adam " + NN.fmt(T.runs.adam.final_loss, 5) + ", against SGD's " +
+      NN.fmt(sgd.final_loss, 5) + ". Judge them by the curve and SGD wins. Judge them " +
+      "by what is left of the network and it inverts. At the last recorded step SGD has " +
+      "<span class='num v-gradient'>" + lSgd.nz + "</span> of " + NP + " gradient " +
+      "components alive and momentum <span class='num v-gradient'>" + lMom.nz +
+      "</span>, while Adam has <span class='num v-gradient'>" + lAdam.nz + "</span>: " +
+      "its mask is still <span class='mono'>[" + lAdam.mask.join(", ") + "]</span>, the " +
+      "same one the run started with. Adam's first update is normalised per parameter, " +
+      "so it never took the huge step that killed the ReLUs, and it still has a model " +
+      "— an oscillating one, because " + NN.fmt(lr) + " is far too large a step size " +
+      "for a normalised update. SGD reached a lower number by giving up on " +
+      (NP - lSgd.nz) + " of its " + NP + " parameters. Chapter 05 is about that " +
+      "trade, and what the extra optimiser state costs in memory." }));
+
+    /* Illustrative LLM-scale figures. Nothing in T.* describes a 70B model,
+       so these are named once here and rendered everywhere from these consts
+       rather than retyped in prose. */
+    const VOCAB = 1 << 15, BATCH_TOK = 1e6, BIG_PARAMS = 7e10;
+
+    s.appendChild(NN.callout("key", "What this number is in a real LLM",
+      "Swap squared error for <b>cross-entropy over the vocabulary</b>: at each " +
+      "position the model emits a logit per token, softmax turns those into a " +
+      "distribution, and the loss is the negative log probability the model assigned " +
+      "to the token that actually came next. For a vocabulary of " +
+      VOCAB.toLocaleString("en-US") + " tokens that is one number per position, " +
+      "picked out of " + VOCAB.toLocaleString("en-US") + " candidates. Now average it over " +
+      "every position in every sequence in the batch — a batch of " +
+      NN.count(BATCH_TOK) + " tokens produces " + NN.count(BATCH_TOK) + " of those numbers and " +
+      "then collapses them to <b>one</b>. That single figure, typically somewhere " +
+      "near 2 nats early in training, is the entire signal for updating " +
+      NN.count(BIG_PARAMS) + " parameters. The reduction is not a summary for the dashboard; " +
+      "it is structural, and for exactly the reason above: " +
+      NN.count(BIG_PARAMS) + " partial derivatives can only be defined with respect to a " +
+      "scalar. The number gets no bigger as the model does — " +
+      "<span class='mono'>dL/dL = 1</span> at " + NP + " parameters and at " +
+      NN.count(BIG_PARAMS) + " alike."));
+  })();
+
+  NN.page("loss");
+})();
+</script>
+</body>
+</html>

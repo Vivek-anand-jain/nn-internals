@@ -1,0 +1,1253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 06 One Full Training Iteration</title>
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+  /* page-local: nothing here invents a colour, it only arranges the kit */
+  .scrubrow { display: flex; align-items: center; gap: 14px; margin: 10px 0 4px; }
+  .scrubrow input[type="range"] { flex: 1; height: 26px; }
+  .scrubrow .phaseno {
+    font-family: var(--mono); font-size: .8rem; color: var(--ink-2);
+    min-width: 108px; font-variant-numeric: tabular-nums;
+  }
+  .phasetitle { font-family: var(--mono); font-size: 1.02rem; font-weight: 700; margin: 2px 0 8px; }
+  .phasekind {
+    display: inline-block; font-family: var(--mono); font-size: .68rem;
+    letter-spacing: .12em; text-transform: uppercase; padding: 1px 8px;
+    border-radius: 999px; border: 1px solid var(--hairline);
+    color: var(--ink-muted); background: var(--surface-2); margin-left: 8px;
+    vertical-align: middle;
+  }
+  .aliverow { display: flex; align-items: flex-start; gap: 10px; margin: 7px 0; flex-wrap: wrap; }
+  .aliverow .names { font-family: var(--mono); font-size: .82rem; padding-top: 2px; }
+  .aliverow .names span { margin-right: 9px; white-space: nowrap; }
+  .aliverow .names .gone { opacity: .25; text-decoration: line-through; }
+  .byterow {
+    display: flex; gap: 18px; flex-wrap: wrap; font-family: var(--mono);
+    font-size: .8rem; color: var(--ink-2); margin: 4px 0 2px;
+    font-variant-numeric: tabular-nums;
+  }
+  .switch {
+    display: inline-flex; align-items: center; gap: 8px; font-size: .85rem;
+    font-family: var(--mono); color: var(--ink-2); cursor: pointer;
+  }
+  pre.code {
+    background: var(--surface-2); border: 1px solid var(--hairline);
+    border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0;
+    padding: 16px 18px; overflow-x: auto; font-family: var(--mono);
+    font-size: .86rem; line-height: 1.75; margin: 14px 0;
+  }
+  pre.code .cm { color: var(--ink-muted); }
+  pre.code .kw { color: var(--ink); font-weight: 700; }
+  .slidergrid { display: grid; grid-template-columns: 190px 1fr 92px; gap: 12px; align-items: center; margin: 10px 0; }
+  .slidergrid label { font-family: var(--mono); font-size: .82rem; color: var(--ink-2); }
+  .slidergrid .out { font-family: var(--mono); font-size: .85rem; text-align: right; font-variant-numeric: tabular-nums; }
+  @media (max-width: 860px) { .slidergrid { grid-template-columns: 130px 1fr 78px; } }
+  .marker-g { transition: transform .34s cubic-bezier(.4,0,.2,1); }
+  @media (prefers-reduced-motion: reduce) { .marker-g { transition: none; } }
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 06</div>
+    <h1>One Full Training Iteration</h1>
+    <p class="lede">What gets allocated and freed, in what order, during a single training step —
+      and where memory actually peaks. The four tensor classes have four different lifetimes,
+      and only two of them ever go away.</p>
+    <noscript><p class="callout warn">This page builds every chart in JavaScript from
+      <code>assets/data/trace.js</code>. With JS disabled you will see headings and nothing else.</p></noscript>
+  </div>
+
+  <section class="block" id="timeline"></section>
+  <section class="block" id="gantt"></section>
+  <section class="block" id="peak"></section>
+  <section class="block" id="ckpt"></section>
+  <section class="block" id="loopcode"></section>
+  <section class="block" id="scale"></section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+"use strict";
+const T = NN.T;
+const el = NN.el, svg = NN.svg;
+
+/* ======================================================================
+   0.  The trace now carries the schedule, so this page no longer authors
+       one.  T.memory.timeline is the 14 phases, each naming what it
+       allocates, frees and reads.  T.memory.per_tensor is all 20 tensors
+       with their element counts — relu_mask, loss and the four backward
+       transients included, so nothing here has to be re-derived with
+       numel() any more.  T.memory.by_class has the per-class totals and
+       T.memory.dtype_bytes the widths.
+   ====================================================================== */
+const MEM  = T.memory;
+const TL   = MEM.timeline;                      /* the 14 phases */
+const NPH  = TL.length;
+const PT   = MEM.per_tensor;                    /* the 20 tensors */
+const FP32 = MEM.dtype_bytes.fp32;              /* = 4 */
+const BF16 = MEM.dtype_bytes.bf16;              /* = 2, used in prose only */
+
+const F = T.forward, Bk = T.backward, ST = Bk.steps;
+function step(id) { return ST.filter(function (s) { return s.id === id; })[0]; }
+function rec(name)  { return PT.filter(function (r) { return r.name === name; })[0]; }
+function els(name)  { const r = rec(name); return r ? r.elements : 0; }
+function bytesOf(n) { return els(n) * FP32; }
+function shapeOf(n) { const r = rec(n); return r ? "(" + r.shape.join("×") + ")" : ""; }
+function vec(v, d) { return "[" + v.map(function (x) { return NN.fmt(x, d === undefined ? 3 : d); }).join(", ") + "]"; }
+function B(n) { return NN.fmt(n, 0) + " B"; }
+function uniq(a) { return a.filter(function (v, i) { return a.indexOf(v) === i; })
+                          .sort(function (x, y) { return x - y; }); }
+
+/* ---- where the timeline allocates and schedules the release of each
+       tensor.  Both maps are read straight off T.memory.timeline. ------ */
+const allocPhase = {}, freePhase = {};
+TL.forEach(function (ph, p) {
+  (ph.alloc || []).forEach(function (n) { allocPhase[n] = p; });
+  (ph.free  || []).forEach(function (n) { freePhase[n]  = p; });
+});
+function bornOf(n) { return allocPhase[n] === undefined ? 0 : allocPhase[n]; }
+
+/* three landmark phases, found in the data rather than assumed */
+let ZG = -1, TEARDOWN = -1, OPT_PHASE = -1;
+TL.forEach(function (ph, p) {
+  if (/zero_grad/.test(ph.label)) ZG = p;                       /* the explicit API call */
+  if ((ph.free || []).some(function (n) {                       /* backward() returns here */
+    return Object.prototype.hasOwnProperty.call(F.saved_for_backward, n); })) TEARDOWN = p;
+  if ((ph.reads || []).some(function (n) {                      /* opt.step() */
+    const r = rec(n); return r && r.cls === "optimizer"; })) OPT_PHASE = p;
+});
+
+/* ---- who reads what ------------------------------------------------- */
+/* A backward step's output tensor is named by its id: dL_dW2 -> dL/dW2.  */
+function outName(s) { return s.id.split("_").join("/"); }
+/* ...and the symbol it is written with in the formulas: dL/dyhat is
+   printed dL/dŷ, so take the label rather than guessing.                 */
+function symbolOf(name) {
+  const s = ST.filter(function (x) { return outName(x) === name; })[0];
+  return s ? s.label : name;
+}
+function mentions(text, sym) {
+  const i = text.indexOf(sym);
+  return i >= 0 && !/[0-9A-Za-z_]/.test(text.charAt(i + sym.length));
+}
+/* Every phase at which the BACKWARD pass reads a tensor.  Two sources,
+   both in T: the curated reads[] on each timeline phase, and the
+   chain-rule dependencies in T.backward.steps — a step whose formula
+   mentions dL/dz2 is reading dL/dz2 at the phase where that step's own
+   output is allocated. */
+function backwardReads(name) {
+  const out = [];
+  TL.forEach(function (ph, p) { if ((ph.reads || []).indexOf(name) >= 0) out.push(p); });
+  const r = rec(name);
+  if (r && r.transient) {
+    const sym = symbolOf(name);
+    ST.forEach(function (s) {
+      const p = allocPhase[outName(s)];
+      if (outName(s) === name || p === undefined) return;
+      if (mentions(s.formula + "  " + s.substitution, sym)) out.push(p);
+    });
+  }
+  return uniq(out);
+}
+/* Forward reads are only ever used to draw dots on the Gantt chart, never
+   to decide a lifetime.  The forward phases spell their arithmetic out in
+   .desc ("z1 = W1·x + b1"), so a whole-token match finds them. */
+function forwardReads(name) {
+  const out = [];
+  const re = new RegExp("(^|[^0-9A-Za-z_])" +
+    name.replace(/[.*+?^${}()|[\]\\\/]/g, "\\$&") + "([^0-9A-Za-z_]|$)");
+  TL.forEach(function (ph, p) { if (p > bornOf(name) && re.test(ph.desc)) out.push(p); });
+  return out;
+}
+
+/* ----------------------------------------------------------------------
+   The tensor registry.  born and freeAt both come out of the timeline:
+   born = the phase whose `alloc` names it, freeAt = the phase whose
+   `free` names it, and it is resident for born <= p < freeAt (null =
+   never freed).  The trace applies one release policy — a tensor dies at
+   its last read — with `out` and `loss` excepted, because `loss` is the
+   root of the backward() call that is still on the stack.  This page does
+   not second-guess that schedule; totalsCurve() is checked against
+   T.memory.timeline_bytes_fp32 at the bottom of this block.
+
+   The backward-read phases are still derived here, because the Gantt
+   chart marks them and the panel explains them.
+   ---------------------------------------------------------------------- */
+const TENSORS = PT.map(function (r) {
+  const n = r.name, born = bornOf(n), sched = freePhase[n];
+  const br = backwardReads(n);
+  const last = br.length ? br[br.length - 1] : null;
+  const freeAt = sched === undefined ? null : sched;
+  let why;
+  if (freeAt === null)        why = "persistent — the timeline never frees it";
+  else if (freeAt === ZG)     why = "released by opt.zero_grad() in phase " + ZG;
+  else if (last === freeAt)   why = "freed at its last read, in phase " + last;
+  else if (last !== null)     why = "last read in phase " + last +
+                                    ", released with the rest of the graph in phase " + freeAt;
+  else                        why = "never read by backward; a live reference holds it until the " +
+                                    "graph teardown in phase " + freeAt;
+  const reads = uniq(br.concat(forwardReads(n))
+    .concat(r.cls === "weight" ? [OPT_PHASE] : []))
+    .filter(function (p) { return p >= born && (freeAt === null || p < freeAt); });
+  return {
+    n: n, cls: r.cls, els: r.elements, bytes: r.elements * FP32,
+    shape: "(" + r.shape.join("×") + ")",
+    born: born, freeAt: freeAt, why: why, reads: reads, disp: symbolOf(n),
+    schedFree: sched === undefined ? null : sched,
+    transient: r.transient === true,
+    note: r.note || null,
+    saved: Object.prototype.hasOwnProperty.call(F.saved_for_backward, n),
+    pg: r.cls === "gradient" && r.transient !== true
+  };
+});
+
+const ORDER = ["weight", "optimizer", "activation", "gradient"];
+
+/* running state ------------------------------------------------------- */
+const state = { p: 0, setToNone: true };
+
+/* set_to_none=False means the .grad buffers survive zero_grad(), so in a
+   steady state they are already resident when the next iteration starts. */
+function reg() {
+  if (state.setToNone) return TENSORS;
+  return TENSORS.map(function (t) {
+    return t.pg ? Object.assign({}, t, { born: 0, freeAt: null }) : t;
+  });
+}
+function aliveAt(p, r) {
+  return (r || reg()).filter(function (t) { return p >= t.born && (t.freeAt === null || p < t.freeAt); });
+}
+function bytesAt(p, r) {
+  const out = { weight: 0, optimizer: 0, activation: 0, gradient: 0, total: 0 };
+  aliveAt(p, r).forEach(function (t) { out[t.cls] += t.bytes; out.total += t.bytes; });
+  return out;
+}
+
+/* headline numbers, all out of T.memory.by_class ---------------------- */
+const N_PARAMS   = MEM.n_params;
+const WBYTES     = MEM.by_class.weight.bytes_fp32;
+const OBYTES     = MEM.by_class.optimizer.bytes_fp32;
+const OELS       = MEM.by_class.optimizer.elements;
+const ACT_BYTES  = MEM.by_class.activation.bytes_fp32;
+const ACT_ELS    = MEM.by_class.activation.elements;
+const BASE       = WBYTES + OBYTES;                   /* = MEM.floor_bytes_fp32 */
+const PGBYTES    = TENSORS.filter(function (t) { return t.pg; })
+                     .reduce(function (a, t) { return a + t.bytes; }, 0);
+const ACT_TENSORS = TENSORS.filter(function (t) { return t.cls === "activation"; });
+
+function totalsCurve() {
+  const r = reg();
+  return TL.map(function (_, p) { return bytesAt(p, r).total; });
+}
+function peakInfo() {
+  const c = totalsCurve();
+  const mx = Math.max.apply(null, c);
+  return { peak: mx, at: c.indexOf(mx), curve: c };
+}
+
+/* ---- live guard --------------------------------------------------------
+   This page walks the registry itself rather than plotting the trace's
+   array, so the two can in principle disagree.  They must not.  If the
+   generator's schedule and this page's reading of it ever come apart,
+   say so on the page instead of quietly drawing the wrong curve. */
+const TRACE_OK = TL.map(function (_, p) { return bytesAt(p, TENSORS).total; })
+  .join(",") === MEM.timeline_bytes_fp32.join(",");
+
+/* ======================================================================
+   1.  The phases.  Their number, order, labels, one-line descriptions and
+       alloc / free / read lists are T.memory.timeline.  This page supplies
+       only the commentary, one entry per phase, keyed by phase index — if
+       the trace ever grows a phase, that phase still renders, just with
+       the trace's own description and nothing added.
+   ====================================================================== */
+const XM = T.meta.input.x_meaning;
+const ad0 = T.runs.adam.history[0].adam_detail[0];
+
+const PROSE = [
+  /* 0 idle */
+  "Nothing belonging to this iteration exists yet. Resident: <b>" + N_PARAMS + "</b> parameters (" + B(WBYTES) +
+  ") and Adam's two moment vectors <code>m</code> and <code>v</code> (" + OELS + " values, " + B(OBYTES) + "). " +
+  "That <b>" + B(BASE) + "</b> is the floor of the whole run — <code>T.memory.floor_bytes_fp32</code> agrees. It was " +
+  "there before the first batch and it is still there after the last one. Every graph on this page sits on top of it.",
+
+  /* 1 load batch */
+  "One example arrives: <code>x = " + vec(F.x, 2) + "</code> (" + XM[0] + ", " + XM[1] + ") and the target " +
+  "<code>y = " + NN.fmt(F.y, 2) + "</code> (" + T.meta.input.y_meaning + "). " +
+  els("x") + " floats × " + FP32 + " B = <b>" + B(bytesOf("x")) + "</b>. " +
+  "In a real trainer this is where the host-to-device copy lands, and it is the first byte of the iteration's " +
+  "activation hump.",
+
+  /* 2 forward: linear 1 */
+  "<code>z1 = W1·x + b1 = " + vec(F.z1) + "</code>. " +
+  "A read of the weights and a <i>new</i> " + B(bytesOf("z1")) + " buffer. W1 and b1 are read, not consumed — " +
+  "reads cost bandwidth, not bytes. Every forward op in this loop follows that pattern: read old, write new.",
+
+  /* 3 forward: relu */
+  "<code>a1 = relu(z1) = " + vec(F.a1) + "</code>, and the mask <code>" + vec(F.relu_mask, 0) + "</code>. " +
+  "Hidden unit 2 had <code>z1[2] = " + NN.fmt(F.z1[2], 3) + " &lt; 0</code>, so ReLU clamps it to zero — the dead unit. " +
+  "<b>Two</b> allocations here, not one. The mask is the cheapest possible record of which units were on, and " +
+  "backward cannot run without it. <code>T.forward.saved_for_backward</code> names exactly what gets pinned: " +
+  Object.keys(F.saved_for_backward).map(function (k) { return "<code>" + k + "</code>"; }).join(", ") + ". " +
+  "<span class='muted'>(<code>T.memory.per_tensor</code> notes the mask is counted here at " + FP32 +
+  " B/element for consistency; " + rec("relu_mask").note + ".)</span>",
+
+  /* 4 forward: linear 2 */
+  "<code>z2 = W2·a1 + b2 = " + NN.fmt(F.z2[0], 4) + "</code>, so <code>ŷ = " + NN.fmt(F.yhat, 4) + "</code>. " +
+  "One float, " + B(bytesOf("z2")) + ". The output activation is identity, which is why ŷ and z2 are the same number " +
+  "and the same storage.",
+
+  /* 5 loss */
+  "<code>L = (ŷ − y)² = " + NN.fmt(F.loss, 4) + "</code> (error = " + NN.fmtSigned(F.error, 4) + "). " +
+  "This is the top of the activation hump: all <b>" + ACT_TENSORS.length + "</b> activation tensors are co-resident, " +
+  "<b>" + ACT_ELS + "</b> elements, <b>" + B(ACT_BYTES) + "</b> — which is <code>T.memory.by_class.activation</code> in " +
+  "full, because at this phase nothing has been freed. " +
+  "In this model that happens to be exactly as many bytes as the weights themselves (" + B(WBYTES) + ") — a ratio of " +
+  NN.fmt(ACT_BYTES / WBYTES, 2) + ":1. Hold onto that ratio; at transformer scale it is closer to 10:1 and the whole " +
+  "shape of the graph changes because of it.",
+
+  /* 6 backward: dL/dyhat, dL/dz2 */
+  "<code>" + step("dL_dyhat").formula + "</code> = <b>" + NN.fmtSigned(Bk.dL_dyhat, 4) + "</b>, then " +
+  "<code>" + step("dL_dz2").formula + "</code>. Two scalars, " + B(bytesOf("dL/dyhat") + bytesOf("dL/dz2")) +
+  " — the first gradient bytes of the iteration, and both are flagged <code>transient</code> in " +
+  "<code>T.memory.per_tensor</code>: they exist only to be consumed by the next step. " +
+  "<b>Nothing has been freed yet.</b> The forward pass's entire output is still resident and the " +
+  "gradient class has started to fill in underneath it. This is the beginning of the co-resident window.",
+
+  /* 7 backward: dL/dW2, dL/db2 */
+  "<code>" + step("dL_dW2").formula + "</code><br>= <code>" + step("dL_dW2").substitution + "</code> = <code>" +
+  vec(Bk.dL_dW2[0]) + "</code>. Then <code>dL/db2 = dL/dz2</code>. " +
+  "Persistent gradient storage appears for the first time: " + B(bytesOf("dL/dW2") + bytesOf("dL/db2")) + " that will " +
+  "live until the optimizer has consumed it. Once <code>a1</code> has been read here, nothing else needs it, and its " +
+  B(bytesOf("a1")) + " go back in the same phase — the same fact that makes a second <code>backward()</code> require " +
+  "<code>retain_graph=True</code>: by then the saved tensors are already gone.",
+
+  /* 8 backward: dL/da1, dL/dz1 */
+  "<code>" + step("dL_da1").formula + "</code> = <code>" + vec(Bk.dL_da1) + "</code>. Note what that reads: the " +
+  "<b>weights</b>, not an activation. A linear layer's input-gradient depends on its weights; its weight-gradient " +
+  "depends on its input. Then <code>" + step("dL_dz1").formula + "</code> = <code>" + vec(Bk.dL_dz1) + "</code>. " +
+  "The dead unit's gradient is exactly <b>" + NN.fmt(Bk.dL_dz1[2], 3) + "</b> — it contributed nothing to the " +
+  "prediction, so it takes none of the blame. After this read the mask is dead.",
+
+  /* 9 backward: dL/dW1, dL/db1 */
+  "<code>" + step("dL_dW1").formula + "</code> = <code>[" +
+  Bk.dL_dW1.map(function (r) { return vec(r); }).join(", ") + "]</code>. " +
+  "Row 2 is <code>" + vec(Bk.dL_dW1[2]) + "</code> — the dead ReLU propagated its zero into six of the thirteen " +
+  "parameter slots' worth of arithmetic and two of them came out flat zero. " +
+  "The largest single gradient tensor in the model (" + B(bytesOf("dL/dW1")) + ") lands here, while " +
+  "<code>x</code>, <code>z1</code>, <code>z2</code>, <code>loss</code> and <code>dL/dz1</code> are all still alive. " +
+  "<b>This is where total memory peaks</b> — " + B(MEM.peak_bytes_fp32) + ", <code>T.memory.peak_bytes_fp32</code>, " +
+  "at <code>peak_phase</code> " + MEM.peak_phase + ".",
+
+  /* 10 graph teardown */
+  "<code>backward()</code> returns and the graph drops what it was still holding. Everything the backward pass " +
+  "consumed as it went is already gone; what goes here is what nothing in backward ever read. " +
+  "Worth noticing that <code>z1</code>, <code>z2</code> and <code>loss</code> were <i>logically</i> dead much earlier " +
+  "(nothing in <code>saved_for_backward</code> mentions them) but a live reference held them — the graph, and for " +
+  "<code>out</code> and <code>loss</code> the Python names in the loop — so the allocator could not reuse them until " +
+  "now. That gap between logically-dead and actually-freed is where a lot of real-world memory goes.",
+
+  /* 11 optimizer step */
+  "For each of the " + N_PARAMS + " parameters: <code>m ← β₁m + (1−β₁)g</code>, <code>v ← β₂v + (1−β₂)g²</code>, " +
+  "<code>θ ← θ − lr·m̂/(√v̂+ε)</code> with lr = " + T.meta.hyperparams.lr + ", β₁ = " + T.meta.hyperparams.beta1 +
+  ", β₂ = " + T.meta.hyperparams.beta2 + ". " +
+  "For <code>" + T.param_names[0] + "</code>: g = " + NN.fmtSigned(ad0.g, 4) + ", m = " + NN.fmtSigned(ad0.m, 4) +
+  ", v = " + NN.fmt(ad0.v, 5) + ", update = " + NN.fmtSigned(ad0.update, 4) + ", " +
+  NN.fmt(ad0.before, 4) + " → " + NN.fmt(ad0.after, 4) + ". " +
+  "<b>No new memory.</b> Three reads (gradient, m, v) and three in-place writes (m, v, θ). This trace is pure fp32, " +
+  "so the parameters <i>are</i> the master copy; in bf16 training (" + BF16 + " B per element instead of " + FP32 +
+  ") you carry a separate fp32 master and this phase is where it gets updated. Page 05 covers that.",
+
+  /* 12 zero_grad */
+  "<code>opt.zero_grad(set_to_none=True)</code> drops the <code>.grad</code> references and " + B(PGBYTES) +
+  " goes back to the allocator — the last thing in this iteration to be freed, and the step that returns the curve to " +
+  "the floor. With <code>set_to_none=False</code> the buffers are memset to zero and stay resident forever instead — " +
+  "toggle the switch above the chart to see what that does to both the floor and the peak.",
+
+  /* 13 idle */
+  "Back to <b>" + B(BASE) + "</b>: " + N_PARAMS + " parameters and " + OELS + " optimizer values. " +
+  "Everything else was born and died inside one iteration. Run this loop " + T.meta.hyperparams.n_steps +
+  " times (as <code>T.runs.adam.history</code> does) and the sawtooth above repeats " + T.meta.hyperparams.n_steps +
+  " times on top of an unmoving floor."
+];
+
+/* phase kind, read off the trace's own label rather than declared here */
+function kindOf(label) {
+  if (/idle/.test(label)) return "idle";
+  if (/^backward/.test(label) || /teardown|released/.test(label)) return "backward";
+  if (/optimizer|zero_grad/.test(label)) return "step";
+  return "forward";
+}
+const PH = TL.map(function (ph, p) {
+  return {
+    t: ph.label, desc: ph.desc, kind: kindOf(ph.label), html: PROSE[p] || "",
+    alloc: ph.alloc || [], free: ph.free || [], reads: ph.reads || [],
+    peakAct: ph.peak_activations === true
+  };
+});
+
+/* contiguous runs of one kind, for the shaded bands on both charts */
+const BANDS = [];
+PH.forEach(function (ph, p) {
+  if (ph.kind === "idle") return;
+  const last = BANDS[BANDS.length - 1];
+  if (last && last.kind === ph.kind && last.to === p - 1) last.to = p;
+  else BANDS.push({ kind: ph.kind, from: p, to: p });
+});
+const KIND_LABEL = { idle: "idle", forward: "forward", backward: "backward", step: "optimizer" };
+
+/* the phases at which a tensor named in saved_for_backward is read, and
+   the backward step that reads it — both straight out of T */
+const SAVED_READS = {};
+TL.forEach(function (ph, p) {
+  (ph.reads || []).forEach(function (n) {
+    if (!Object.prototype.hasOwnProperty.call(F.saved_for_backward, n)) return;
+    const s = ST.filter(function (x) { return (x.reads || []).indexOf(n) >= 0; })[0];
+    if (s) SAVED_READS[p] = { name: n, stepId: s.id };
+  });
+});
+/* the phase where backward reads a WEIGHT instead of an activation */
+let WEIGHT_READ = -1;
+TL.forEach(function (ph, p) {
+  if ((ph.reads || []).some(function (n) { const r = rec(n); return r && r.cls === "weight"; })) WEIGHT_READ = p;
+});
+
+const PEAK0 = peakInfo();
+
+/* ======================================================================
+   2.  Section: the scrubbable timeline
+   ====================================================================== */
+const secT = NN.$("#timeline");
+secT.appendChild(el("h2", {}, "Scrub one iteration"));
+secT.appendChild(el("p", {}, [
+  "Drag the slider, or use the stepper (arrow keys work, space plays). The " + NPH + " phases, their order and " +
+  "what each one allocates, frees and reads are ", el("code", {}, "T.memory.timeline"),
+  "; the element counts are ", el("code", {}, "T.memory.per_tensor"),
+  " (all " + PT.length + " tensors, transients included), multiplied by ",
+  el("code", {}, "T.memory.dtype_bytes.fp32"),
+  " = " + FP32 + " bytes per element. Nothing here is a guess."
+]));
+
+/* the phases at which the activation class is at its maximum */
+const ACT_PEAK_PHASES = (function () {
+  const b = TL.map(function (_, p) { return bytesAt(p, TENSORS).activation; });
+  const mx = Math.max.apply(null, b);
+  return b.map(function (v, p) { return v === mx ? p : -1; }).filter(function (p) { return p >= 0; });
+})();
+
+const tileEls = {};
+const tilesWrap = NN.tiles([
+  { k: "resident floor", v: B(BASE), s: N_PARAMS + " params + " + OELS + " Adam values", cls: "weight" },
+  { k: "peak activations", v: B(ACT_BYTES), s: ACT_ELS + " elements, phases " +
+      ACT_PEAK_PHASES[0] + "–" + ACT_PEAK_PHASES[ACT_PEAK_PHASES.length - 1], cls: "activation" },
+  { k: "peak total", v: B(PEAK0.peak), s: "phase " + PEAK0.at, cls: "optimizer" },
+  { k: "peak ÷ floor", v: NN.fmt(PEAK0.peak / BASE, 2) + "×", s: "you must fit the peak" }
+]);
+secT.appendChild(tilesWrap);
+tileEls.floor    = tilesWrap.children[0].querySelector(".v");
+tileEls.floorSub = tilesWrap.children[0].querySelector(".s");
+tileEls.peak     = tilesWrap.children[2].querySelector(".v");
+tileEls.peakSub  = tilesWrap.children[2].querySelector(".s");
+tileEls.ratio    = tilesWrap.children[3].querySelector(".v");
+
+/* --- controls -------------------------------------------------------- */
+const ctrlHost = el("div");
+secT.appendChild(ctrlHost);
+
+const slider = el("input", { type: "range", min: "0", max: String(PH.length - 1), step: "1", value: "0",
+  "aria-label": "training-iteration phase" });
+const phaseNo = el("div", { class: "phaseno" }, "phase 0 / " + (PH.length - 1));
+secT.appendChild(el("div", { class: "scrubrow" }, [phaseNo, slider]));
+
+const zgBox = el("input", { type: "checkbox", checked: "checked" });
+secT.appendChild(el("div", { style: { margin: "6px 0 14px" } }, [
+  el("label", { class: "switch" }, [zgBox,
+    el("span", { html: "<code>opt.zero_grad(set_to_none=True)</code> — actually free the gradient buffers" })])
+]));
+
+/* --- the two live panels --------------------------------------------- */
+const chartHost = el("div");
+const panel = el("div");
+secT.appendChild(el("div", { class: "grid2" }, [chartHost, panel]));
+
+/* memory strip: built once, then only flex-grow changes, so CSS animates it */
+let CAP = PEAK0.peak;
+const strip = NN.memstrip(ORDER.map(function (c) {
+  return { cls: c, bytes: 1, label: NN.CLASSES[c].label.toLowerCase() };
+}), CAP * 4);
+NN.$$(".memseg", strip).forEach(function (s) {
+  s.style.flexBasis = "0px"; s.style.minWidth = "0";
+});
+const segEls = NN.$$(".memseg", strip);          /* [w, o, a, g, free] */
+
+panel.appendChild(el("div", { class: "phasekind", id: "pkind" }, ""));
+const titleEl = el("div", { class: "phasetitle" });
+panel.appendChild(titleEl);
+panel.appendChild(strip);
+const byteRow = el("div", { class: "byterow" });
+panel.appendChild(byteRow);
+const descEl = el("div", { style: { marginTop: "10px", fontSize: ".93rem" } });
+panel.appendChild(descEl);
+const eventEl = el("div", { style: { marginTop: "8px" } });
+panel.appendChild(eventEl);
+const readEl = el("div");
+panel.appendChild(readEl);
+panel.appendChild(el("div", { class: "muted small", style: { marginTop: "12px", marginBottom: "3px" } }, "Alive right now:"));
+const aliveEl = el("div");
+panel.appendChild(aliveEl);
+
+/* the guard is only worth having if a failure is visible */
+if (!TRACE_OK) {
+  secT.appendChild(NN.callout("warn", "SCHEDULE MISMATCH",
+    "This page's walk of <code>T.memory.timeline</code> no longer reproduces " +
+    "<code>T.memory.timeline_bytes_fp32</code>. The trace has changed shape and the curve below should not be " +
+    "trusted until the page is updated."));
+}
+
+/* ======================================================================
+   3.  The live stacked-area memory chart
+   ====================================================================== */
+let chart = null;
+let gantt = null;      /* declared here so renderPhase() can guard on it */
+function buildChart() {
+  const NP = PH.length;
+  const W = 640, H = 330, M = { t: 30, r: 14, b: 46, l: 62 };
+  const iw = W - M.l - M.r, ih = H - M.t - M.b;
+  const r = reg();
+  const per = PH.map(function (_, p) { return bytesAt(p, r); });
+  const pk = peakInfo();
+  const yMax = pk.peak * 1.16;
+
+  const X   = function (p) { return M.l + p / (NP - 1) * iw; };
+  const bx0 = function (p) { return Math.max(M.l, X(p - 0.5)); };
+  const bx1 = function (p) { return Math.min(M.l + iw, X(p + 0.5)); };
+  const Y   = function (v) { return M.t + ih - v / yMax * ih; };
+
+  const root = svg("svg", { class: "chart", viewBox: "0 0 " + W + " " + H,
+    width: "100%", height: H, role: "img",
+    "aria-label": "Total memory in bytes across the " + NP + " phases of one training iteration" });
+
+  /* phase-kind bands behind everything, grouped out of the timeline labels */
+  BANDS.forEach(function (b, i) {
+    root.appendChild(svg("rect", { x: bx0(b.from), y: M.t, width: bx1(b.to) - bx0(b.from), height: ih,
+      fill: "var(--surface-2)", opacity: i % 2 ? 0.85 : 0.5 }));
+    const tx = svg("text", { x: (bx0(b.from) + bx1(b.to)) / 2, y: M.t - 9, "text-anchor": "middle" });
+    tx.textContent = KIND_LABEL[b.kind]; root.appendChild(tx);
+  });
+
+  /* gridlines + y ticks in bytes */
+  for (let k = 0; k <= 4; k++) {
+    const v = yMax * k / 4, yy = Y(v);
+    root.appendChild(svg("line", { class: "gridline", x1: M.l, x2: M.l + iw, y1: yy, y2: yy }));
+    const t = svg("text", { x: M.l - 8, y: yy + 3.5, "text-anchor": "end" });
+    t.textContent = NN.fmt(v, 0) + " B"; root.appendChild(t);
+  }
+
+  /* stacked areas, bottom to top: weight, optimizer, activation, gradient */
+  const cum = PH.map(function () { return 0; });
+  ORDER.forEach(function (cls) {
+    const bot = cum.slice();
+    const top = per.map(function (s, p) { return cum[p] + s[cls]; });
+    let d = "";
+    for (let p = 0; p < NP; p++) d += (p ? "L" : "M") + bx0(p).toFixed(1) + " " + Y(top[p]).toFixed(1) +
+                                       " L" + bx1(p).toFixed(1) + " " + Y(top[p]).toFixed(1) + " ";
+    for (let p = NP - 1; p >= 0; p--) d += "L" + bx1(p).toFixed(1) + " " + Y(bot[p]).toFixed(1) +
+                                            " L" + bx0(p).toFixed(1) + " " + Y(bot[p]).toFixed(1) + " ";
+    d += "Z";
+    root.appendChild(svg("path", { d: d, fill: "var(--" + cls + ")", "fill-opacity": 0.62,
+      stroke: "var(--" + cls + ")", "stroke-width": 1 }));
+    for (let p = 0; p < NP; p++) cum[p] = top[p];
+  });
+
+  /* total outline */
+  let dt = "";
+  for (let p = 0; p < NP; p++) dt += (p ? "L" : "M") + bx0(p).toFixed(1) + " " + Y(per[p].total).toFixed(1) +
+                                     " L" + bx1(p).toFixed(1) + " " + Y(per[p].total).toFixed(1) + " ";
+  root.appendChild(svg("path", { d: dt, fill: "none", stroke: "var(--ink)", "stroke-width": 2 }));
+
+  /* peak marker line + label */
+  root.appendChild(svg("line", { x1: M.l, x2: M.l + iw, y1: Y(pk.peak), y2: Y(pk.peak),
+    stroke: "var(--critical)", "stroke-width": 1.5, "stroke-dasharray": "5 4" }));
+  const pl = svg("text", { x: M.l + 6, y: Y(pk.peak) - 6, fill: "var(--critical)" });
+  pl.setAttribute("style", "fill:var(--critical);font-weight:700");
+  pl.textContent = "PEAK " + B(pk.peak) + "  (phase " + pk.at + ")";
+  root.appendChild(pl);
+
+  /* floor marker */
+  root.appendChild(svg("line", { x1: M.l, x2: M.l + iw, y1: Y(BASE), y2: Y(BASE),
+    stroke: "var(--accent)", "stroke-width": 1, "stroke-dasharray": "2 4" }));
+
+  /* axes */
+  root.appendChild(svg("line", { class: "axis", x1: M.l, x2: M.l + iw, y1: M.t + ih, y2: M.t + ih }));
+  root.appendChild(svg("line", { class: "axis", x1: M.l, x2: M.l, y1: M.t, y2: M.t + ih }));
+  for (let p = 0; p < NP; p++) {
+    const t = svg("text", { x: X(p), y: M.t + ih + 15, "text-anchor": "middle" });
+    t.textContent = p; root.appendChild(t);
+  }
+  const xl = svg("text", { x: M.l + iw / 2, y: H - 6, "text-anchor": "middle" });
+  xl.textContent = "phase"; root.appendChild(xl);
+  const yl = svg("text", { x: -(M.t + ih / 2), y: 13, transform: "rotate(-90)", "text-anchor": "middle" });
+  yl.textContent = "bytes resident"; root.appendChild(yl);
+
+  /* moving current-phase marker */
+  const mg = svg("g", { class: "marker-g" });
+  mg.appendChild(svg("line", { x1: 0, x2: 0, y1: M.t, y2: M.t + ih, stroke: "var(--ink)",
+    "stroke-width": 1.5, "stroke-dasharray": "3 3", opacity: 0.85 }));
+  const dg = svg("g", { class: "marker-g" });
+  dg.appendChild(svg("circle", { cx: 0, cy: 0, r: 5, fill: "var(--ink)", stroke: "var(--page)", "stroke-width": 2 }));
+  const dl = svg("text", { x: 0, y: -12, "text-anchor": "middle" });
+  dl.setAttribute("style", "fill:var(--ink);font-weight:700");
+  dg.appendChild(dl);
+  mg.appendChild(dg);
+  root.appendChild(mg);
+
+  /* hover reads the phase under the cursor */
+  root.addEventListener("mousemove", function (e) {
+    const rc = root.getBoundingClientRect();
+    const px = (e.clientX - rc.left) / rc.width * W;
+    const p = Math.round(NN.clamp((px - M.l) / iw * (NP - 1), 0, NP - 1));
+    const s = per[p];
+    NN.tip.show("<div class='muted'>phase " + p + " — " + PH[p].t + "</div>" +
+      ORDER.map(function (c) {
+        return "<div><span style='color:var(--" + c + ")'>●</span> " + NN.CLASSES[c].label +
+               " &nbsp;<b>" + B(s[c]) + "</b></div>";
+      }).join("") + "<div><b>total " + B(s.total) + "</b></div>", e.clientX, e.clientY);
+  });
+  root.addEventListener("mouseleave", function () { NN.tip.hide(); });
+  root.addEventListener("click", function (e) {
+    const rc = root.getBoundingClientRect();
+    const px = (e.clientX - rc.left) / rc.width * W;
+    const p = Math.round(NN.clamp((px - M.l) / iw * (NP - 1), 0, NP - 1));
+    stepper.pause(); stepper.go(p);
+  });
+
+  return { root: root, setPhase: function (p) {
+    mg.style.transform = "translate(" + X(p).toFixed(1) + "px, 0px)";
+    dg.style.transform = "translate(0px, " + Y(per[p].total).toFixed(1) + "px)";
+    /* keep the readout inside the plot at both ends */
+    dl.setAttribute("x", p === 0 ? 24 : p === NP - 1 ? -24 : 0);
+    dl.textContent = B(per[p].total);
+  }, per: per, peak: pk };
+}
+
+function mountChart() {
+  chartHost.innerHTML = "";
+  chart = buildChart();
+  chartHost.appendChild(NN.legend(ORDER));
+  chartHost.appendChild(chart.root);
+  chartHost.appendChild(el("div", { class: "muted small", html:
+    "Stacked by class, floor to ceiling. The black line is the total; the red dashed line is the peak. " +
+    "Click the chart to jump to a phase." +
+    (state.setToNone
+      ? " Every point is checked against <code>T.memory.timeline_bytes_fp32</code> at load."
+      : "") }));
+  const pk = chart.peak;
+  const floor = bytesAt(0).total;
+  tileEls.peak.textContent = B(pk.peak);
+  tileEls.peakSub.textContent = "phase " + pk.at;
+  tileEls.ratio.textContent = NN.fmt(pk.peak / floor, 2) + "×";
+  tileEls.floor.textContent = B(floor);
+  tileEls.floorSub.textContent = state.setToNone
+    ? N_PARAMS + " params + " + OELS + " Adam values"
+    : N_PARAMS + " params + " + OELS + " Adam values + " + B(PGBYTES) + " of zeroed .grad";
+  CAP = pk.peak;
+}
+
+/* ======================================================================
+   4.  Render one phase
+   ====================================================================== */
+function renderPhase(p) {
+  state.p = p;
+  const r = reg();
+  const s = bytesAt(p, r);
+  const ph = PH[p];
+
+  slider.value = String(p);
+  phaseNo.textContent = "phase " + p + " / " + (PH.length - 1);
+  NN.$("#pkind").textContent = KIND_LABEL[ph.kind];
+  titleEl.textContent = p + "  ·  " + ph.t;
+
+  /* memstrip: only flex-grow moves, so it slides */
+  ORDER.forEach(function (c, i) {
+    const b = s[c];
+    segEls[i].style.flexGrow = String(b);
+    segEls[i].title = NN.CLASSES[c].label + " — " + B(b);
+    segEls[i].textContent = (b / CAP > 0.09) ? NN.CLASSES[c].label.toLowerCase() : "";
+  });
+  segEls[4].style.flexGrow = String(Math.max(0, CAP - s.total));
+  segEls[4].title = "headroom to peak — " + B(Math.max(0, CAP - s.total));
+  segEls[4].textContent = (CAP - s.total) / CAP > 0.09 ? "headroom" : "";
+
+  byteRow.innerHTML = "";
+  ORDER.forEach(function (c) {
+    byteRow.appendChild(el("span", { class: "v-" + c }, NN.CLASSES[c].glyph + " " + B(s[c])));
+  });
+  byteRow.appendChild(el("span", {}, "Σ " + B(s.total)));
+  byteRow.appendChild(el("span", { class: "muted" }, "of " + B(CAP) + " peak"));
+
+  /* the trace's own one-liner, then this page's commentary */
+  descEl.innerHTML = "<div class='muted' style='margin-bottom:6px'>" + ph.desc + "</div>" + ph.html;
+
+  /* what this phase does to memory, straight off the timeline entry */
+  eventEl.innerHTML = "";
+  const released = r.filter(function (t) { return t.freeAt === p; });
+  [["allocates", ph.alloc.map(function (n) { return symbolOf(n); })],
+   ["reads",     ph.reads.map(function (n) { return symbolOf(n); })],
+   ["frees",     released.map(function (t) { return t.disp; })]
+  ].forEach(function (row) {
+    if (!row[1].length) return;
+    eventEl.appendChild(el("div", { class: "byterow" }, [
+      el("span", { class: "muted", style: { minWidth: "76px" } }, row[0]),
+      el("span", { html: row[1].map(function (n) { return "<code>" + n + "</code>"; }).join(", ") })
+    ]));
+  });
+
+  /* explicit call-out when a saved activation is consumed */
+  readEl.innerHTML = "";
+  const sr = SAVED_READS[p];
+  if (sr) {
+    const tt = TENSORS.filter(function (t) { return t.n === sr.name; })[0];
+    const st = step(sr.stepId);
+    readEl.appendChild(NN.callout("warn", "READS A SAVED ACTIVATION",
+      "<code>" + st.label + "</code> consumes <code>" + sr.name + "</code> " + tt.shape +
+      " — allocated back in phase " + tt.born + " and held for " + (p - tt.born) +
+      " phases, " + B(tt.bytes) + " doing nothing but waiting for this one line. " +
+      "<span class='muted'>" + st.note + "</span> " +
+      "<a href='04-backward.html'>→ 04 Backward Pass</a>"));
+  }
+  if (p === WEIGHT_READ) {
+    const w = (ph.reads.filter(function (n) { const q = rec(n); return q && q.cls === "weight"; })[0]) || "";
+    readEl.appendChild(NN.callout("key", "ALSO READS A WEIGHT, NOT AN ACTIVATION",
+      "<code>" + step("dL_da1").label + "</code> reads <code>" + w + "</code> — <code>T.memory.timeline[" + p +
+      "].reads</code> lists it alongside the mask. Weights are already resident, so this read is " +
+      "free in memory terms — which is exactly why the input-gradient path is cheap and the weight-gradient path " +
+      "is what forces you to keep activations around."));
+  }
+
+  /* alive tensors, grouped by class */
+  aliveEl.innerHTML = "";
+  const live = new Set(aliveAt(p, r).map(function (t) { return t.n; }));
+  ORDER.forEach(function (c) {
+    const inCls = r.filter(function (t) { return t.cls === c; });
+    const shown = inCls.filter(function (t) { return live.has(t.n); });
+    const names = el("div", { class: "names" });
+    inCls.forEach(function (t) {
+      if (!live.has(t.n) && t.freeAt !== null && p >= t.freeAt) {
+        names.appendChild(el("span", { class: "gone v-" + c,
+          title: t.why }, t.disp));
+      } else if (live.has(t.n)) {
+        names.appendChild(el("span", { class: "v-" + c,
+          title: t.disp + " " + t.shape + " — " + B(t.bytes) + (t.transient ? " (transient)" : "") }, t.disp));
+      }
+    });
+    if (!names.childNodes.length) names.appendChild(el("span", { class: "muted" }, "—"));
+    aliveEl.appendChild(el("div", { class: "aliverow" }, [
+      NN.chip(c, NN.CLASSES[c].label + " " + B(shown.reduce(function (a, t) { return a + t.bytes; }, 0))),
+      names
+    ]));
+  });
+
+  if (chart) chart.setPhase(p);
+  if (gantt) gantt.setPhase(p);
+}
+
+/* stepper + slider stay in sync */
+const stepper = new NN.Stepper({
+  mount: ctrlHost, count: PH.length, autoplayMs: 1500,
+  labels: PH.map(function (x) { return x.t; }),
+  onStep: function (i) { renderPhase(i); }
+});
+slider.addEventListener("input", function () { stepper.pause(); stepper.go(parseInt(slider.value, 10)); });
+zgBox.addEventListener("change", function () {
+  state.setToNone = zgBox.checked;
+  mountChart(); mountGantt(); renderPhase(state.p);
+});
+
+/* ======================================================================
+   5.  Section: the memory-lifetime Gantt chart
+   ====================================================================== */
+const secG = NN.$("#gantt");
+secG.appendChild(el("h2", {}, "The memory-lifetime chart"));
+secG.appendChild(el("p", {}, [
+  "This is the whole page in one picture. Four classes, four lifetimes. Two of them span the entire run and never " +
+  "go away; two of them are born and die inside a single iteration, at different times and in a specific order. " +
+  "Hover any bar for its bytes."
+]));
+const gHost = el("div", { class: "scrollx" });
+secG.appendChild(gHost);
+
+function buildGantt() {
+  const NP = PH.length;
+  const r = reg();
+  const per = PH.map(function (_, p) { return bytesAt(p, r); });
+  const tens = r.slice().sort(function (a, b) {
+    return ORDER.indexOf(a.cls) - ORDER.indexOf(b.cls) || a.born - b.born;
+  });
+
+  const L = 200, W = 940, M = { t: 44, r: 18, b: 34 };
+  const CR = 32, TR = 18, GAP = 38;
+  const H = M.t + 4 * CR + GAP + tens.length * TR + M.b;
+  const iw = W - L - M.r;
+  const X   = function (p) { return L + p / (NP - 1) * iw; };
+  const bx0 = function (p) { return Math.max(L, X(p - 0.5)); };
+  const bx1 = function (p) { return Math.min(L + iw, X(p + 0.5)); };
+
+  const root = svg("svg", { class: "chart", viewBox: "0 0 " + W + " " + H,
+    width: "100%", height: H, role: "img",
+    "aria-label": "Gantt chart of tensor lifetimes across one training iteration" });
+  /* below ~800px the labels would shrink below legibility; scroll instead */
+  root.setAttribute("style", "min-width:820px");
+
+  /* phase columns + numbers */
+  for (let p = 0; p < NP; p++) {
+    root.appendChild(svg("line", { class: "gridline", x1: X(p), x2: X(p), y1: M.t - 12, y2: H - M.b }));
+    const t = svg("text", { x: X(p), y: M.t - 18, "text-anchor": "middle" });
+    t.textContent = p; root.appendChild(t);
+  }
+  BANDS.forEach(function (b) {
+    const t = svg("text", { x: (bx0(b.from) + bx1(b.to)) / 2, y: 14, "text-anchor": "middle" });
+    t.setAttribute("style", "fill:var(--ink-2);letter-spacing:.1em;text-transform:uppercase");
+    t.textContent = KIND_LABEL[b.kind]; root.appendChild(t);
+    root.appendChild(svg("line", { x1: bx0(b.from) + 2, x2: bx1(b.to) - 2, y1: 20, y2: 20,
+      stroke: "var(--hairline)", "stroke-width": 1 }));
+  });
+
+  function label(x, y, text, cls, bold) {
+    const t = svg("text", { x: x, y: y, "text-anchor": "end" });
+    t.setAttribute("style", "fill:var(--" + (cls || "ink-2") + ");" + (bold ? "font-weight:700;font-size:11px" : ""));
+    t.textContent = text; root.appendChild(t); return t;
+  }
+
+  /* ---- four aggregate class rows, opacity = share of that class's max */
+  let y = M.t;
+  ORDER.forEach(function (cls) {
+    const mine = tens.filter(function (t) { return t.cls === cls; });
+    const born = Math.min.apply(null, mine.map(function (t) { return t.born; }));
+    const last = Math.max.apply(null, mine.map(function (t) { return t.freeAt === null ? NP - 1 : t.freeAt - 1; }));
+    const mx = Math.max.apply(null, per.map(function (s) { return s[cls]; }));
+    label(L - 12, y + CR / 2 + 1, NN.CLASSES[cls].glyph + " " + NN.CLASSES[cls].label, cls, true);
+    label(L - 12, y + CR / 2 + 13, NN.CLASSES[cls].life + ", max " + B(mx), null, false);
+    for (let p = born; p <= last; p++) {
+      const b = per[p][cls];
+      const rc = svg("rect", { x: bx0(p) + 0.5, y: y + 3, width: bx1(p) - bx0(p) - 1, height: CR - 8,
+        rx: 2, fill: "var(--" + cls + ")", "fill-opacity": (0.2 + 0.8 * (mx ? b / mx : 1)).toFixed(2) });
+      rc.addEventListener("mousemove", function (e) {
+        NN.tip.show("<b>" + NN.CLASSES[cls].label + "</b><br>phase " + p + " — " + B(b), e.clientX, e.clientY);
+      });
+      rc.addEventListener("mouseleave", function () { NN.tip.hide(); });
+      root.appendChild(rc);
+    }
+    y += CR;
+  });
+
+  y += GAP;
+  root.appendChild(svg("line", { x1: 8, x2: W - M.r, y1: y - GAP + 16, y2: y - GAP + 16,
+    stroke: "var(--hairline)" }));
+  const cap = svg("text", { x: 8, y: y - 6 });
+  cap.setAttribute("style", "fill:var(--ink-muted)");
+  cap.textContent = "per tensor  ·  hollow ring = a saved activation is read here  ·  " +
+    "a dot after the name = flagged transient in T.memory.per_tensor";
+  root.appendChild(cap);
+
+  /* ---- per-tensor rows */
+  tens.forEach(function (t) {
+    const last = t.freeAt === null ? NP - 1 : t.freeAt - 1;
+    /* allocated and freed inside one phase: it never survives to the end
+       of a phase, so it contributes to no column of the curve.  Draw the
+       single phase it lived in, hollow, so it is not silently missing. */
+    const inner = last < t.born, right = inner ? t.born : last;
+    label(L - 12, y + TR / 2 + 3, t.disp + (t.transient ? " ·" : "  ") + "  " + t.shape + "  " + B(t.bytes), t.cls, false);
+    const rc = svg("rect", { x: bx0(t.born) + 0.5, y: y + 3, width: bx1(right) - bx0(t.born) - 1,
+      height: TR - 6, rx: 2, fill: "var(--" + t.cls + ")", "fill-opacity": inner ? 0.18 : 0.72,
+      stroke: inner ? "var(--" + t.cls + ")" : "none", "stroke-width": inner ? 1 : 0,
+      "stroke-dasharray": inner ? "3 2" : null });
+    rc.addEventListener("mousemove", function (e) {
+      NN.tip.show("<b>" + t.disp + "</b> " + t.shape + "<br>" + t.els + " × " + FP32 + " B = " + B(t.bytes) +
+        (inner ? "<br>allocated and freed inside phase " + t.born
+               : "<br>alive phases " + t.born + "–" + last + (t.freeAt === null ? " (never freed)" : "")) +
+        (t.transient ? "<br><span class='muted'>transient: allocated and consumed inside backward</span>" : "") +
+        (t.note ? "<br><span class='muted'>" + t.note + "</span>" : "") +
+        "<br><span class='muted'>" + t.why + "</span>", e.clientX, e.clientY);
+    });
+    rc.addEventListener("mouseleave", function () { NN.tip.hide(); });
+    root.appendChild(rc);
+    (t.reads || []).forEach(function (p) {
+      if (p < t.born || p > right) return;
+      const cx = (bx0(p) + bx1(p)) / 2, cy = y + TR / 2;
+      const savedRead = t.saved && SAVED_READS[p] && SAVED_READS[p].name === t.n;
+      root.appendChild(svg("circle", { cx: cx, cy: cy, r: savedRead ? 5 : 2.6,
+        fill: savedRead ? "none" : "var(--page)",
+        stroke: savedRead ? "var(--critical)" : "var(--page)", "stroke-width": savedRead ? 2 : 1 }));
+    });
+    y += TR;
+  });
+
+  /* peak column */
+  const pk = peakInfo();
+  root.appendChild(svg("rect", { x: bx0(pk.at), y: M.t - 12, width: bx1(pk.at) - bx0(pk.at), height: H - M.b - M.t + 12,
+    fill: "none", stroke: "var(--critical)", "stroke-width": 1.5, "stroke-dasharray": "4 3" }));
+  const pt2 = svg("text", { x: (bx0(pk.at) + bx1(pk.at)) / 2, y: H - M.b + 14, "text-anchor": "middle" });
+  pt2.setAttribute("style", "fill:var(--critical);font-weight:700");
+  pt2.textContent = "peak " + B(pk.peak);
+  root.appendChild(pt2);
+
+  const xl = svg("text", { x: L + iw / 2, y: H - 4, "text-anchor": "middle" });
+  xl.textContent = "phase"; root.appendChild(xl);
+
+  /* current-phase marker */
+  const mg = svg("g", { class: "marker-g" });
+  mg.appendChild(svg("line", { x1: 0, x2: 0, y1: M.t - 12, y2: H - M.b, stroke: "var(--ink)",
+    "stroke-width": 1.5, opacity: 0.7 }));
+  root.appendChild(mg);
+
+  return { root: root, setPhase: function (p) { mg.style.transform = "translate(" + X(p).toFixed(1) + "px,0px)"; } };
+}
+
+function mountGantt() {
+  gHost.innerHTML = "";
+  gantt = buildGantt();
+  gHost.appendChild(gantt.root);
+}
+mountGantt();
+
+/* class spans and the all-four-classes overlap, both counted not asserted */
+function spanOf(cls) {
+  const mine = TENSORS.filter(function (t) { return t.cls === cls; });
+  return {
+    from: Math.min.apply(null, mine.map(function (t) { return t.born; })),
+    gone: Math.max.apply(null, mine.map(function (t) { return t.freeAt === null ? NPH : t.freeAt; }))
+  };
+}
+const ACT_SPAN = spanOf("activation"), GRAD_SPAN = spanOf("gradient");
+/* tensors born and freed inside one phase: real allocations that never
+   show up in an end-of-phase total */
+const INNER = TENSORS.filter(function (t) { return t.freeAt !== null && t.freeAt <= t.born; });
+const OVERLAP = TL.map(function (_, p) { return p; }).filter(function (p) {
+  const s = bytesAt(p, TENSORS);
+  return ORDER.every(function (c) { return s[c] > 0; });
+});
+/* the longest write-to-last-read distance among the saved activations,
+   together with the backward step that finally consumes it */
+const HELD = Object.keys(SAVED_READS).map(function (p) {
+  const sr = SAVED_READS[p];
+  return { t: TENSORS.filter(function (x) { return x.n === sr.name; })[0], last: +p, st: step(sr.stepId) };
+}).sort(function (a, b) { return (b.last - b.t.born) - (a.last - a.t.born); })[0];
+
+secG.appendChild(el("p", { class: "small muted", html:
+  "Bar opacity in the four class rows tracks that class's byte count at that phase, so you can see the activation " +
+  "row ramp up through forward and drain during backward while the weight and optimizer rows sit at full strength " +
+  "throughout. Read it row by row: <b>weights</b> and <b>optimizer state</b> are solid bars from edge to edge — they " +
+  "are the cost of having a model at all. <b>Activations</b> start at phase " + ACT_SPAN.from +
+  " and are gone by phase " + ACT_SPAN.gone + ". <b>Gradients</b> do not exist until phase " + GRAD_SPAN.from +
+  " and are gone by phase " + GRAD_SPAN.gone + ". The interesting fact is the overlap: phases " +
+  OVERLAP[0] + " through " + OVERLAP[OVERLAP.length - 1] + ", where all four classes are resident at once. " +
+  "A dot is a read; a hollow ring is a read of something <code>T.forward.saved_for_backward</code> pinned; a " +
+  "<code>·</code> after a name marks a tensor <code>T.memory.per_tensor</code> flags as transient." +
+  (INNER.length ? " " + INNER.length + " bar" + (INNER.length > 1 ? "s are" : " is") + " drawn hollow: " +
+    INNER.map(function (t) { return "<code>" + t.disp + "</code>"; }).join(", ") +
+    (INNER.length > 1 ? " are" : " is") + " allocated and consumed inside a single phase, so " +
+    (INNER.length > 1 ? "they never survive" : "it never survives") + " to the end of one and never " +
+    (INNER.length > 1 ? "appear" : "appears") + " as a column in the curve above — the shortest lifetime in the model." : "") }));
+
+secG.appendChild(NN.callout("why", "WHY THE ACTIVATION BAR IS SO LONG",
+  "An activation is allocated the moment it is computed and cannot be freed until the last thing that reads it has " +
+  "run. <code>" + HELD.t.n + "</code> is computed in phase " + HELD.t.born + " and last read in phase " + HELD.last +
+  " — it sits in memory for " + (HELD.last - HELD.t.born) + " phases doing nothing, purely because <code>" +
+  HELD.st.formula.split("⟹").pop().trim() + "</code> needs it. " +
+  "That distance between write and last-read is the entire reason activation memory is large: it is not the number " +
+  "of live tensors, it is how long each one has to survive."));
+
+/* ======================================================================
+   6.  Section: why peak memory is what matters
+   ====================================================================== */
+const secP = NN.$("#peak");
+secP.appendChild(el("h2", {}, "Why the peak is the only number that matters"));
+
+const curve = PEAK0.curve;
+const avg = curve.reduce(function (a, b) { return a + b; }, 0) / curve.length;
+secP.appendChild(el("p", { html:
+  "Across the " + PH.length + " phases the resident total goes " +
+  "<code>" + curve.map(function (v) { return NN.fmt(v, 0); }).join(" → ") + "</code> bytes. " +
+  "The mean is <b>" + B(Math.round(avg)) + "</b>. The maximum is <b>" + B(PEAK0.peak) + "</b>, at phase " + PEAK0.at + ". " +
+  "An allocator that could only supply the mean would crash " +
+  curve.filter(function (v) { return v > avg; }).length + " times out of " + PH.length + ". " +
+  "You do not get to fit the average." }));
+
+secP.appendChild(NN.callout("key", "\"DOES THE MODEL FIT?\" IS THE WRONG QUESTION",
+  "The model — " + N_PARAMS + " parameters, " + B(WBYTES) + " — fits in " +
+  NN.fmt(WBYTES / PEAK0.peak * 100, 0) + "% of the peak. Adding Adam's two moment vectors takes you to " +
+  NN.fmt(BASE / PEAK0.peak * 100, 0) + "%. The remaining " + NN.fmt((1 - BASE / PEAK0.peak) * 100, 0) +
+  "% is transient: activations that exist only between the forward pass and the backward pass, and gradients that " +
+  "exist only between the backward pass and the optimizer step. None of it shows up if you weigh the checkpoint file. " +
+  "The right question is <b>does the peak fit</b>, and the peak is " + NN.fmt(PEAK0.peak / BASE, 2) +
+  "× the thing you would have measured."));
+
+secP.appendChild(el("h3", {}, "Where the peak lands, and why it moves"));
+secP.appendChild(el("p", { html:
+  "In this model the peak is at phase " + PEAK0.at + ", the <i>end</i> of backward, not the forward/backward boundary. " +
+  "The arithmetic says why: the parameter gradients total " + B(PGBYTES) + " and all activations total " +
+  B(ACT_BYTES) + " — a ratio of " + NN.fmt(PGBYTES / ACT_BYTES, 2) + ":1. Gradients fill in monotonically through " +
+  "backward while activations only drain one at a time, so with those two roughly equal the sum keeps climbing until " +
+  "the last gradient (<code>dL/dW1</code>, " + B(bytesOf("dL/dW1")) + ", the biggest single tensor here) lands." }));
+secP.appendChild(el("p", { html:
+  "Change the ratio and the peak moves. Gradient bytes are pinned to parameter count — one gradient element per " +
+  "parameter, always. Activation bytes scale with <i>batch × sequence length × width × depth</i>, which is unbounded. " +
+  "Once activations outweigh gradients by 5× or more — which is the normal case for a transformer with any real " +
+  "sequence length — the drain during backward dominates the fill, and the maximum snaps back to the " +
+  "forward-end / backward-start boundary: phases " + ACT_PEAK_PHASES[0] + "–" +
+  ACT_PEAK_PHASES[ACT_PEAK_PHASES.length - 1] + " above, where the activation hump is still at full height and " +
+  "the gradient class has just begun to appear. That is the shape everyone means when they say \"peak is at the " +
+  "start of backward\". This toy is the degenerate case where the two are the same size." }));
+
+secP.appendChild(el("p", { class: "small muted", html:
+  "Modelling note: this timeline assumes eager, single-stream execution with no allocator caching, no fusion, and " +
+  "no activation reuse beyond what <code>T.forward.saved_for_backward</code> implies. A real caching allocator does " +
+  "not return freed blocks to the driver, so the observed high-water mark is a ceiling on the curve above, never " +
+  "below it. The lifetimes come from <code>T.memory.timeline</code>, which frees each tensor at its last read; the " +
+  "curve above is checked against <code>T.memory.timeline_bytes_fp32</code> every time the page loads." }));
+
+/* ======================================================================
+   7.  Section: gradient checkpointing
+   ====================================================================== */
+const secC = NN.$("#ckpt");
+secC.appendChild(el("h2", {}, "Gradient checkpointing: trade the hump for a second forward pass"));
+secC.appendChild(el("p", { html:
+  "The activation bar in the Gantt chart is long because every intermediate has to survive from the moment it is " +
+  "written until the moment backward reads it. Checkpointing attacks the <i>storage</i> half of that: don't save " +
+  "every layer's activations, save every <i>k</i>-th. During backward, when you reach a segment whose interiors " +
+  "were thrown away, re-run the forward pass for just that segment from the nearest saved checkpoint, use the " +
+  "recomputed values immediately, then throw them away again." }));
+secC.appendChild(el("p", { html:
+  "For an <i>n</i>-layer model with one unit of activation per layer, you hold <code>n/k</code> checkpoints plus the " +
+  "<code>k</code> activations of the segment currently being recomputed: <code>n/k + k</code>. That is minimised at " +
+  "<code>k = √n</code>, giving <b>O(√n)</b> activation memory instead of O(n). The price is that every non-checkpoint " +
+  "layer is computed twice, which is at most one extra forward pass. With backward costing roughly 2× a forward, " +
+  "a step goes from <code>1 + 2 = 3</code> forward-equivalents to <code>2 + 2 = 4</code>: about <b>+33%</b> compute " +
+  "for a square-root reduction in activation memory." }));
+
+const ckOut = el("div");
+const nSlider = el("input", { type: "range", min: "8", max: "256", step: "8", value: "96" });
+const kSlider = el("input", { type: "range", min: "1", max: "96", step: "1", value: "10" });
+const nOut = el("div", { class: "out" }), kOut = el("div", { class: "out" });
+secC.appendChild(el("div", { class: "slidergrid" }, [
+  el("label", { html: "layers <i>n</i>" }, null), nSlider, nOut,
+  el("label", { html: "checkpoint every <i>k</i>" }, null), kSlider, kOut
+]));
+secC.appendChild(ckOut);
+
+function ckMem(n, k) { return n / k + k; }
+function ckOverheadPct(k) { return (1 - 1 / k) / 3 * 100; }
+
+/* A small zero-based line chart. NN.chart.line pads its y-range, which puts a
+   negative tick under a quantity that cannot be negative; this one does not. */
+function miniLine(o) {
+  const W = 560, H = 232, M = { t: 16, r: 14, b: 38, l: 58 };
+  const iw = W - M.l - M.r, ih = H - M.t - M.b;
+  const X = function (v) { return M.l + (v - o.x0) / (o.x1 - o.x0) * iw; };
+  const Y = function (v) { return M.t + ih - v / o.yMax * ih; };
+  const root = svg("svg", { class: "chart", viewBox: "0 0 " + W + " " + H,
+    width: "100%", height: H, role: "img", "aria-label": o.ylabel + " against k" });
+
+  for (let i = 0; i <= 4; i++) {
+    const v = o.yMax * i / 4, yy = Y(v);
+    root.appendChild(svg("line", { class: "gridline", x1: M.l, x2: M.l + iw, y1: yy, y2: yy }));
+    const t = svg("text", { x: M.l - 8, y: yy + 3.5, "text-anchor": "end" });
+    t.textContent = o.fmtY(v); root.appendChild(t);
+  }
+  [o.x0, Math.round((o.x0 + o.x1) / 2), o.x1].forEach(function (v) {
+    const t = svg("text", { x: X(v), y: M.t + ih + 16, "text-anchor": "middle" });
+    t.textContent = v; root.appendChild(t);
+  });
+  root.appendChild(svg("line", { class: "axis", x1: M.l, x2: M.l + iw, y1: M.t + ih, y2: M.t + ih }));
+  root.appendChild(svg("line", { class: "axis", x1: M.l, x2: M.l, y1: M.t, y2: M.t + ih }));
+  const xl = svg("text", { x: M.l + iw / 2, y: H - 4, "text-anchor": "middle" });
+  xl.textContent = o.xlabel; root.appendChild(xl);
+  const yl = svg("text", { x: -(M.t + ih / 2), y: 12, transform: "rotate(-90)", "text-anchor": "middle" });
+  yl.textContent = o.ylabel; root.appendChild(yl);
+
+  root.appendChild(svg("path", { class: "series", stroke: o.color,
+    d: o.points.map(function (p, i) { return (i ? "L" : "M") + X(p[0]).toFixed(2) + " " + Y(p[1]).toFixed(2); }).join(" ") }));
+
+  (o.markers || []).forEach(function (m, mi) {
+    root.appendChild(svg("line", { x1: X(m.x), x2: X(m.x), y1: M.t, y2: M.t + ih,
+      stroke: m.color, "stroke-width": 1.5, "stroke-dasharray": m.dash || null }));
+    root.appendChild(svg("circle", { cx: X(m.x), cy: Y(m.y), r: 4, fill: m.color,
+      stroke: "var(--surface-1)", "stroke-width": 2 }));
+    const t = svg("text", { x: X(m.x) + (m.x > (o.x0 + o.x1) / 2 ? -6 : 6), y: M.t + 10 + mi * 13,
+      "text-anchor": m.x > (o.x0 + o.x1) / 2 ? "end" : "start" });
+    t.setAttribute("style", "fill:" + m.color + ";font-weight:700");
+    t.textContent = m.label; root.appendChild(t);
+  });
+
+  root.addEventListener("mousemove", function (e) {
+    const rc = root.getBoundingClientRect();
+    const px = (e.clientX - rc.left) / rc.width * W;
+    const xv = Math.round(NN.clamp(o.x0 + (px - M.l) / iw * (o.x1 - o.x0), o.x0, o.x1));
+    const p = o.points[xv - o.x0];
+    if (p) NN.tip.show("<div class='muted'>k = " + xv + "</div><b>" + o.fmtY(p[1]) + "</b>", e.clientX, e.clientY);
+  });
+  root.addEventListener("mouseleave", function () { NN.tip.hide(); });
+  return root;
+}
+
+function renderCkpt() {
+  const n = parseInt(nSlider.value, 10);
+  kSlider.max = String(n);
+  let k = NN.clamp(parseInt(kSlider.value, 10), 1, n);
+  kSlider.value = String(k);
+  nOut.textContent = n + " layers";
+  kOut.textContent = "k = " + k;
+
+  const kOpt = Math.max(1, Math.round(Math.sqrt(n)));
+  const mem = ckMem(n, k), base = ckMem(n, 1), ov = ckOverheadPct(k);
+
+  const ks = [];
+  for (let i = 1; i <= n; i++) ks.push(i);
+
+  ckOut.innerHTML = "";
+  ckOut.appendChild(NN.tiles([
+    { k: "activation memory", v: NN.fmt(mem, 1), s: "units, vs " + NN.fmt(base, 0) + " at k=1", cls: "activation" },
+    { k: "memory saved", v: NN.fmt(base / mem, 2) + "×", s: NN.fmt((1 - mem / base) * 100, 0) + "% less activation storage" },
+    { k: "extra compute", v: "+" + NN.fmt(ov, 1) + "%", s: "recompute " + NN.fmt((1 - 1 / k) * 100, 0) + "% of the forward pass", cls: "gradient" },
+    { k: "optimum k = √n", v: String(kOpt), s: NN.fmt(ckMem(n, kOpt), 1) + " units ≈ 2√n" }
+  ]));
+
+  const memChart = miniLine({
+    points: ks.map(function (i) { return [i, ckMem(n, i)]; }),
+    color: "var(--activation)", x0: 1, x1: n, yMax: base,
+    xlabel: "k  (checkpoint every k layers)", ylabel: "activation units",
+    fmtY: function (v) { return NN.fmt(v, 0); },
+    markers: [
+      { x: k, y: mem, color: "var(--ink)", label: "k = " + k },
+      { x: kOpt, y: ckMem(n, kOpt), color: "var(--critical)", dash: "4 4", label: "k = √n = " + kOpt }
+    ]
+  });
+  const cpuChart = miniLine({
+    points: ks.map(function (i) { return [i, ckOverheadPct(i)]; }),
+    color: "var(--gradient)", x0: 1, x1: n, yMax: 34,
+    xlabel: "k  (checkpoint every k layers)", ylabel: "% extra compute",
+    fmtY: function (v) { return "+" + NN.fmt(v, 0) + "%"; },
+    markers: [
+      { x: k, y: ov, color: "var(--ink)", label: "k = " + k },
+      { x: kOpt, y: ckOverheadPct(kOpt), color: "var(--critical)", dash: "4 4", label: "k = √n = " + kOpt }
+    ]
+  });
+
+  ckOut.appendChild(el("div", { class: "grid2" }, [
+    el("div", {}, [el("div", { class: "muted small" }, "activation memory falls as 1/k, then rises as k"), memChart]),
+    el("div", {}, [el("div", { class: "muted small" }, "recompute cost rises and saturates at +33%"), cpuChart])
+  ]));
+}
+nSlider.addEventListener("input", renderCkpt);
+kSlider.addEventListener("input", renderCkpt);
+renderCkpt();
+
+secC.appendChild(NN.callout("warn", "THIS IS A MODEL, NOT A MEASUREMENT",
+  "None of the numbers in this section come from <code>NN.T</code>. They are arithmetic on an idealised " +
+  "<i>n</i>-layer stack: uniform layers, one unit of activation each, backward costing exactly 2× forward, " +
+  "recomputation costing exactly what the original forward cost, and no memory for the recomputed segment beyond " +
+  "<i>k</i> units. Real numbers depend on which ops your framework actually saves tensors for, whether attention is " +
+  "recomputed or flash-attention'd, and how the caching allocator fragments. Treat the √n shape as correct and the " +
+  "specific percentages as an order of magnitude."));
+
+secC.appendChild(NN.callout("mem", "WHAT CHECKPOINTING DOES NOT HELP",
+  "Look back at the Gantt chart. Checkpointing shortens and shrinks exactly one of the four bars — the " +
+  "activation one. Weights, optimizer state and gradients are untouched, and for this " + N_PARAMS +
+  "-parameter model those are " + B(BASE + PGBYTES) + " of the " + B(PEAK0.peak) + " peak, " +
+  NN.fmt((BASE + PGBYTES) / PEAK0.peak * 100, 0) + "%. Checkpointing has no answer for that floor; sharding " +
+  "(ZeRO, FSDP) and lower-precision states do. Page 08 is about that half of the problem."));
+
+/* ======================================================================
+   8.  Section: the loop, annotated
+   ====================================================================== */
+const secL = NN.$("#loopcode");
+secL.appendChild(el("h2", {}, "The loop, annotated by memory class"));
+secL.appendChild(NN.legend(ORDER));
+
+const code =
+  '<span class="kw">for</span> batch, y <span class="kw">in</span> data:\n' +
+  '    out  = model(batch)      <span class="cm"># <span class="v-activation">allocate activations</span>: ' +
+      ACT_TENSORS.filter(function (t) { return t.n !== "loss"; }).map(function (t) { return t.n; }).join(", ") +
+      ' &nbsp;(' + B(ACT_BYTES - bytesOf("loss")) + ')</span>\n' +
+  '                             <span class="cm">#   <span class="v-weight">reads weights</span>, never writes them</span>\n' +
+  '    loss = criterion(out, y) <span class="cm"># <span class="v-activation">+1 scalar</span>. activation memory is now at its ceiling: ' + B(ACT_BYTES) + '</span>\n' +
+  '\n' +
+  '    loss.backward()          <span class="cm"># <span class="v-gradient">allocate gradients</span> (' + B(PGBYTES) + ' persistent + transients)</span>\n' +
+  '                             <span class="cm">#   <span class="v-activation">reads then frees activations</span> as each one is consumed</span>\n' +
+  '                             <span class="cm">#   <span class="v-weight">reads weights</span> for the input-gradient path (dL/da1 = W2ᵀ·dL/dz2)</span>\n' +
+  '                             <span class="cm">#   ← <b>the peak lives inside this call</b></span>\n' +
+  '\n' +
+  '    opt.step()               <span class="cm"># <span class="v-gradient">reads gradients</span> + <span class="v-optimizer">reads/writes m, v</span> (' + B(OBYTES) + ', in place)</span>\n' +
+  '                             <span class="cm">#   <span class="v-weight">writes weights</span> in place. no new allocation.</span>\n' +
+  '\n' +
+  '    opt.zero_grad(set_to_none=True)\n' +
+  '                             <span class="cm"># <span class="v-gradient">free gradients</span> (' + B(PGBYTES) + ' returned)</span>\n' +
+  '                             <span class="cm">#   with set_to_none=False: memset to 0.0 and <b>kept forever</b></span>';
+secL.appendChild(el("pre", { class: "code", html: code }));
+
+secL.appendChild(el("h3", {}, "What zero_grad actually does"));
+secL.appendChild(el("p", { html:
+  "Backward does not <i>assign</i> to <code>p.grad</code>, it does <code>p.grad += ...</code>. That is not an " +
+  "implementation quirk — it is required. A parameter can be used more than once in a single graph (weight tying, a " +
+  "layer called twice, a residual branch), and the chain rule says the total derivative is the <i>sum</i> of the " +
+  "contributions along every path. Accumulation is the only correct default." }));
+secL.appendChild(el("p", { html:
+  "The consequence is that <code>.grad</code> is never automatically cleared. Skip <code>zero_grad()</code> and " +
+  "iteration 2's gradients are added to iteration 1's, iteration 3's to that, and your effective batch quietly " +
+  "becomes every batch you have ever seen. The loss usually still goes down for a while, which is what makes it a " +
+  "nasty bug. (Deliberately not calling it for <i>N</i> steps and dividing by <i>N</i> is exactly what \"gradient " +
+  "accumulation\" is — the same mechanism, used on purpose.)" }));
+secL.appendChild(el("p", { html:
+  "The memory half: <code>set_to_none=True</code> drops the reference, so " + B(PGBYTES) + " actually returns to the " +
+  "allocator and the gradient bar in the Gantt chart ends. <code>set_to_none=False</code> writes zeros into the same " +
+  "buffers, which keeps them resident across the whole run and turns the gradient bar into a second permanent row. " +
+  "Toggle the checkbox in the first section: the floor rises from " + B(BASE) + " to " + B(BASE + PGBYTES) + " and — " +
+  "the part people miss — the <i>peak</i> rises too, because in a steady state those buffers are already there while " +
+  "the next iteration's activation hump is building." }));
+
+/* ======================================================================
+   9.  Section: scaling callout
+   ====================================================================== */
+const secS = NN.$("#scale");
+secS.appendChild(el("h2", {}, "The same shape, five orders of magnitude up"));
+secS.appendChild(NN.callout("mem", "THIS GRAPH, IN GIGABYTES",
+  "The curve you scrubbed through does not change shape when the model gets big; only the axis labels do. " +
+  "Weights and optimizer state are a flat floor set by parameter count — for a 7B-parameter model in fp32 with " +
+  "Adam that floor is <code>7e9 × " + FP32 + " B</code> for weights plus <code>7e9 × 2 × " + FP32 +
+  " B</code> for <code>m</code> and <code>v</code>, i.e. " + NN.bytes(7e9 * FP32) + " + " + NN.bytes(7e9 * 2 * FP32) +
+  " = <b>" + NN.bytes(7e9 * 3 * FP32) + "</b> before a single batch is loaded. " +
+  "Gradients add another " + NN.bytes(7e9 * FP32) + " during backward. " +
+  "<br><br>The activation hump is the part that has no such bound. Here it is " + B(ACT_BYTES) + " for one example " +
+  "with " + T.meta.architecture + ". At transformer shape it scales with batch × sequence × hidden × layers, and " +
+  "with long sequences it is routinely hundreds of gigabytes — larger than everything else combined, which is " +
+  "precisely why checkpointing exists and why the peak sits at the forward/backward boundary rather than where it " +
+  "sits on this page. The 7B figures are order-of-magnitude arithmetic on a stated parameter count, not a measurement; " +
+  "pages 07 and 08 do it properly."));
+secS.appendChild(el("p", { class: "small muted", html:
+  "One more thing that survives the scale-up unchanged: the dead ReLU unit. <code>dL/dW1</code> row 2 is " +
+  "<code>" + vec(Bk.dL_dW1[2]) + "</code> here, and it still costs " + B(bytesOf("dL/dW1") / rec("dL/dW1").shape[0]) +
+  " of gradient storage and a full share of optimizer state. Memory is allocated for the shape of the tensor, not " +
+  "for how much of it is doing anything." }));
+
+/* ======================================================================
+   10. Go
+   ====================================================================== */
+mountChart();
+renderPhase(0);
+
+NN.page("loop");
+})();
+</script>
+</body>
+</html>
