@@ -1,0 +1,1233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 10 Data Parallel</title>
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* page-local layout only; every colour comes from design.css custom properties */
+
+.kv { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+      font-family: var(--mono); font-size: .7rem; padding: 2px 0; }
+.kv .k { color: var(--ink-muted); white-space: nowrap; }
+.kv .v { color: var(--ink); font-variant-numeric: tabular-nums; text-align: right; }
+.kv.off .v { color: var(--ink-muted); }
+.kv.flash .v { animation: kvflash .8s ease-out; }
+@keyframes kvflash { from { color: var(--gradient); transform: translateY(-2px); } to { } }
+
+.stagegrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 10px; }
+
+.panel { background: var(--surface-2); border: 1px solid var(--hairline);
+         border-radius: 8px; padding: 13px 16px; margin: 14px 0; }
+.panel h4 { margin: 0 0 9px; font-family: var(--mono); font-size: .7rem; letter-spacing: .12em;
+            text-transform: uppercase; color: var(--ink-muted); font-weight: 700; }
+
+.pillrow { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; margin: 6px 0 2px; }
+.pill { background: var(--surface-3); border: 1px solid var(--hairline); color: var(--ink-2);
+        border-radius: 999px; padding: 4px 12px; font-family: var(--mono); font-size: .74rem;
+        cursor: pointer; }
+.pill:hover { border-color: var(--accent); }
+.pill.on { border-color: var(--gradient); color: var(--ink); background: var(--gradient-w); }
+select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid var(--hairline);
+              border-radius: 6px; padding: 4px 8px; font-family: var(--mono); font-size: .78rem; }
+
+/* four per-GPU values, side by side, with a magnitude bar */
+.gbars { display: grid; grid-template-columns: 62px 118px 1fr; gap: 4px 10px; align-items: center;
+         font-family: var(--mono); font-size: .8rem; font-variant-numeric: tabular-nums; }
+.gbars .lab { color: var(--ink-muted); font-size: .74rem; }
+.gbars .num { text-align: right; color: var(--ink); }
+.gbars .track { position: relative; height: 14px; background: var(--surface-3); border-radius: 3px; }
+.gbars .track i { position: absolute; top: 0; bottom: 0; display: block; border-radius: 3px;
+                  background: var(--gradient); transition: left .45s, width .45s; }
+.gbars .track u { position: absolute; top: -3px; bottom: -3px; width: 1px;
+                  background: var(--hairline); }
+.gbars .num.mean, .gbars .lab.mean { color: var(--ink); font-weight: 700; }
+.gbars .track.mean i { background: var(--accent); }
+table.data tr.hi { background: var(--surface-3); }
+
+.proofline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 18px;
+             border-left: 4px solid var(--good); background: var(--surface-2);
+             border-radius: 0 8px 8px 0; padding: 13px 18px; margin: 14px 0; }
+.proofline .big { font-size: 1.5rem; font-weight: 800; color: var(--good); line-height: 1.15; }
+.proofline .det { font-family: var(--mono); font-size: .84rem; color: var(--ink-2); }
+
+.ringwrap { display: grid; grid-template-columns: 250px 1fr; gap: 18px; align-items: center; }
+@media (max-width: 860px) { .ringwrap { grid-template-columns: 1fr; } }
+
+/* interactive timeline */
+.tlrow { display: grid; grid-template-columns: 96px 1fr; gap: 10px; align-items: center; margin: 7px 0; }
+.tlname { font-family: var(--mono); font-size: .7rem; color: var(--ink-muted); text-align: right; }
+.tltrack { position: relative; height: 30px; background: var(--surface-3);
+           border-radius: 4px; overflow: hidden; }
+.tlblk { position: absolute; top: 3px; bottom: 3px; border-radius: 3px;
+         display: flex; align-items: center; justify-content: center;
+         font-family: var(--mono); font-size: .6rem; font-weight: 700; color: #fff;
+         overflow: hidden; white-space: nowrap;
+         transition: left .4s cubic-bezier(.4,0,.2,1), width .4s cubic-bezier(.4,0,.2,1); }
+.tlblk.compute { background: var(--gradient); }
+.tlblk.comm { background: var(--gradient-w); border: 1.5px solid var(--gradient); color: var(--ink); }
+.tlmark { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--ink-muted); }
+.tlmark.wall { background: var(--critical); }
+.tlaxis { position: relative; height: 16px; font-family: var(--mono); font-size: .62rem;
+          color: var(--ink-muted); }
+.tlaxis span { position: absolute; transform: translateX(-50%); }
+
+.fld { margin: 0 0 11px; }
+.fld > label { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+               font-family: var(--mono); font-size: .74rem; color: var(--ink-2); margin-bottom: 3px; }
+.fld .rv { color: var(--ink); font-weight: 700; font-variant-numeric: tabular-nums; }
+.fld input[type="range"] { width: 100%; accent-color: var(--gradient); }
+.fld.chk > label { justify-content: flex-start; align-items: center; cursor: pointer; }
+.fld.chk input { accent-color: var(--gradient); margin-right: 8px; }
+.ctlgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+
+.arith { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .8rem;
+         font-variant-numeric: tabular-nums; margin: 4px 0 0; }
+.arith td { padding: 4px 8px; border-bottom: 1px solid var(--hairline-2); white-space: nowrap; }
+.arith td.r { text-align: right; }
+.arith tr.sum td { border-top: 1px solid var(--hairline); border-bottom: none;
+                   font-weight: 700; color: var(--ink); padding-top: 7px; }
+.arith td.term { color: var(--ink-2); }
+
+@media (max-width: 860px) {
+  .gbars { grid-template-columns: 52px 104px 1fr; }
+  .stagegrid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+}
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 10</div>
+    <h1>Data Parallel: Split the Batch, Average the Gradients</h1>
+    <p class="lede">Every GPU holds a complete copy of the model. The batch is what gets cut up.
+      Each replica computes a gradient from its own samples — and those gradients are genuinely
+      different from each other — then one all-reduce averages them. This page walks that step with
+      real numbers and proves the averaged gradient is bit-for-bit the gradient a single GPU would
+      have produced on the whole batch. DDP is not an approximation.</p>
+    <noscript><p class="callout warn">This page derives every number in the browser from
+      <code>assets/data/parallel.js</code>. With JavaScript disabled you will see an empty shell.</p></noscript>
+  </div>
+
+  <section class="block" id="idea">
+    <h2>1 · One model, four copies, four samples</h2>
+    <div id="ideaBody"></div>
+  </section>
+
+  <section class="block" id="step">
+    <h2>2 · One DDP step, watched</h2>
+    <div id="stepBody"></div>
+  </section>
+
+  <section class="block" id="average">
+    <h2>3 · Why the average and not the sum</h2>
+    <div id="avgBody"></div>
+  </section>
+
+  <section class="block" id="overlap">
+    <h2>4 · Bucketing: the all-reduce starts before backward finishes</h2>
+    <div id="ovBody"></div>
+  </section>
+
+  <section class="block" id="memory">
+    <h2>5 · What DDP does not fix</h2>
+    <div id="memBody"></div>
+  </section>
+
+  <section class="block" id="limits">
+    <h2>6 · Where data parallelism runs out</h2>
+    <div id="limBody"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/parallel.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T   = NN.T;
+  const P   = NN.P || window.PARALLEL;
+  const el  = NN.el;
+  const fmt = NN.fmt;
+  const fms = NN.fmtSigned;
+
+  const M      = P.meta;
+  const D      = P.strategies.ddp;
+  const WORLD  = M.world;
+  const BATCH  = M.batch;
+  const NPAR   = M.n_params;
+  const NL     = M.n_layers;
+  const PERGPU = BATCH / WORLD;
+  const LR     = T.meta.hyperparams.lr;
+  const ALL_RANKS = [];
+  for (let g = 0; g < WORLD; g++) ALL_RANKS.push(g);
+
+  /* =====================================================================
+     PARAMETER REGISTRY
+     Every one of the model's parameters, addressable, so the reader can
+     point the proof at any of them. Layers are named 1-based (W1..W4).
+     ===================================================================== */
+  const PARAMS = [];
+  for (let L = 0; L < NL; L++) {
+    const sh = P.model.layer_shapes[L];          // [n_out, n_in]
+    for (let i = 0; i < sh[0]; i++)
+      for (let j = 0; j < sh[1]; j++)
+        PARAMS.push({ key: "W" + (L + 1) + "[" + i + "][" + j + "]", L: L, kind: "W", i: i, j: j });
+    for (let i = 0; i < sh[0]; i++)
+      PARAMS.push({ key: "b" + (L + 1) + "[" + i + "]", L: L, kind: "b", i: i, j: 0 });
+  }
+
+  const gFull = function (e) {
+    return e.kind === "W" ? P.model.dWs[e.L][e.i][e.j] : P.model.dbs[e.L][e.i];
+  };
+  const gLocal = function (e, g) {
+    const l = D.local[g];
+    return e.kind === "W" ? l.dWs[e.L][e.i][e.j] : l.dbs[e.L][e.i];
+  };
+  const theta = function (e) {
+    return e.kind === "W" ? P.model.Ws[e.L][e.i][e.j] : P.model.bs[e.L][e.i];
+  };
+  const gMean = function (e) {
+    let s = 0;
+    for (let g = 0; g < WORLD; g++) s += gLocal(e, g);
+    return s / WORLD;
+  };
+
+  /* ---- run the proof over EVERY parameter, here, in the browser ------- */
+  let maxErr = 0, worstKey = null, nSparse = 0, nDiffer = 0;
+  PARAMS.forEach(function (e) {
+    const d = Math.abs(gMean(e) - gFull(e));
+    if (d > maxErr) { maxErr = d; worstKey = e.key; }
+    let anyZero = false, distinct = {};
+    for (let g = 0; g < WORLD; g++) {
+      const v = gLocal(e, g);
+      if (v === 0) anyZero = true;
+      distinct[v] = 1;
+    }
+    if (anyZero && gFull(e) !== 0) nSparse++;
+    if (Object.keys(distinct).length > 1) nDiffer++;
+  });
+  const proofOK = maxErr === 0 || maxErr < 1e-12;
+
+  /* loss check: the mean of the per-GPU losses is the full-batch loss */
+  let lossMean = 0;
+  for (let g = 0; g < WORLD; g++) lossMean += D.local[g].loss;
+  lossMean /= WORLD;
+  const lossErr = Math.abs(lossMean - P.model.loss);
+
+  /* short label for the ring nodes */
+  function tiny(v) {
+    if (v === 0) return "0";
+    const a = Math.abs(v);
+    if (a < 0.01) return v.toExponential(0);
+    return v.toFixed(2);
+  }
+  const vec = function (a, d) {
+    return "[" + a.map(function (v) { return fmt(v, d === undefined ? 3 : d); }).join(", ") + "]";
+  };
+
+  /* the parameter currently under the microscope */
+  let focus = PARAMS.find(function (e) { return e.key === "b4[0]"; }) || PARAMS[PARAMS.length - 1];
+  const focusListeners = [];
+  function onFocus(fn) { focusListeners.push(fn); }
+  function setFocus(key) {
+    const e = PARAMS.find(function (p) { return p.key === key; });
+    if (!e) return;
+    focus = e;
+    focusListeners.forEach(function (f) { f(e); });
+  }
+
+  /* =====================================================================
+     1 — THE IDEA
+     ===================================================================== */
+  function buildIdea() {
+    const host = NN.$("#ideaBody");
+
+    host.appendChild(el("p", { html:
+      "The model is <code>" + M.dims.join(" &rarr; ") + "</code>: " +
+      "<b>" + NN.count(NPAR) + " parameters</b> across " + NL + " layers, trained on a batch of " +
+      BATCH + ". With a world size of " + WORLD + " that is exactly <b>" + PERGPU +
+      " sample per GPU</b> — small enough that every number below fits on the screen, and the " +
+      "arithmetic is the same arithmetic a real run does." }));
+
+    host.appendChild(el("p", { html:
+      "Data parallelism splits <b>" + D.splits + "</b> and replicates <b>" + D.replicates +
+      "</b>. That sentence is the entire design. Each GPU runs the ordinary forward and backward " +
+      "you already know from pages 02 and 04, on its own samples, against its own private copy of " +
+      "the weights. Nothing about the single-GPU code changes. The only new thing is one " +
+      "collective between backward and the optimizer step." }));
+
+    host.appendChild(NN.tiles([
+      { k: "world size", v: String(WORLD), s: "GPUs in the group" },
+      { k: "global batch", v: String(BATCH), s: PERGPU + " sample per GPU" },
+      { k: "params per GPU", v: NN.count(NPAR), s: "the full model, on every GPU", cls: "weight" },
+      { k: "collectives / step", v: String(D.schedule.filter(function (c) { return c.op !== "none"; }).length),
+        s: "one all-reduce of " + NN.count(D.schedule[0].elements) + " gradients", cls: "gradient" }
+    ]));
+
+    /* four GPU cards: everything replicated except the batch */
+    function fullbar(name, color) {
+      const bar = el("div", { class: "shardbar" });
+      for (let i = 0; i < WORLD; i++) {
+        bar.appendChild(el("div", {
+          class: "shardseg mine", style: { background: color },
+          title: name + " — held whole on this GPU"
+        }));
+      }
+      return el("div", { class: "shardrow" }, [el("span", { class: "shardname" }, name), bar]);
+    }
+
+    const grid = NN.gpu.grid({
+      count: WORLD,
+      label: function (g) { return "GPU " + g; },
+      render: function (g) {
+        const s = D.per_gpu[g].holds;
+        const rows = [
+          fullbar("W", "var(--weight)"),
+          fullbar("∇", "var(--gradient)"),
+          fullbar("opt", "var(--optimizer)"),
+          NN.gpu.shard({ name: "batch", parts: WORLD, mine: g, color: "var(--activation)" }),
+          el("div", { class: "kv" }, [
+            el("span", { class: "k" }, "sample"), el("span", { class: "v" }, "b = " + g)]),
+          el("div", { class: "kv" }, [
+            el("span", { class: "k" }, "x"), el("span", { class: "v" }, vec(P.model.X[g], 2))]),
+          el("div", { class: "kv" }, [
+            el("span", { class: "k" }, "y"), el("span", { class: "v" }, fmt(P.model.Y[g], 3))]),
+          el("div", { class: "kv" }, [
+            el("span", { class: "k" }, "holds"),
+            el("span", { class: "v", style: { color: "var(--ink-muted)" } },
+              NN.count(NPAR) + "/" + NN.count(NPAR) + " params")])
+        ];
+        rows[rows.length - 1].title = s.join(" · ");
+        return rows;
+      }
+    });
+    host.appendChild(grid);
+    host.appendChild(NN.legend(["weight", "gradient", "activation", "optimizer"]));
+
+    host.appendChild(el("p", { class: "small muted", html:
+      "The three solid bars mean <i>held whole</i>: all " + NN.count(NPAR) + " weights, all " +
+      NN.count(NPAR) + " gradients and all " + NN.count(D.memory_per_gpu.optimizer) +
+      " optimizer-state elements sit on every GPU. Only the batch bar is sharded — GPU <i>g</i> " +
+      "owns sample <i>g</i> and nothing else. Hover a card for the full inventory." }));
+
+    host.appendChild(NN.callout("key", "THE ONE INVARIANT DDP MUST MAINTAIN",
+      "The " + WORLD + " replicas must stay <b>identical</b>, parameter for parameter, forever. " +
+      "They start identical (broadcast at init), and they stay identical only because every rank " +
+      "applies the <i>same</i> update to the <i>same</i> starting values. That is why the gradient " +
+      "is all-reduced rather than, say, each rank stepping on its own gradient and syncing weights " +
+      "occasionally. If the replicas ever drift, you no longer have one model being trained — you " +
+      "have " + WORLD + " models being averaged, which is a different and worse algorithm."));
+  }
+
+  /* =====================================================================
+     2 — THE CENTREPIECE
+     ===================================================================== */
+  function buildStep() {
+    const host = NN.$("#stepBody");
+
+    host.appendChild(el("p", { html:
+      "Seven steps, the whole step. The four cards are the four GPUs; they fill in as the step " +
+      "progresses. Pick any parameter of the " + NN.count(NPAR) + " with the selector — the " +
+      "per-GPU gradients, the averaging arithmetic and the proof all re-derive for it." }));
+
+    /* ---- parameter picker ------------------------------------------- */
+    const sel = el("select", { class: "psel", "aria-label": "parameter under the microscope" },
+      PARAMS.map(function (e) { return el("option", { value: e.key }, e.key); }));
+    sel.value = focus.key;
+    sel.addEventListener("change", function () { setFocus(sel.value); });
+
+    const quick = [
+      { key: "b4[0]", why: "output bias — every sample contributes" },
+      { key: "W4[0][1]", why: "output weight" },
+      { key: "b1[0]", why: "dead ReLU on 3 of " + WORLD + " GPUs" },
+      { key: "W1[2][0]", why: "first layer" }
+    ].filter(function (q) { return PARAMS.some(function (e) { return e.key === q.key; }); });
+
+    const pills = el("div", { class: "pillrow" }, quick.map(function (q) {
+      const b = el("button", { class: "pill", title: q.why }, q.key);
+      b.addEventListener("click", function () { sel.value = q.key; setFocus(q.key); });
+      return b;
+    }));
+    onFocus(function (e) {
+      NN.$$("button.pill", pills).forEach(function (b) {
+        b.classList.toggle("on", b.textContent === e.key);
+      });
+      if (sel.value !== e.key) sel.value = e.key;
+    });
+
+    host.appendChild(el("div", { class: "panel" }, [
+      el("h4", {}, "parameter under the microscope"),
+      el("div", { class: "pillrow" }, [
+        el("span", { class: "muted small", style: { fontFamily: "var(--mono)" } }, "∂L/∂"),
+        sel,
+        el("span", { class: "muted small" }, "or jump to:")
+      ]),
+      pills
+    ]));
+
+    /* ---- the stage: four GPU cards ----------------------------------- */
+    const rowsByGpu = [];
+    const stage = NN.gpu.grid({
+      count: WORLD,
+      label: function (g) { return "GPU " + g; },
+      render: function (g) {
+        const mk = function (k) {
+          const v = el("span", { class: "v" }, "·");
+          const kk = el("span", { class: "k" }, k);
+          const row = el("div", { class: "kv off" }, [kk, v]);
+          return { row: row, v: v, k: kk };
+        };
+        const r = {
+          sample: mk("sample"),
+          x:      mk("x"),
+          yhat:   mk("ŷ"),
+          loss:   mk("local loss"),
+          grad:   mk("∂L/∂" + focus.key),
+          after:  mk("θ after")
+        };
+        rowsByGpu.push(r);
+        return [
+          el("div", { class: "kv" }, [
+            el("span", { class: "k" }, "replica"),
+            el("span", { class: "v", style: { color: "var(--weight)" } }, NN.count(NPAR) + " params")]),
+          r.sample.row, r.x.row, r.yhat.row, r.loss.row, r.grad.row, r.after.row
+        ];
+      }
+    });
+    stage.className += " stagegrid";
+    host.appendChild(stage);
+
+    function setRow(g, key, text, on, flash) {
+      const r = rowsByGpu[g][key];
+      r.v.textContent = text;
+      r.row.classList.toggle("off", !on);
+      if (flash) {
+        r.row.classList.remove("flash");
+        void r.row.offsetWidth;
+        r.row.classList.add("flash");
+      }
+    }
+
+    /* ---- the focus panel, rebuilt per step --------------------------- */
+    const focusPanel = el("div", { class: "panel" });
+    const ctl = el("div");
+    host.appendChild(ctl);
+    host.appendChild(focusPanel);
+
+    const ring = NN.gpu.ring({ count: WORLD, r: 82, size: 220 });
+    let token = 0;
+
+    const LABELS = [
+      "four identical replicas",
+      "scatter: sample b goes to GPU b",
+      "forward: each GPU on its own sample",
+      "backward: the gradients are DIFFERENT",
+      "all-reduce: sum, then divide by " + WORLD,
+      "the proof: identical to the single-GPU gradient",
+      "optimizer step: the same update everywhere"
+    ];
+
+    /* per-GPU value bars for the focused parameter */
+    function gbars(vals, mean, opts) {
+      const maxAbs = Math.max.apply(null, vals.map(Math.abs).concat([Math.abs(mean), 1e-12]));
+      const wrap = el("div", { class: "gbars" });
+      const bar = function (v, extra) {
+        const w = Math.abs(v) / maxAbs * 50;
+        const left = v >= 0 ? 50 : 50 - w;
+        return el("div", { class: "track" + (extra || "") }, [
+          el("u", { style: { left: "50%" } }),
+          el("i", { style: { left: left + "%", width: w + "%" } })
+        ]);
+      };
+      vals.forEach(function (v, g) {
+        wrap.appendChild(el("div", { class: "lab" }, "GPU " + g));
+        wrap.appendChild(el("div", { class: "num" }, fms(v, 6)));
+        wrap.appendChild(bar(v));
+      });
+      if (!opts || opts.mean !== false) {
+        wrap.appendChild(el("div", { class: "lab mean" }, "mean"));
+        wrap.appendChild(el("div", { class: "num mean" }, fms(mean, 6)));
+        wrap.appendChild(bar(mean, " mean"));
+      }
+      return wrap;
+    }
+
+    function arithTable(vals, mean) {
+      const t = el("table", { class: "arith" });
+      vals.forEach(function (v, g) {
+        t.appendChild(el("tr", {}, [
+          el("td", { class: "term" }, (g ? "+ " : "  ") + "g" + g),
+          el("td", { class: "r" }, fms(v, 9))
+        ]));
+      });
+      t.appendChild(el("tr", { class: "sum" }, [
+        el("td", { class: "term" }, "sum"),
+        el("td", { class: "r" }, fms(vals.reduce(function (a, b) { return a + b; }, 0), 9))
+      ]));
+      t.appendChild(el("tr", { class: "sum" }, [
+        el("td", { class: "term" }, "÷ " + WORLD),
+        el("td", { class: "r" }, fms(mean, 9))
+      ]));
+      return t;
+    }
+
+    function render(i) {
+      token++;
+      const my = token;
+      const vals = [];
+      for (let g = 0; g < WORLD; g++) vals.push(gLocal(focus, g));
+      const mean = gMean(focus);
+      const full = gFull(focus);
+
+      /* ---------------- stage cards ---------------- */
+      for (let g = 0; g < WORLD; g++) {
+        rowsByGpu[g].grad.k.textContent = "∂L/∂" + focus.key;
+        setRow(g, "sample", i >= 1 ? "b = " + D.local[g].samples.join(",") : "·", i >= 1);
+        setRow(g, "x", i >= 1 ? vec(P.model.X[g], 2) : "·", i >= 1);
+        setRow(g, "yhat", i >= 2 ? fmt(D.local[g].yhat[0][0], 6) : "·", i >= 2);
+        setRow(g, "loss", i >= 2 ? fmt(D.local[g].loss, 6) : "·", i >= 2);
+        setRow(g, "grad", i >= 3 ? fms(i >= 5 ? mean : vals[g], 6) : "·", i >= 3);
+        setRow(g, "after", i >= 6 ? fms(theta(focus) - LR * mean, 6) : "·", i >= 6);
+      }
+      stage.highlight(i === 0 ? null : ALL_RANKS);
+
+      /* ---------------- ring ---------------- */
+      ring.setLabels(i >= 5 ? vals.map(function () { return tiny(mean); })
+                            : (i >= 3 ? vals.map(tiny)
+                                      : ALL_RANKS.map(function (g) { return "G" + g; })));
+      ring.step(i === 4 ? 0 : null, "var(--gradient)");
+
+      /* ---------------- focus panel ---------------- */
+      focusPanel.innerHTML = "";
+      const H = function (t) { return el("h4", {}, t); };
+
+      if (i === 0) {
+        focusPanel.appendChild(H("before the step"));
+        focusPanel.appendChild(el("p", { html:
+          "All " + WORLD + " ranks hold the same " + NN.count(NPAR) + " weights, the same " +
+          NN.count(D.memory_per_gpu.optimizer) + " optimizer-state elements, and the same " +
+          "gradient buffer (zeroed). Nothing distinguishes them yet. The <i>only</i> asymmetry " +
+          "that will ever exist between these GPUs is which samples they are handed." }));
+        focusPanel.appendChild(NN.formula({
+          rule: "θ<sub>0</sub> = θ<sub>1</sub> = θ<sub>2</sub> = θ<sub>3</sub>",
+          sub: focus.key + " = " + fmt(theta(focus), 6) + " on every rank",
+          cls: "weight"
+        }));
+      }
+
+      if (i === 1) {
+        focusPanel.appendChild(H("scatter — the batch is the thing that splits"));
+        focusPanel.appendChild(el("p", { html:
+          "The global batch of " + BATCH + " is cut into " + WORLD + " pieces of " + PERGPU +
+          ". In a real run there is usually no <code>scatter</code> collective at all: each rank's " +
+          "<code>DistributedSampler</code> reads a disjoint slice straight off disk, so the split " +
+          "costs nothing on the wire. Logically it is still a scatter." }));
+        const t = el("table", { class: "arith" });
+        t.appendChild(el("tr", {}, [el("td", { class: "term" }, "rank"),
+          el("td", { class: "term" }, "x (" + M.features.join(", ") + ")"),
+          el("td", { class: "term r" }, "y")]));
+        for (let g = 0; g < WORLD; g++) {
+          t.appendChild(el("tr", {}, [
+            el("td", {}, "GPU " + g + "  ←  sample " + g),
+            el("td", {}, vec(P.model.X[g], 3)),
+            el("td", { class: "r" }, fmt(P.model.Y[g], 3))
+          ]));
+        }
+        focusPanel.appendChild(t);
+      }
+
+      if (i === 2) {
+        focusPanel.appendChild(H("forward — four different predictions, four different losses"));
+        focusPanel.appendChild(el("p", { html:
+          "Same weights, different inputs, so different outputs. Each rank's loss is a mean over " +
+          "its own " + PERGPU + " sample. Note what the mean of those four numbers is:" }));
+        const t = el("table", { class: "arith" });
+        for (let g = 0; g < WORLD; g++) {
+          t.appendChild(el("tr", {}, [
+            el("td", { class: "term" }, "GPU " + g),
+            el("td", { class: "r" }, "ŷ = " + fmt(D.local[g].yhat[0][0], 7)),
+            el("td", { class: "r" }, "L = " + fmt(D.local[g].loss, 7))
+          ]));
+        }
+        t.appendChild(el("tr", { class: "sum" }, [
+          el("td", { class: "term" }, "mean of the " + WORLD + " local losses"),
+          el("td", { class: "r" }, ""),
+          el("td", { class: "r" }, fmt(lossMean, 7))
+        ]));
+        t.appendChild(el("tr", { class: "sum" }, [
+          el("td", { class: "term" }, "single-GPU full-batch loss"),
+          el("td", { class: "r" }, ""),
+          el("td", { class: "r" }, fmt(P.model.loss, 7))
+        ]));
+        focusPanel.appendChild(t);
+        focusPanel.appendChild(el("p", { class: "small muted", html:
+          "Identical to " + (lossErr === 0 ? "the last bit" : fmt(lossErr, 1)) +
+          " (|Δ| = " + (lossErr === 0 ? "0" : fmt(lossErr, 2)) + ", and " +
+          "<code>strategies.ddp.verify.loss_max_err</code> = " + fmt(D.verify.loss_max_err, 2) +
+          "). A mean of equal-sized means is the mean of the whole — which is exactly the property " +
+          "the gradient step below depends on, and exactly the property that breaks when ranks get " +
+          "unequal numbers of samples." }));
+      }
+
+      if (i === 3) {
+        focusPanel.appendChild(H("backward — this is the part people get wrong"));
+        focusPanel.appendChild(el("p", { html:
+          "Each rank ran the ordinary backward pass of page 04 on its own sample. The gradients " +
+          "it produced are <b>not</b> copies of each other. Here is ∂L/∂<code>" + focus.key +
+          "</code> on all " + WORLD + " ranks at once:" }));
+        focusPanel.appendChild(gbars(vals, mean, { mean: false }));
+        const spread = Math.max.apply(null, vals) - Math.min.apply(null, vals);
+        focusPanel.appendChild(el("p", { class: "small", html:
+          "Spread across ranks: <b>" + fmt(spread, 6) + "</b>" +
+          (vals.some(function (v) { return v === 0; })
+            ? ". Some ranks report exactly <b>0</b> here — for their sample the ReLU on that " +
+              "unit was dead, so no gradient flows through it at all. The dead unit from page 02 " +
+              "is sample-dependent, which is precisely why the ranks disagree."
+            : ".") +
+          " Across the whole model, <b>" + NN.count(nDiffer) + " of " + NN.count(NPAR) +
+          "</b> parameters get a different gradient on at least two ranks, and <b>" +
+          NN.count(nSparse) + "</b> have at least one rank reporting a hard zero for a " +
+          "parameter whose full-batch gradient is nonzero." }));
+        focusPanel.appendChild(NN.callout("warn", "IF YOU STOPPED HERE, THE REPLICAS WOULD DIVERGE",
+          "Four different gradients applied to four identical weight copies gives four different " +
+          "weight copies. One step later they are computing different forward passes, and the " +
+          "thing you are training is no longer a single model. The all-reduce is not an " +
+          "optimisation — it is what makes the algorithm correct."));
+      }
+
+      if (i === 4) {
+        focusPanel.appendChild(H("all-reduce — sum across ranks, then scale by 1/" + WORLD));
+        const left = el("div", {}, [ring,
+          el("div", { class: "small muted center", id: "ringcap" },
+            "each node shows its own ∂L/∂" + focus.key)]);
+        const right = el("div", {}, [
+          arithTable(vals, mean),
+          el("p", { class: "small muted", style: { marginTop: "10px" }, html:
+            "One collective, <code>" + D.schedule[0].op + "</code>, over <b>" +
+            NN.count(D.schedule[0].elements) + "</b> elements — every gradient in the model, " +
+            "concatenated into one flat buffer. A ring implementation sends <b>" +
+            fmt(D.schedule[0].sent_per_gpu_elements, 1) + " elements per GPU</b>, which is " +
+            "2(N−1)/N × " + NN.count(D.schedule[0].elements) + ". Page 09 has the ring in detail." })
+        ]);
+        focusPanel.appendChild(el("div", { class: "ringwrap" }, [left, right]));
+        setTimeout(function () {
+          if (my !== token) return;
+          ring.setLabels(vals.map(function () { return tiny(mean); }));
+          const cap = NN.$("#ringcap", focusPanel);
+          if (cap) cap.textContent = "every node now holds the same averaged value";
+          for (let g = 0; g < WORLD; g++) setRow(g, "grad", fms(mean, 6), true, true);
+        }, 900);
+      }
+
+      if (i === 5) {
+        focusPanel.appendChild(H("the proof"));
+        focusPanel.appendChild(el("p", { html:
+          "The averaged value is not <i>close to</i> the answer a single GPU would have got on the " +
+          "whole batch of " + BATCH + ". It is the answer." }));
+        focusPanel.appendChild(NN.formula({
+          rule: "(1/" + WORLD + ") &Sigma;<sub>g</sub> ∂L<sub>g</sub>/∂" + focus.key +
+                " &nbsp;=&nbsp; ∂L/∂" + focus.key + " &nbsp;<span class='muted'>(single GPU, full batch)</span>",
+          sub: fms(mean, 12) + " &nbsp;vs&nbsp; " + fms(full, 12),
+          result: "|Δ| = " + (Math.abs(mean - full) === 0 ? "0 (exact)" : fmt(Math.abs(mean - full), 2)),
+          cls: "gradient"
+        }));
+        focusPanel.appendChild(gbars(vals, mean));
+        focusPanel.appendChild(el("div", { class: "proofline" }, [
+          el("div", { class: "big" }, proofOK ? "✓ verified" : "✗ failed"),
+          el("div", { class: "det" },
+            "all " + NN.count(NPAR) + " parameters checked in this browser · max |Δ| = " +
+            (maxErr === 0 ? "0" : maxErr.toExponential(2))),
+          el("div", { class: "det muted" },
+            "generator says " + D.verify.grad_max_err.toExponential(2) +
+            " · worst parameter " + worstKey)
+        ]));
+        focusPanel.appendChild(el("p", { class: "small", html:
+          "The residual on <code>" + focus.key + "</code> is " +
+          (Math.abs(mean - full) === 0 ? "exactly zero" : Math.abs(mean - full).toExponential(2)) +
+          ", and the worst any of the " + NN.count(NPAR) + " parameters manages is " +
+          (maxErr === 0 ? "zero" : maxErr.toExponential(2)) +
+          ". That is not error in the algorithm — it is float addition being non-associative: " +
+          "summing " + WORLD + " numbers in a different order can land one unit in the last place " +
+          "away from summing them all at once. For reference, fp32's epsilon is " +
+          fmt(T.formats.fp32.epsilon, 2) +
+          ", so the discrepancy is far below anything a single fp32 gradient could even represent " +
+          "as a difference. DDP is mathematically exact; it is only floating point that is not." }));
+        focusPanel.appendChild(el("p", { class: "small muted", html:
+          "Why it is exact and not merely close: the loss is a sum over samples divided by " + BATCH +
+          ", and differentiation is linear. ∂/∂θ of a sum is the sum of the ∂/∂θ. Splitting the " +
+          "sum across ranks and adding the pieces back is the same sum. No approximation was made " +
+          "anywhere — this is the same reason gradient accumulation over micro-batches is exact." }));
+      }
+
+      if (i === 6) {
+        focusPanel.appendChild(H("optimizer step — every rank applies the identical update"));
+        focusPanel.appendChild(NN.formula({
+          rule: focus.key + " ← " + focus.key + " − η · ḡ",
+          sub: fmt(theta(focus), 6) + " − " + fmt(LR, 4) + " × (" + fms(mean, 6) + ")",
+          result: fms(theta(focus) - LR * mean, 6),
+          cls: "optimizer"
+        }));
+        focusPanel.appendChild(el("p", { html:
+          "Every rank starts from the same θ, and after the all-reduce every rank holds the same " +
+          "ḡ. Same inputs, same code, same hardware kernel, so the same bits come out. The " +
+          "replicas are still identical, and will be after the next step, and the one after that. " +
+          "Nothing needs to re-synchronise the weights — <b>weights are never communicated</b> " +
+          "after initialisation. Only gradients move." }));
+        focusPanel.appendChild(el("p", { class: "small muted", html:
+          "The optimizer state (page 05: momentum and variance, " +
+          NN.count(D.memory_per_gpu.optimizer) + " elements here) is also updated identically on " +
+          "every rank, from the identical ḡ. It is pure duplicated work — " + WORLD +
+          " GPUs computing the same Adam update byte for byte. Section 5 makes that the argument " +
+          "for ZeRO." }));
+        focusPanel.appendChild(NN.callout("why", "WHY THIS ORDER MATTERS",
+          "all-reduce <i>then</i> step, never step then average. Averaging weights after " +
+          "independent steps is a different algorithm (it is roughly local SGD / model soup " +
+          "territory), it changes the optimizer's trajectory, and with a stateful optimizer like " +
+          "Adam the two are not even close. DDP puts the collective on the gradient precisely so " +
+          "the optimizer sees exactly what it would have seen on one big GPU."));
+      }
+    }
+
+    const stepper = new NN.Stepper({
+      mount: ctl, count: LABELS.length, labels: LABELS,
+      autoplayMs: 2000, onStep: function (i) { render(i); }
+    });
+    onFocus(function () { render(stepper.i); });
+  }
+
+  /* =====================================================================
+     3 — MEAN vs SUM
+     ===================================================================== */
+  function buildAvg() {
+    const host = NN.$("#avgBody");
+
+    host.appendChild(el("p", { html:
+      "The reduction has to be a <b>mean</b>, and the reason is in the loss definition, not in the " +
+      "networking. This model's loss is a mean over the batch: L = (1/" + BATCH +
+      ") Σ<sub>b</sub> (ŷ<sub>b</sub> − y<sub>b</sub>)². Each rank already divided by its own local " +
+      "batch of " + PERGPU + " when it computed its loss, so each rank holds a <i>per-sample-mean</i> " +
+      "gradient. Averaging those " + WORLD + " means recovers the mean over all " + BATCH +
+      " samples. Summing them does not — it gives " + WORLD + "× too much." }));
+
+    let mode = "mean";
+    const out = el("div", { class: "panel" });
+    const btns = el("div", { class: "pillrow" }, [
+      el("span", { class: "muted small" }, "reduction:")
+    ]);
+    [["mean", "mean  (what DDP does)"], ["sum", "sum  (the bug)"]].forEach(function (m) {
+      const b = el("button", { class: "pill" + (m[0] === mode ? " on" : "") }, m[1]);
+      b.addEventListener("click", function () {
+        mode = m[0];
+        NN.$$("button.pill", btns).forEach(function (x) { x.classList.toggle("on", x === b); });
+        renderAvg();
+      });
+      btns.appendChild(b);
+    });
+    host.appendChild(btns);
+    host.appendChild(out);
+
+    function renderAvg() {
+      const vals = [];
+      for (let g = 0; g < WORLD; g++) vals.push(gLocal(focus, g));
+      const sum = vals.reduce(function (a, b) { return a + b; }, 0);
+      const mean = sum / WORLD;
+      const red = mode === "mean" ? mean : sum;
+      const full = gFull(focus);
+      const step = LR * red;
+      const effLr = mode === "mean" ? LR : LR * WORLD;
+
+      out.innerHTML = "";
+      out.appendChild(el("h4", {}, "∂L/∂" + focus.key + "  ·  reduced by " + mode.toUpperCase()));
+      out.appendChild(NN.formula({
+        rule: "ḡ = " + (mode === "mean" ? "(1/" + WORLD + ") Σ" : "Σ") + "<sub>g</sub> g<sub>g</sub>",
+        sub: (mode === "mean" ? "(" : "") + vals.map(function (v) { return fmt(v, 5); }).join(" + ") +
+             (mode === "mean" ? ") / " + WORLD : ""),
+        result: fms(red, 8),
+        cls: "gradient"
+      }));
+
+      const t = el("table", { class: "arith" });
+      const rows = [
+        ["reduced gradient", fms(red, 8)],
+        ["true full-batch gradient", fms(full, 8)],
+        ["ratio to the truth", fmt(full === 0 ? 1 : red / full, 4) + "×"],
+        ["update  η · ḡ  (η = " + fmt(LR, 4) + ")", fms(step, 8)],
+        ["effective learning rate", fmt(effLr, 4)]
+      ];
+      rows.forEach(function (r, k) {
+        t.appendChild(el("tr", k >= 3 ? { class: "sum" } : {}, [
+          el("td", { class: "term" }, r[0]), el("td", { class: "r" }, r[1])
+        ]));
+      });
+      out.appendChild(t);
+
+      out.appendChild(el("p", { class: "small", style: { marginTop: "12px" }, html:
+        mode === "mean"
+          ? "Exactly the full-batch gradient, so exactly the update a single GPU would have made. " +
+            "The learning rate you tuned on one GPU still means what you thought it meant."
+          : "The reduced gradient is <b>" + WORLD + "×</b> the true one, so the step is <b>" +
+            WORLD + "×</b> too long. Nothing crashes and no assertion fires — the run just " +
+            "behaves as if you set η = " + fmt(effLr, 4) + " instead of " + fmt(LR, 4) +
+            ". On a real model that is usually a loss spike or a silent quality regression, not " +
+            "a stack trace. Note this is a scaling bug, not a direction bug: sum and mean point " +
+            "the same way." }));
+    }
+    renderAvg();
+    onFocus(renderAvg);
+
+    host.appendChild(NN.callout("key", "THIS IS WHY LEARNING RATE IS TIED TO WORLD SIZE",
+      "The reduction fixes the gradient's <i>scale</i>, but not its <i>statistics</i>. Doubling the " +
+      "world size at fixed per-GPU batch doubles the global batch, which halves the variance of the " +
+      "gradient estimate. A less noisy gradient can support a longer step, so the conventional " +
+      "response — the <b>linear scaling rule</b> — is to scale the learning rate in proportion to " +
+      "the global batch size, and to precede it with a <b>warmup</b>, because that scaled rate " +
+      "is unstable at initialisation. This is empirical practice, tuned per model; it is not " +
+      "implied by any of the arithmetic above. What the arithmetic does say is that changing world " +
+      "size changes your effective optimisation problem, so a config that trained at one world size " +
+      "is not automatically valid at another."));
+
+    host.appendChild(el("p", { class: "small muted", html:
+      "One sharp edge worth knowing: mean-of-means equals the global mean only when every rank has " +
+      "the same number of samples. Here each rank has " + PERGPU +
+      ", so it holds. A ragged final batch, or a rank that runs out of data first, silently " +
+      "reweights the loss toward the ranks with fewer samples. Frameworks handle it with a " +
+      "drop-last sampler or an explicit join protocol; if you write the reduction yourself, this " +
+      "is the bug you will write." }));
+  }
+
+  /* =====================================================================
+     4 — BUCKETING AND OVERLAP
+     ===================================================================== */
+  function buildOverlap() {
+    const host = NN.$("#ovBody");
+
+    /* reversed layer order: backward produces the last layer's gradients first */
+    const revL = [];
+    for (let L = NL - 1; L >= 0; L--) revL.push(L);
+    const arFactor = 2 * (WORLD - 1) / WORLD;     // ring all-reduce, elements sent per GPU
+
+    host.appendChild(el("p", { html:
+      "Everything above treated the all-reduce as one blocking event after backward. Real DDP does " +
+      "not do that, and the reason is a scheduling observation: <b>gradients become ready during " +
+      "backward, layer by layer, in reverse order</b>. The last layer's gradient exists while the " +
+      "first layer's backward has not started. There is no reason to let the wire sit idle for " +
+      "that whole window." }));
+
+    host.appendChild(el("p", { html:
+      "So DDP groups gradients into <b>buckets</b> and fires an all-reduce for a bucket the moment " +
+      "its last gradient lands, while the rest of backward keeps computing. Communication hides " +
+      "under compute. The timeline below models it with this model's real layer sizes — " +
+      P.model.layer_params.map(function (p, L) { return "W" + (L + 1) + "+b" + (L + 1) + " = " + p; })
+        .join(", ") + " parameters — under an explicit cost model you can adjust." }));
+
+    const state = { cap: 81, link: 2, lat: 12, overlap: true };
+
+    const ctls = el("div", { class: "ctlgrid" });
+    function slider(key, label, min, max, stepv, fmtv) {
+      const rv = el("span", { class: "rv" }, fmtv(state[key]));
+      const inp = el("input", { type: "range", min: min, max: max, step: stepv, value: state[key] });
+      inp.addEventListener("input", function () {
+        state[key] = parseFloat(inp.value); rv.textContent = fmtv(state[key]); renderOv();
+      });
+      return el("div", { class: "fld" }, [
+        el("label", {}, [el("span", { html: label }), rv]), inp
+      ]);
+    }
+    ctls.appendChild(slider("cap", "bucket cap (params)", 1, NPAR, 1,
+      function (v) { return NN.count(v); }));
+    ctls.appendChild(slider("link", "link speed (elems / time unit)", 0.5, 8, 0.5,
+      function (v) { return fmt(v, 1); }));
+    ctls.appendChild(slider("lat", "per-message latency (time units)", 0, 40, 1,
+      function (v) { return fmt(v, 0); }));
+
+    const chk = el("input", { type: "checkbox" });
+    chk.checked = state.overlap;
+    chk.addEventListener("change", function () { state.overlap = chk.checked; renderOv(); });
+    ctls.appendChild(el("div", { class: "fld chk" }, [
+      el("label", {}, [chk, el("span", {}, "overlap comm with backward")])
+    ]));
+    host.appendChild(ctls);
+
+    const tlHost = el("div", { class: "panel" });
+    const tileHost = el("div");
+    const noteHost = el("div");
+    host.appendChild(tileHost);
+    host.appendChild(tlHost);
+    host.appendChild(noteHost);
+
+    /* ---- the cost model ---------------------------------------------- */
+    function simulate(overlap, cap) {
+      /* backward compute: one time unit per parameter whose gradient it produces */
+      const blocks = [];
+      let t = 0;
+      revL.forEach(function (L) {
+        const d = P.model.layer_params[L];
+        blocks.push({ L: L, start: t, end: t + d, size: d });
+        t += d;
+      });
+      const backEnd = t;
+
+      /* greedy buckets in gradient-ready order */
+      const buckets = [];
+      let acc = [], accSize = 0;
+      blocks.forEach(function (b) {
+        acc.push(b); accSize += b.size;
+        if (accSize >= cap) {
+          buckets.push({ layers: acc, size: accSize, ready: b.end });
+          acc = []; accSize = 0;
+        }
+      });
+      if (acc.length) {
+        buckets.push({ layers: acc, size: accSize, ready: acc[acc.length - 1].end });
+      }
+
+      /* one comm stream, serialised */
+      let free = overlap ? 0 : backEnd;
+      buckets.forEach(function (bk, k) {
+        const dur = state.lat + arFactor * bk.size / state.link;
+        const s = Math.max(overlap ? bk.ready : backEnd, free);
+        bk.start = s; bk.end = s + dur; bk.dur = dur; bk.idx = k;
+        free = bk.end;
+      });
+
+      const wall = Math.max(backEnd, buckets.length ? buckets[buckets.length - 1].end : backEnd);
+      return { blocks: blocks, buckets: buckets, backEnd: backEnd, wall: wall };
+    }
+
+    function renderOv() {
+      const on  = simulate(true,  state.cap);
+      const off = simulate(false, state.cap);
+      const cur = state.overlap ? on : off;
+      const scale = Math.max(on.wall, off.wall);
+      const saving = off.wall - on.wall;
+
+      /* tiles */
+      tileHost.innerHTML = "";
+      tileHost.appendChild(NN.tiles([
+        { k: "buckets", v: String(cur.buckets.length),
+          s: cur.buckets.map(function (b) { return b.size; }).join(" + ") + " params" },
+        { k: "backward compute", v: fmt(cur.backEnd, 0), s: "time units, fixed", cls: "gradient" },
+        { k: "wall clock", v: fmt(cur.wall, 0),
+          s: state.overlap ? "with overlap" : "no overlap", cls: "gradient" },
+        { k: "overlap saves", v: fmt(saving, 0) + " u",
+          s: fmt(off.wall ? saving / off.wall * 100 : 0, 1) + "% of the step" }
+      ]));
+
+      /* timeline */
+      tlHost.innerHTML = "";
+      tlHost.appendChild(el("h4", {}, "one backward pass  ·  " +
+        (state.overlap ? "comm overlapped" : "comm serialised after backward")));
+
+      const X = function (v) { return v / scale * 100; };
+
+      const computeTrack = el("div", { class: "tltrack" });
+      cur.blocks.forEach(function (b) {
+        computeTrack.appendChild(el("div", {
+          class: "tlblk compute",
+          style: { left: X(b.start) + "%", width: X(b.end - b.start) + "%" },
+          title: "backward of layer " + (b.L + 1) + " — " + b.size +
+                 " params, t " + fmt(b.start, 0) + "→" + fmt(b.end, 0)
+        }, "L" + (b.L + 1)));
+      });
+      computeTrack.appendChild(el("div", { class: "tlmark", style: { left: X(cur.backEnd) + "%" },
+        title: "backward ends at " + fmt(cur.backEnd, 0) }));
+
+      const commTrack = el("div", { class: "tltrack" });
+      cur.buckets.forEach(function (b) {
+        commTrack.appendChild(el("div", {
+          class: "tlblk comm",
+          style: { left: X(b.start) + "%", width: X(b.end - b.start) + "%" },
+          title: "all-reduce bucket " + b.idx + " — " + b.size + " params (" +
+                 b.layers.map(function (l) { return "L" + (l.L + 1); }).join("+") + "), " +
+                 fmt(arFactor * b.size, 1) + " elems sent/GPU, t " +
+                 fmt(b.start, 0) + "→" + fmt(b.end, 0)
+        }, "AR" + b.idx));
+      });
+      commTrack.appendChild(el("div", { class: "tlmark wall", style: { left: X(cur.wall) + "%" },
+        title: "wall clock " + fmt(cur.wall, 0) }));
+
+      tlHost.appendChild(el("div", { class: "tlrow" }, [
+        el("div", { class: "tlname" }, "backward"), computeTrack]));
+      tlHost.appendChild(el("div", { class: "tlrow" }, [
+        el("div", { class: "tlname" }, "all-reduce"), commTrack]));
+
+      const axis = el("div", { class: "tlaxis" });
+      [0, 0.25, 0.5, 0.75, 1].forEach(function (f) {
+        axis.appendChild(el("span", { style: { left: (f * 100) + "%" } }, fmt(f * scale, 0)));
+      });
+      tlHost.appendChild(el("div", { class: "tlrow" }, [
+        el("div", { class: "tlname" }, "time units"), axis]));
+
+      tlHost.appendChild(el("div", { class: "small muted", html:
+        "Cost model, stated so you can argue with it: backward costs 1 time unit per parameter " +
+        "whose gradient it produces (a stand-in for the layer's FLOPs); a bucket's all-reduce " +
+        "sends 2(N−1)/N × size = " + fmt(arFactor, 2) + " × size elements per GPU at " +
+        fmt(state.link, 1) + " elems/unit, plus " + fmt(state.lat, 0) +
+        " units of fixed latency per message; the comm stream is serialised. Real runs have " +
+        "several streams, kernel launch overhead and a non-linear bandwidth curve." }));
+
+      /* the tradeoff narrative, derived from the current sim */
+      const nb = cur.buckets.length;
+      const totalLat = nb * state.lat;
+      const totalWire = arFactor * NPAR / state.link;
+      noteHost.innerHTML = "";
+      noteHost.appendChild(el("p", { class: "small", html:
+        "Right now: <b>" + nb + "</b> bucket" + (nb === 1 ? "" : "s") + ", so <b>" +
+        fmt(totalLat, 0) + "</b> time units go to per-message latency and <b>" +
+        fmt(totalWire, 0) + "</b> to actually moving the " +
+        fmt(arFactor * NPAR, 1) + " elements each GPU must send. " +
+        (saving > 0
+          ? "Overlap hides <b>" + fmt(saving, 0) + "</b> units of that behind compute."
+          : "Overlap saves nothing at this setting — either the first bucket is not ready until " +
+            "backward is nearly done, or the link is fast enough that comm was never the problem.") }));
+
+      noteHost.appendChild(el("p", { html:
+        "Drag the bucket cap to both ends. <b>Too small</b> and you pay the fixed per-message cost " +
+        "over and over — a collective has a latency floor that does not care how few bytes you " +
+        "give it, so many tiny all-reduces run at a fraction of the link's bandwidth. <b>Too " +
+        "large</b> and the bucket is not complete until late in backward, so there is nothing left " +
+        "to hide the transfer under; at a cap of " + NN.count(NPAR) +
+        " you are back to one all-reduce after backward, which is where this page started. " +
+        "The useful bucket size is the smallest one that still amortises the latency — which is " +
+        "why real implementations cap buckets by <i>bytes</i> rather than by layers, and why the " +
+        "default is large enough that a small model ends up with a single bucket." }));
+    }
+    renderOv();
+
+    host.appendChild(NN.callout("why", "WHAT THIS COSTS YOU IN CORRECTNESS: NOTHING, BUT",
+      "Bucketing changes only the <i>schedule</i>, not the arithmetic — the same " +
+      NN.count(NPAR) + " gradients get the same average. It does add real constraints: the bucket " +
+      "layout is decided from the order gradients arrived on the first iteration, so a model whose " +
+      "control flow changes shape between steps (a branch that skips a layer, an unused output) " +
+      "will have parameters that never get a gradient, and the bucket that is waiting on them never " +
+      "fires. That is the deadlock behind <code>find_unused_parameters</code>, and it is a " +
+      "scheduling bug, not a maths bug."));
+
+    host.appendChild(NN.callout("mem", "AT REAL SCALE",
+      (function () {
+        const big = T.reference_configs.models.find(function (m) { return m.name === T.reference_configs.default_model; });
+        const bytes = arFactor * big.params * T.memory.dtype_bytes.bf16;
+        return "For " + big.name + " (" + NN.count(big.params) + " parameters) the same " +
+          "all-reduce moves 2(N−1)/N × " + NN.count(big.params) + " = " + NN.count(arFactor * big.params) +
+          " elements per GPU per step, which in bf16 is <b>" + NN.bytes(bytes) + " sent by every " +
+          "GPU, every step</b>, at world size " + WORLD + " — and the ring factor barely grows " +
+          "after that, approaching 2× the parameter count as the world gets large. That is the " +
+          "number bucketing and overlap exist to hide. Model sizes are quoted from " +
+          "<code>T.reference_configs</code> (" + T.reference_configs._source + ").";
+      })()));
+  }
+
+  /* =====================================================================
+     5 — WHAT DDP DOES NOT FIX
+     ===================================================================== */
+  function buildMem() {
+    const host = NN.$("#memBody");
+    const mem  = D.memory_per_gpu;
+    const actsOne = P.model.activation_elements;
+    const actsDdp = actsOne / mem.activations_divisor;
+
+    const oneTotal = mem.weights + mem.gradients + mem.optimizer + actsOne;
+    const ddpTotal = mem.weights + mem.gradients + mem.optimizer + actsDdp;
+    const stateShare = (mem.weights + mem.gradients + mem.optimizer) / ddpTotal;
+
+    host.appendChild(el("p", { html:
+      "DDP is a throughput technique. It buys you " + WORLD + "× the samples per step. It does " +
+      "<b>not</b> buy you memory — and this is the honest limit of the whole approach: " +
+      "<i>" + D.drawback + "</i>" }));
+
+    host.appendChild(el("p", { html:
+      "Counted in elements, per GPU, for this model. The only term that moves is activations, " +
+      "because each GPU forwards " + PERGPU + " sample instead of " + BATCH + ":" }));
+
+    const items = function (acts, label) {
+      return [
+        { label: "weights", value: mem.weights, color: "var(--weight)", sub: "· replicated" },
+        { label: "gradients", value: mem.gradients, color: "var(--gradient)", sub: "· replicated" },
+        { label: "optimizer state", value: mem.optimizer, color: "var(--optimizer)", sub: "· replicated" },
+        { label: "activations", value: acts, color: "var(--activation)", sub: label }
+      ];
+    };
+    const maxBar = Math.max(mem.optimizer, actsOne) * 1.05;
+
+    host.appendChild(el("div", { class: "grid2" }, [
+      el("div", { class: "panel" }, [
+        el("h4", {}, "1 GPU · batch " + BATCH),
+        NN.chart.bars({ items: items(actsOne, "· batch " + BATCH), unit: "elems", max: maxBar }),
+        el("div", { class: "small muted", style: { marginTop: "8px" } },
+          "total resident " + NN.count(oneTotal) + " elements")
+      ]),
+      el("div", { class: "panel" }, [
+        el("h4", {}, WORLD + " GPUs · DDP · per GPU"),
+        NN.chart.bars({ items: items(actsDdp, "· batch " + PERGPU + " ÷ " + mem.activations_divisor),
+                        unit: "elems", max: maxBar }),
+        el("div", { class: "small muted", style: { marginTop: "8px" } },
+          "total resident " + NN.count(ddpTotal) + " elements")
+      ])
+    ]));
+    host.appendChild(NN.legend(["weight", "gradient", "activation", "optimizer"]));
+
+    const B32 = T.memory.dtype_bytes.fp32;
+    const strip = function (acts) {
+      return NN.memstrip([
+        { cls: "weight", bytes: mem.weights * B32, label: "weights" },
+        { cls: "gradient", bytes: mem.gradients * B32, label: "gradients" },
+        { cls: "optimizer", bytes: mem.optimizer * B32, label: "optimizer" },
+        { cls: "activation", bytes: acts * B32, label: "activations" }
+      ], oneTotal * B32);
+    };
+    host.appendChild(el("div", { class: "panel" }, [
+      el("h4", {}, "the same census as one bar each, in fp32 bytes"),
+      el("div", { class: "small muted", style: { marginBottom: "4px" } },
+        "1 GPU, batch " + BATCH + " — " + NN.bytes(oneTotal * B32)),
+      strip(actsOne),
+      el("div", { class: "small muted", style: { margin: "10px 0 4px" } },
+        "DDP, per GPU, batch " + PERGPU + " — " + NN.bytes(ddpTotal * B32) +
+        " (both bars drawn to the same total, so the shrink is the visible gap)"),
+      strip(actsDdp)
+    ]));
+
+    host.appendChild(NN.tiles([
+      { k: "saved by DDP", v: NN.count(oneTotal - ddpTotal) + " elems",
+        s: fmt((oneTotal - ddpTotal) / oneTotal * 100, 1) + "% of the bill", cls: "activation" },
+      { k: "untouched", v: NN.count(mem.weights + mem.gradients + mem.optimizer) + " elems",
+        s: fmt(stateShare * 100, 1) + "% of what is resident, replicated " + WORLD + "×" },
+      { k: "counting all " + WORLD + " GPUs", v: NN.count((mem.weights + mem.gradients + mem.optimizer) * WORLD),
+        s: "elements of model state for one model" }
+    ]));
+
+    host.appendChild(el("p", { html:
+      "Read the middle tile again. " + fmt(stateShare * 100, 1) + "% of every GPU's resident " +
+      "memory is an exact duplicate of what the other " + (WORLD - 1) + " GPUs are holding. " +
+      "Across the group, " + NN.count((mem.weights + mem.gradients + mem.optimizer) * WORLD) +
+      " elements of storage are being spent on " + NN.count(mem.weights + mem.gradients + mem.optimizer) +
+      " elements of distinct information. Every rank also recomputes the identical optimizer " +
+      "update on identical inputs, which is " + WORLD + "× the arithmetic for one result." }));
+
+    host.appendChild(NN.callout("mem", "AND THIS IS WHY PAGE 11 EXISTS",
+      "If the model does not fit on one GPU, DDP does not help you — it needs the model to fit " +
+      WORLD + " times. Page 08 did this arithmetic at " +
+      NN.count(T.reference_configs.models.find(function (m) {
+        return m.name === T.reference_configs.default_model; }).params) +
+      " parameters and it does not fit. The observation that unlocks the next page is that the " +
+      "duplication is <i>pointless</i>: rank g only ever applies the optimizer update to the " +
+      "whole parameter vector because we handed it the whole gradient. Hand each rank only the " +
+      "shard it will actually update — replace the all-reduce with a reduce-scatter — and the " +
+      "optimizer state and gradient bills divide by " + WORLD + " with no change to the maths. " +
+      "That is <a href='11-zero-fsdp.html'>ZeRO</a>, and its stage 3 goes on to shard the weights " +
+      "themselves."));
+  }
+
+  /* =====================================================================
+     6 — SCALING LIMITS
+     ===================================================================== */
+  function buildLimits() {
+    const host = NN.$("#limBody");
+
+    host.appendChild(el("p", { html:
+      "Global batch = per-GPU batch × world size. That is not a tuning knob you can hold fixed " +
+      "while adding GPUs: at fixed per-GPU batch, every GPU you add makes the batch bigger. Here, " +
+      PERGPU + " × " + WORLD + " = " + BATCH + "." }));
+
+    host.appendChild(el("p", { html:
+      "The communication side scales fine, and the ring table from page 09 says why: a ring " +
+      "all-reduce sends 2(N−1)/N × S elements per GPU, which approaches 2S and then stops. " +
+      "Doubling the world size does not double what each GPU sends." }));
+
+    const t = el("table", { class: "data" });
+    t.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "world"), el("th", {}, "global batch"),
+      el("th", {}, "optimizer steps / epoch, vs world " + WORLD),
+      el("th", {}, "all-reduce sent per GPU"),
+      el("th", {}, "vs world " + WORLD)
+    ])));
+    const base = 2 * (WORLD - 1) / WORLD;
+    const tb = el("tbody");
+    P.ring.table.forEach(function (r) {
+      const isNow = r.world === WORLD;
+      tb.appendChild(el("tr", isNow ? { class: "hi" } : {}, [
+        el("td", {}, String(r.world)),
+        el("td", { class: "n" }, NN.count(PERGPU * r.world)),
+        el("td", { class: "n" }, fmt(WORLD / r.world, 3) + "×"),
+        el("td", { class: "n" }, fmt(r.all_reduce, 4) + " × S"),
+        el("td", { class: "n" }, fmt(r.all_reduce / base, 3) + "×")
+      ]));
+    });
+    t.appendChild(tb);
+    host.appendChild(el("div", { class: "scrollx" }, t));
+    host.appendChild(el("p", { class: "small muted", html:
+      "World sizes and all-reduce factors from <code>PARALLEL.ring.table</code>; the batch and " +
+      "step columns are that table's world sizes applied to this model's per-GPU batch of " +
+      PERGPU + ". The highlighted row is the configuration on this page." }));
+
+    host.appendChild(el("p", { html:
+      "The third column is the problem. An epoch is a fixed number of samples, so doubling the " +
+      "global batch halves the number of optimizer steps you take over it. Each step is better " +
+      "informed — gradient noise falls roughly with the square root of the batch — but you take " +
+      "half as many of them. Past some batch size the trade stops paying: the extra samples buy " +
+      "less and less variance reduction, while the lost steps are lost outright, and beyond that " +
+      "point the run converges to a worse point or takes more epochs to reach the same one." }));
+
+    host.appendChild(NN.callout("warn", "BE PRECISE ABOUT WHAT IS KNOWN HERE",
+      "There is no theorem that gives you the critical batch size. It is an <b>empirical</b> " +
+      "property of a specific model, dataset, optimizer and schedule, measured by training and " +
+      "looking. What is reliably observed is the shape: below some scale, doubling the batch and " +
+      "the learning rate together gets you close to the same result in half the steps; above it, " +
+      "that stops working and returns flatten. Where the knee sits moves with model size — larger " +
+      "models generally tolerate larger batches — and it can be pushed around by the optimizer and " +
+      "by regularisation. Treat any specific number you read as a measurement of someone else's " +
+      "run, not a constant."));
+
+    host.appendChild(el("p", { html:
+      "So the ceiling on data parallelism is statistical, not architectural. Long before the wire " +
+      "gives up, you reach a global batch that stops improving the model, and adding GPUs to the " +
+      "data-parallel dimension buys nothing. At that point the extra GPUs have to be spent " +
+      "differently: shard the state instead of replicating it (<a href='11-zero-fsdp.html'>ZeRO " +
+      "and FSDP</a>), cut the weight matrices (<a href='12-tensor-parallel.html'>tensor " +
+      "parallel</a>), or cut the layers (<a href='13-pipeline-parallel.html'>pipeline " +
+      "parallel</a>) — and in practice, all of them at once " +
+      "(<a href='14-3d-parallelism.html'>3D parallelism</a>). Data parallelism remains the outer " +
+      "dimension of every one of those combinations, which is why it was worth pinning down " +
+      "exactly what it computes." }));
+
+    host.appendChild(NN.callout("key", "WHAT TO TAKE AWAY",
+      "<b>1.</b> Every GPU holds the whole model; the batch is what splits. " +
+      "<b>2.</b> The per-GPU gradients genuinely differ — " + NN.count(nDiffer) + " of " +
+      NN.count(NPAR) + " parameters disagree across ranks here — and averaging them reproduces " +
+      "the full-batch gradient to " + (maxErr === 0 ? "the bit" : maxErr.toExponential(2)) +
+      ". DDP is exact. <b>3.</b> It must be a mean, because the loss is a mean; a sum is a " +
+      "silent " + WORLD + "× learning rate. <b>4.</b> The all-reduce overlaps with backward via " +
+      "buckets, which is a scheduling win, not a maths change. <b>5.</b> The memory bill does not " +
+      "improve at all, which is the entire motivation for the next page."));
+  }
+
+  /* ------------------------------------------------------------- boot */
+  buildIdea();
+  buildStep();
+  buildAvg();
+  buildOverlap();
+  buildMem();
+  buildLimits();
+
+  NN.page("dataparallel");
+
+  const foot = NN.$("#sitefoot");
+  if (foot) {
+    foot.innerHTML +=
+      " The distributed numbers on this page come from <code>code/parallel_toy.py</code> via " +
+      "<code>assets/data/parallel.js</code>; the averaging proof is re-run over all " +
+      NN.count(NPAR) + " parameters in your browser on load (max |Δ| = " +
+      (maxErr === 0 ? "0" : maxErr.toExponential(2)) + ").";
+  }
+})();
+</script>
+</body>
+</html>

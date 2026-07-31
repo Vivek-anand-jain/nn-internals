@@ -510,9 +510,37 @@ def run_pipeline_parallel(base, n_micro=4):
     # (M + P - 1), so:
     bubble = (WORLD - 1) / (n_micro + WORLD - 1)
 
-    # A 1F1B schedule has the SAME bubble fraction but holds far fewer
-    # activations live at once, which is why it is what everyone uses.
-    schedule_grid = build_pipeline_grid(WORLD, n_micro)
+    # Both schedules, correctly labelled, with their measured statistics.
+    gpipe = build_gpipe_grid(WORLD, n_micro)
+    f1b1 = build_1f1b_grid(WORLD, n_micro)
+    gpipe_stats = grid_stats(gpipe, WORLD, n_micro)
+    f1b1_stats = grid_stats(f1b1, WORLD, n_micro)
+
+    # ---- PP actually changes nothing: prove it -------------------------
+    # Run the batch as n_micro micro-batches, accumulating gradients, and
+    # compare against the full-batch result. This is the real claim behind
+    # pipelining (and behind gradient accumulation generally): summing the
+    # per-micro-batch gradients reproduces the full-batch gradient.
+    mb = max(1, BATCH // n_micro)
+    accW = [zeros(len(Ws[L]), len(Ws[L][0])) for L in range(N_LAYERS)]
+    accb = [[0.0] * len(bs[L]) for L in range(N_LAYERS)]
+    n_mb = 0
+    for start in range(0, BATCH, mb):
+        Xm, Ym = X[start:start + mb], Y[start:start + mb]
+        if not Xm:
+            continue
+        n_mb += 1
+        yh, cm = forward(Ws, bs, Xm)
+        _, dYm, _ = loss_and_grad_out(yh, Ym)
+        dWm, dbm = backward(Ws, bs, cm, dYm)
+        for L in range(N_LAYERS):
+            accW[L] = madd(accW[L], dWm[L])
+            accb[L] = [accb[L][i] + dbm[L][i] for i in range(len(accb[L]))]
+    accW = [scale(m, 1.0 / n_mb) for m in accW]
+    accb = [[v / n_mb for v in r] for r in accb]
+    acc_err = max(max(maxdiff(accW[L], base["dWs"][L]),
+                      maxdiff(accb[L], base["dbs"][L]))
+                  for L in range(N_LAYERS))
 
     return {
         "name": "Pipeline Parallel",
@@ -522,17 +550,42 @@ def run_pipeline_parallel(base, n_micro=4):
         "n_micro": n_micro,
         "bubble_fraction": bubble,
         "bubble_formula": "(P-1)/(M+P-1)",
-        "grid": schedule_grid,
-        "verify": {"claim": "Pipeline parallelism does not change the maths "
-                            "at all -- it reorders WHEN each layer runs, not "
-                            "what it computes. The single-GPU result is "
-                            "reproduced by construction.",
-                   "passed": True, "forward_max_err": 0.0},
+        # `grid` is kept for compatibility and IS the GPipe schedule.
+        "grid": gpipe,
+        "schedules": {
+            "gpipe": {"grid": gpipe, "stats": gpipe_stats,
+                      "what": "All forwards, then all backwards.",
+                      "peak_activations": "O(M) -- every micro-batch's "
+                                          "activations stay live until its "
+                                          "backward finally runs."},
+            "1f1b": {"grid": f1b1, "stats": f1b1_stats,
+                     "what": "Warm up, then alternate one forward with one "
+                             "backward, then drain.",
+                     "peak_activations": "O(P) -- a micro-batch's activations "
+                                         "are freed as soon as its backward "
+                                         "passes through, so only about P "
+                                         "are ever live."},
+        },
+        "verify": {"claim": "Pipelining does not change the maths. Running "
+                            "the batch as micro-batches and accumulating the "
+                            "gradients reproduces the full-batch gradient.",
+                   "passed": acc_err < 1e-12,
+                   "forward_max_err": 0.0,
+                   "grad_max_err": acc_err,
+                   "n_micro_batches": n_mb,
+                   "note": "This is also the proof that gradient accumulation "
+                           "is equivalent to a larger batch."},
         "schedule": sched,
+        # Per-stage, because the average hides the imbalance: the four stages
+        # here hold 40 / 72 / 72 / 9 parameters, not 48 each.
+        "params_per_stage": [s["params"] for s in stages],
         "memory_per_gpu": {"weights": sum(s["params"] for s in stages) // WORLD,
                            "gradients": sum(s["params"] for s in stages) // WORLD,
                            "optimizer": 2 * sum(s["params"] for s in stages) // WORLD,
-                           "activations_divisor": 1},
+                           "activations_divisor": 1,
+                           "caveat": "These are AVERAGES over stages. No stage "
+                                     "actually holds this much -- see "
+                                     "params_per_stage."},
         "drawback": f"The bubble. With {n_micro} micro-batches over {WORLD} "
                     f"stages, {bubble*100:.0f}% of every GPU's time is idle. "
                     "More micro-batches shrink it but hold more activations "
@@ -542,18 +595,21 @@ def run_pipeline_parallel(base, n_micro=4):
     }
 
 
-def build_pipeline_grid(P, M):
+def build_gpipe_grid(P, M):
     """
-    A 1F1B occupancy grid: grid[stage][slot] is 'F<m>', 'B<m>' or None.
-    This is what the site animates as the pipeline filling and draining.
+    GPipe occupancy grid: ALL forwards, then all backwards.
+    grid[stage][slot] is 'F<m>', 'B<m>' or None (idle -- the bubble).
+
+    (This function used to be labelled 1F1B, which was simply wrong: the
+    construction below runs every forward before any backward, which is
+    GPipe by definition. Page 13 caught the mislabelling. The genuine 1F1B
+    schedule is built by build_1f1b_grid.)
     """
     total = 2 * M + 2 * (P - 1)
     grid = [[None] * total for _ in range(P)]
-    # forward of micro m starts on stage s at time s + m
     for m in range(M):
         for s in range(P):
             grid[s][s + m] = f"F{m}"
-    # backward starts after the last stage's forward, walking back up
     base_t = M + P - 1
     for m in range(M):
         for s in range(P - 1, -1, -1):
@@ -561,6 +617,107 @@ def build_pipeline_grid(P, M):
             if t < total:
                 grid[s][t] = f"B{m}"
     return grid
+
+
+def build_1f1b_grid(P, M):
+    """
+    A genuine 1F1B (PipeDream-Flush) schedule, built by simulating the
+    dependencies rather than by drawing a picture.
+
+    Per-stage operation order: stage s runs (P-1-s) warm-up forwards, then
+    alternates backward/forward through the steady state, then drains the
+    remaining backwards. That ordering is the whole trick -- it starts
+    freeing activations as early as possible, so peak live activations is
+    O(P) instead of GPipe's O(M), for the SAME bubble fraction.
+
+    Dependencies:
+        F(m,s) needs F(m,s-1) finished
+        B(m,s) needs B(m,s+1) finished, except the last stage where
+        B(m,P-1) needs F(m,P-1) finished.
+    """
+    order = []
+    for s in range(P):
+        w = min(P - 1 - s, M)
+        ops = [("F", m) for m in range(w)]
+        m_f, m_b = w, 0
+        while m_f < M:
+            ops.append(("F", m_f)); m_f += 1
+            ops.append(("B", m_b)); m_b += 1
+        while m_b < M:
+            ops.append(("B", m_b)); m_b += 1
+        order.append(ops)
+
+    done = {}                      # (kind, m, s) -> finish slot
+    idx = [0] * P                  # next op index per stage
+    grid_cols = []
+    t = 0
+    guard = 0
+    while any(idx[s] < len(order[s]) for s in range(P)):
+        guard += 1
+        if guard > 10000:
+            break
+        col = [None] * P
+        for s in range(P):
+            if idx[s] >= len(order[s]):
+                continue
+            kind, m = order[s][idx[s]]
+            if kind == "F":
+                ready = s == 0 or ("F", m, s - 1) in done
+            else:
+                ready = (("F", m, P - 1) in done) if s == P - 1 \
+                        else ("B", m, s + 1) in done
+            if ready:
+                col[s] = f"{kind}{m}"
+        # commit this slot
+        for s in range(P):
+            if col[s] is not None:
+                kind, m = order[s][idx[s]]
+                done[(kind, m, s)] = t
+                idx[s] += 1
+        grid_cols.append(col)
+        t += 1
+
+    # transpose to grid[stage][slot]
+    T = len(grid_cols)
+    return [[grid_cols[t][s] for t in range(T)] for s in range(P)]
+
+
+def peak_live_activations(grid, P, M):
+    """
+    For each stage, the maximum number of micro-batches whose forward has
+    completed but whose backward has not. That count is what actually sets
+    activation memory, and it is the ONLY thing separating GPipe from 1F1B.
+    """
+    T = len(grid[0])
+    peaks = []
+    for s in range(P):
+        live, peak = set(), 0
+        for t in range(T):
+            v = grid[s][t]
+            if not v:
+                continue
+            kind, m = v[0], int(v[1:])
+            if kind == "F":
+                live.add(m)
+            else:
+                live.discard(m)
+            peak = max(peak, len(live))
+        peaks.append(peak)
+    return peaks
+
+
+def grid_stats(grid, P, M):
+    """Occupancy, bubble and peak activations for a schedule."""
+    T = len(grid[0])
+    busy = sum(1 for s in range(P) for t in range(T) if grid[s][t])
+    slots = P * T
+    peaks = peak_live_activations(grid, P, M)
+    return {
+        "slots": T, "busy_cells": busy, "total_cells": slots,
+        "bubble_measured": round(1 - busy / slots, 6),
+        "peak_live_per_stage": peaks,
+        "peak_live": max(peaks),
+    }
 
 
 # ============================================================================
@@ -706,6 +863,51 @@ def build():
                                    for L in range(N_LAYERS)]},
         "collectives": COLLECTIVES,
         "strategies": strategies,
+        # ------------------------------------------------------------------
+        # Interconnect bandwidths. These are QUOTED vendor figures, external
+        # to the simulation, and approximate. Two precision points that
+        # matter and are usually fudged:
+        #   * NVLink is normally quoted BIDIRECTIONAL aggregate per GPU.
+        #     A ring all-reduce sends and receives simultaneously, so the
+        #     useful number for the cost model is the per-direction half.
+        #   * Network links are quoted in GIGABITS. 400 Gb/s is 50 GB/s
+        #     before protocol overhead, and real achieved bandwidth is
+        #     lower again.
+        # Both `bidir_GBps` and `per_dir_GBps` are given so a page cannot
+        # accidentally use the wrong one.
+        # ------------------------------------------------------------------
+        "interconnects": {
+            "_source": "vendor specifications; approximate, external to this "
+                       "simulation, and quoted rather than measured",
+            "links": [
+                {"name": "NVLink 4 (H100)", "scope": "intra-node",
+                 "bidir_GBps": 900, "per_dir_GBps": 450,
+                 "note": "per GPU, aggregate across all its NVLink ports"},
+                {"name": "NVLink 3 (A100)", "scope": "intra-node",
+                 "bidir_GBps": 600, "per_dir_GBps": 300},
+                {"name": "NVLink 5 (B200)", "scope": "intra-node",
+                 "bidir_GBps": 1800, "per_dir_GBps": 900},
+                {"name": "PCIe Gen5 x16", "scope": "intra-node",
+                 "bidir_GBps": 128, "per_dir_GBps": 64,
+                 "note": "the fallback when NVLink is absent"},
+                {"name": "InfiniBand NDR (400 Gb/s)", "scope": "inter-node",
+                 "bidir_GBps": 100, "per_dir_GBps": 50,
+                 "note": "50 GB/s per direction per port, before overhead"},
+                {"name": "InfiniBand XDR (800 Gb/s)", "scope": "inter-node",
+                 "bidir_GBps": 200, "per_dir_GBps": 100},
+                {"name": "RoCE 400 GbE", "scope": "inter-node",
+                 "bidir_GBps": 100, "per_dir_GBps": 50,
+                 "note": "RDMA over Converged Ethernet"},
+            ],
+            "why_it_matters": "Intra-node links are roughly an order of "
+                              "magnitude faster than inter-node ones. That "
+                              "single ratio is what decides the topology "
+                              "mapping: tensor parallelism, whose collectives "
+                              "sit on the critical path and cannot be "
+                              "overlapped, is kept inside a node; pipeline "
+                              "parallelism, which sends one tensor per stage "
+                              "boundary, is what crosses between them.",
+        },
         "ring": {
             "explanation": "In a ring all-reduce each GPU sends to its right "
                            "neighbour and receives from its left, N-1 times "

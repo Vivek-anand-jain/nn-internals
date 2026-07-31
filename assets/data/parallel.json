@@ -2114,10 +2114,181 @@
      null
     ]
    ],
+   "schedules": {
+    "gpipe": {
+     "grid": [
+      [
+       "F0",
+       "F1",
+       "F2",
+       "F3",
+       null,
+       null,
+       null,
+       null,
+       null,
+       null,
+       "B0",
+       "B1",
+       "B2",
+       "B3"
+      ],
+      [
+       null,
+       "F0",
+       "F1",
+       "F2",
+       "F3",
+       null,
+       null,
+       null,
+       null,
+       "B0",
+       "B1",
+       "B2",
+       "B3",
+       null
+      ],
+      [
+       null,
+       null,
+       "F0",
+       "F1",
+       "F2",
+       "F3",
+       null,
+       null,
+       "B0",
+       "B1",
+       "B2",
+       "B3",
+       null,
+       null
+      ],
+      [
+       null,
+       null,
+       null,
+       "F0",
+       "F1",
+       "F2",
+       "F3",
+       "B0",
+       "B1",
+       "B2",
+       "B3",
+       null,
+       null,
+       null
+      ]
+     ],
+     "stats": {
+      "slots": 14,
+      "busy_cells": 32,
+      "total_cells": 56,
+      "bubble_measured": 0.428571,
+      "peak_live_per_stage": [
+       4,
+       4,
+       4,
+       4
+      ],
+      "peak_live": 4
+     },
+     "what": "All forwards, then all backwards.",
+     "peak_activations": "O(M) -- every micro-batch's activations stay live until its backward finally runs."
+    },
+    "1f1b": {
+     "grid": [
+      [
+       "F0",
+       "F1",
+       "F2",
+       "F3",
+       null,
+       null,
+       null,
+       "B0",
+       null,
+       "B1",
+       null,
+       "B2",
+       null,
+       "B3"
+      ],
+      [
+       null,
+       "F0",
+       "F1",
+       "F2",
+       null,
+       null,
+       "B0",
+       "F3",
+       "B1",
+       null,
+       "B2",
+       null,
+       "B3",
+       null
+      ],
+      [
+       null,
+       null,
+       "F0",
+       "F1",
+       null,
+       "B0",
+       "F2",
+       "B1",
+       "F3",
+       "B2",
+       null,
+       "B3",
+       null,
+       null
+      ],
+      [
+       null,
+       null,
+       null,
+       "F0",
+       "B0",
+       "F1",
+       "B1",
+       "F2",
+       "B2",
+       "F3",
+       "B3",
+       null,
+       null,
+       null
+      ]
+     ],
+     "stats": {
+      "slots": 14,
+      "busy_cells": 32,
+      "total_cells": 56,
+      "bubble_measured": 0.428571,
+      "peak_live_per_stage": [
+       4,
+       3,
+       2,
+       1
+      ],
+      "peak_live": 4
+     },
+     "what": "Warm up, then alternate one forward with one backward, then drain.",
+     "peak_activations": "O(P) -- a micro-batch's activations are freed as soon as its backward passes through, so only about P are ever live."
+    }
+   },
    "verify": {
-    "claim": "Pipeline parallelism does not change the maths at all -- it reorders WHEN each layer runs, not what it computes. The single-GPU result is reproduced by construction.",
+    "claim": "Pipelining does not change the maths. Running the batch as micro-batches and accumulating the gradients reproduces the full-batch gradient.",
     "passed": true,
-    "forward_max_err": 0.0
+    "forward_max_err": 0.0,
+    "grad_max_err": 5.551115123125783e-17,
+    "n_micro_batches": 4,
+    "note": "This is also the proof that gradient accumulation is equivalent to a larger batch."
    },
    "schedule": [
     {
@@ -2205,11 +2376,18 @@
      "dst": 0
     }
    ],
+   "params_per_stage": [
+    40,
+    72,
+    72,
+    9
+   ],
    "memory_per_gpu": {
     "weights": 48,
     "gradients": 48,
     "optimizer": 96,
-    "activations_divisor": 1
+    "activations_divisor": 1,
+    "caveat": "These are AVERAGES over stages. No stage actually holds this much -- see params_per_stage."
    },
    "drawback": "The bubble. With 4 micro-batches over 4 stages, 43% of every GPU's time is idle. More micro-batches shrink it but hold more activations live. Communication is cheap (point-to-point, one hop) which is why PP is the strategy that survives slow inter-node links."
   },
@@ -2458,6 +2636,58 @@
    },
    "drawback": "Weights must be gathered twice per step (once for forward, once for backward), so communication rises to about 1.5x DDP. It buys the largest memory saving of the three."
   }
+ },
+ "interconnects": {
+  "_source": "vendor specifications; approximate, external to this simulation, and quoted rather than measured",
+  "links": [
+   {
+    "name": "NVLink 4 (H100)",
+    "scope": "intra-node",
+    "bidir_GBps": 900,
+    "per_dir_GBps": 450,
+    "note": "per GPU, aggregate across all its NVLink ports"
+   },
+   {
+    "name": "NVLink 3 (A100)",
+    "scope": "intra-node",
+    "bidir_GBps": 600,
+    "per_dir_GBps": 300
+   },
+   {
+    "name": "NVLink 5 (B200)",
+    "scope": "intra-node",
+    "bidir_GBps": 1800,
+    "per_dir_GBps": 900
+   },
+   {
+    "name": "PCIe Gen5 x16",
+    "scope": "intra-node",
+    "bidir_GBps": 128,
+    "per_dir_GBps": 64,
+    "note": "the fallback when NVLink is absent"
+   },
+   {
+    "name": "InfiniBand NDR (400 Gb/s)",
+    "scope": "inter-node",
+    "bidir_GBps": 100,
+    "per_dir_GBps": 50,
+    "note": "50 GB/s per direction per port, before overhead"
+   },
+   {
+    "name": "InfiniBand XDR (800 Gb/s)",
+    "scope": "inter-node",
+    "bidir_GBps": 200,
+    "per_dir_GBps": 100
+   },
+   {
+    "name": "RoCE 400 GbE",
+    "scope": "inter-node",
+    "bidir_GBps": 100,
+    "per_dir_GBps": 50,
+    "note": "RDMA over Converged Ethernet"
+   }
+  ],
+  "why_it_matters": "Intra-node links are roughly an order of magnitude faster than inter-node ones. That single ratio is what decides the topology mapping: tensor parallelism, whose collectives sit on the critical path and cannot be overlapped, is kept inside a node; pipeline parallelism, which sends one tensor per stage boundary, is what crosses between them."
  },
  "ring": {
   "explanation": "In a ring all-reduce each GPU sends to its right neighbour and receives from its left, N-1 times to reduce and N-1 times to broadcast. Each pass moves 1/N of the buffer, so the total sent per GPU is 2(N-1)/N * S -- independent of N as N grows, which is why ring all-reduce scales.",

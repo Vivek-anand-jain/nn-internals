@@ -1,0 +1,1780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 09 Collective Operations</title>
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* page-local layout only; every colour comes from design.css custom properties */
+
+.opjump { display: flex; flex-wrap: wrap; gap: 7px; margin: 14px 0 4px; }
+.opjump a {
+  font-family: var(--mono); font-size: .76rem; padding: 5px 11px;
+  border-radius: 999px; border: 1px solid var(--hairline);
+  background: var(--surface-2); color: var(--ink-2);
+}
+.opjump a:hover { text-decoration: none; color: var(--ink); border-color: currentColor; }
+
+.opcard {
+  border: 1px solid var(--hairline); border-radius: 10px;
+  background: var(--surface-1); margin: 22px 0; overflow: hidden;
+  border-top: 3px solid var(--accent);
+}
+.opcard > .hd {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  padding: 14px 18px 10px;
+}
+.opcard .opname {
+  font-family: var(--mono); font-size: 1.18rem; font-weight: 700; letter-spacing: -.01em;
+}
+.opcard .opsig {
+  font-family: var(--mono); font-size: .78rem; color: var(--ink-2);
+  background: var(--surface-3); border-radius: 999px; padding: 2px 10px;
+}
+.opcard .opcost {
+  margin-left: auto; font-family: var(--mono); font-size: .76rem; color: var(--ink-muted);
+  white-space: nowrap;
+}
+.opcard .bd { padding: 0 18px 16px; }
+.opcard .what { color: var(--ink-2); font-size: .95rem; margin: 0 0 8px; }
+
+.metarow { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin: 12px 0 4px; }
+.metabox { background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 7px; padding: 9px 12px; }
+.metabox .k {
+  font-family: var(--mono); font-size: .64rem; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--ink-muted); margin-bottom: 3px;
+}
+.metabox .v { font-size: .86rem; color: var(--ink-2); line-height: 1.45; }
+.metabox .v b { color: var(--ink); }
+
+svg.opviz { display: block; width: 100%; height: auto; margin: 4px 0 2px; }
+svg.opviz text { font-family: var(--mono); }
+
+.phasenote {
+  font-family: var(--mono); font-size: .78rem; color: var(--ink-2);
+  background: var(--surface-2); border: 1px solid var(--hairline);
+  border-left: 3px solid var(--accent); border-radius: 0 7px 7px 0;
+  padding: 8px 12px; margin: 8px 0 0; min-height: 2.6em;
+}
+.phasenote .cost { color: var(--ink-muted); display: block; margin-top: 3px; font-size: .93em; }
+
+.ba { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 14px 0 2px; }
+@media (max-width: 860px) { .ba { grid-template-columns: 1fr; } }
+.bahead {
+  font-family: var(--mono); font-size: .66rem; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--ink-muted); margin-bottom: 6px;
+}
+.bagrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.bagpu { background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 6px; padding: 6px 6px 7px; }
+.bagpu .g {
+  font-family: var(--mono); font-size: .6rem; color: var(--ink-muted);
+  text-transform: uppercase; letter-spacing: .08em; margin-bottom: 4px;
+}
+.bacell {
+  font-family: var(--mono); font-size: .62rem; text-align: center;
+  border-radius: 3px; padding: 3px 2px; margin-bottom: 3px;
+  border: 1px solid transparent; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.bacell:last-child { margin-bottom: 0; }
+.bacell.void { background: var(--surface-3); color: var(--ink-muted); border-style: dashed; border-color: var(--hairline); opacity: .6; }
+
+table.duality td.wrap { white-space: normal; }
+table.duality tr.pairA { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+table.duality td .opn { font-family: var(--mono); font-weight: 700; }
+.selfinv { font-family: var(--mono); font-size: .7rem; color: var(--ink-muted); }
+
+.ctlgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(238px, 1fr)); gap: 13px; margin: 16px 0; }
+.panel { background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 8px; padding: 12px 14px; }
+.panel h4 { margin: 0 0 10px; font-family: var(--mono); font-size: .7rem; letter-spacing: .13em;
+            text-transform: uppercase; color: var(--ink-muted); font-weight: 700; }
+.fld { margin: 0 0 12px; }
+.fld:last-child { margin-bottom: 0; }
+.fld > label { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+               font-family: var(--mono); font-size: .74rem; color: var(--ink-2); margin-bottom: 4px; }
+.fld .rv { color: var(--ink); font-weight: 700; font-variant-numeric: tabular-nums; }
+.fld select, .fld input[type="range"] { width: 100%; }
+.fld select {
+  background: var(--surface-3); color: var(--ink); border: 1px solid var(--hairline);
+  border-radius: 6px; padding: 5px 7px; font-family: var(--mono); font-size: .8rem;
+}
+.hint { font-size: .68rem; color: var(--ink-muted); font-family: var(--mono); line-height: 1.5; }
+
+.splitbar {
+  display: flex; width: 100%; height: 34px; border-radius: 6px; overflow: hidden;
+  border: 1px solid var(--hairline); background: var(--surface-3); margin: 6px 0 4px;
+}
+.splitseg {
+  display: flex; align-items: center; justify-content: center; color: #fff;
+  font-family: var(--mono); font-size: .68rem; font-weight: 700;
+  white-space: nowrap; overflow: hidden; transition: flex-grow .4s cubic-bezier(.4,0,.2,1);
+}
+.splitseg.lat { background: var(--critical); }
+.splitseg.bw  { background: var(--accent); }
+
+.arith { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .8rem;
+         font-variant-numeric: tabular-nums; margin: 6px 0 0; }
+.arith td { padding: 5px 8px; border-bottom: 1px solid var(--hairline-2); white-space: nowrap; }
+.arith td.r { text-align: right; }
+.arith td.term { color: var(--ink-2); white-space: normal; }
+.arith tr.sum td { border-top: 1px solid var(--hairline); border-bottom: none;
+                   font-weight: 700; color: var(--ink); padding-top: 8px; }
+
+.ringlay { display: grid; grid-template-columns: 300px 1fr; gap: 18px; align-items: start; }
+@media (max-width: 900px) { .ringlay { grid-template-columns: 1fr; } }
+.ringtbl { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .72rem; }
+.ringtbl th, .ringtbl td { padding: 5px 7px; border-bottom: 1px solid var(--hairline-2); text-align: left; }
+.ringtbl th { color: var(--ink-muted); font-size: .64rem; text-transform: uppercase; letter-spacing: .07em; }
+.ringtbl tr.now { background: var(--surface-3); }
+.ringtbl td.ph { color: var(--ink-muted); }
+.ringtbl td.rs { color: var(--gradient); }
+.ringtbl td.ag { color: var(--weight); }
+
+.togglerow { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0 6px; }
+.btn.on { border-color: var(--weight); color: var(--ink); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--weight); }
+
+.smallcap { font-family: var(--mono); font-size: .68rem; color: var(--ink-muted);
+            letter-spacing: .1em; text-transform: uppercase; margin: 18px 0 4px; }
+.srcnote {
+  font-family: var(--mono); font-size: .7rem; color: var(--ink-muted);
+  border-left: 2px solid var(--hairline); padding-left: 10px; margin: 10px 0;
+}
+@media (max-width: 860px) {
+  .bagrid { grid-template-columns: repeat(2, 1fr); }
+  .opcard .opcost { margin-left: 0; }
+}
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 09</div>
+    <h1>Collective Operations</h1>
+    <p class="lede">Eight ways a set of GPUs can rearrange a buffer between them. Every parallelism
+      strategy on the next five pages — DDP, ZeRO, FSDP, tensor parallel, pipeline parallel — is
+      nothing but a choice of which of these to run, on what tensor, at what point in the step. This
+      page is the vocabulary. Watch each one move.</p>
+    <noscript><p class="callout warn">Every diagram on this page is built and animated in the
+      browser. With JavaScript disabled you will see an empty shell.</p></noscript>
+  </div>
+
+  <section class="block" id="setup">
+    <h2>1 · N buffers, one operation</h2>
+    <div id="setupBody"></div>
+  </section>
+
+  <section class="block" id="ops">
+    <h2>2 · The eight operations</h2>
+    <div id="opsBody"></div>
+  </section>
+
+  <section class="block" id="duality">
+    <h2>3 · Every collective has an inverse</h2>
+    <div id="dualBody"></div>
+  </section>
+
+  <section class="block" id="compose">
+    <h2>4 · all_reduce = reduce_scatter + all_gather</h2>
+    <div id="composeBody"></div>
+  </section>
+
+  <section class="block" id="ring">
+    <h2>5 · The ring algorithm, phase by phase</h2>
+    <div id="ringBody"></div>
+  </section>
+
+  <section class="block" id="calc">
+    <h2>6 · What it costs on real wire</h2>
+    <div id="calcBody"></div>
+  </section>
+
+  <section class="block" id="algos">
+    <h2>7 · Ring is not the only algorithm</h2>
+    <div id="algoBody"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/parallel.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T  = NN.T;
+  const P  = window.PARALLEL;          /* also reachable as NN.P */
+  const el = NN.el;
+  const svg = NN.svg;
+
+  if (!P) { console.error("parallel.js did not load"); return; }
+
+  const N = P.meta.world;                                   /* 4 */
+  const L = [];
+  for (let i = 0; i < N; i++) L.push(String.fromCharCode(65 + i));
+  const R = function (n) { const a = []; for (let i = 0; i < n; i++) a.push(i); return a; };
+  const byOp = {};
+  P.collectives.forEach(function (c) { byOp[c.op] = c; });
+
+  const REDUCED = window.matchMedia &&
+                  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* ======================================================================
+     1. THE CHUNK MODEL
+     ----------------------------------------------------------------------
+     Every GPU owns a buffer of N chunks. Chunk "A2" is chunk-slot A (index
+     0) as it started life on GPU 2. A reduced chunk carries the list of
+     ranks whose values are summed into it, so "A0+A1+A2+A3" is literally
+     the set {0,1,2,3} rendered — nothing is hard-coded, the animations
+     compute it as they run.
+     ====================================================================== */
+  function ck(letter, srcs, ghost) {
+    return { letter: letter, srcs: srcs.slice().sort(function (a, b) { return a - b; }),
+             ghost: !!ghost };
+  }
+  function ctext(c) {
+    return c.srcs.map(function (g) { return L[c.letter] + g; }).join("+");
+  }
+  function cclone(c) {
+    return c ? { letter: c.letter, srcs: c.srcs.slice(), ghost: c.ghost } : null;
+  }
+  function bclone(b) { return b.map(function (r) { return r.map(cclone); }); }
+  function bfull()  { return R(N).map(function (g) { return R(N).map(function (s) { return ck(s, [g]); }); }); }
+  function bempty() { return R(N).map(function () { return R(N).map(function () { return null; }); }); }
+  function bdiag()  { return R(N).map(function (g) { return R(N).map(function (s) { return s === g ? ck(s, [g]) : null; }); }); }
+  const mod = function (a, m) { return ((a % m) + m) % m; };
+
+  /* ======================================================================
+     2. SPEC BUILDERS — one per operation
+     ----------------------------------------------------------------------
+     A spec is { states[], moves[], labels[] }. states[k] is the resting
+     contents of all N buffers after phase k; moves[k] is the list of
+     transfers that produced it. moves[0] is always null (the initial
+     state). Every builder computes all of a phase's moves against the
+     PREVIOUS state before applying any of them, because the phases are
+     simultaneous.
+     ====================================================================== */
+  function mv(src, dst, fs, ts, val) {
+    return { src: src, dst: dst, fs: fs, ts: ts, val: cclone(val) };
+  }
+
+  const SPEC = {};
+
+  /* broadcast — root's buffer copied to everyone. */
+  SPEC.broadcast = function () {
+    const st = [], mo = [], lb = [];
+    let cur = bempty();
+    cur[0] = R(N).map(function (s) { return ck(s, [0]); });
+    st.push(cur); mo.push(null);
+    lb.push("GPU 0 is the root: it holds the buffer. Every other rank is empty.");
+    for (let d = 1; d < N; d++) {
+      const prev = st[st.length - 1];
+      const m = R(N).map(function (s) { return mv(0, d, s, s, prev[0][s]); });
+      const nx = bclone(prev);
+      nx[d] = R(N).map(function (s) { return ck(s, [0]); });
+      st.push(nx); mo.push(m);
+      lb.push("The root sends the WHOLE buffer to GPU " + d + ". Nothing is split and nothing is " +
+              "summed — this is a copy.");
+    }
+    return { states: st, moves: mo, labels: lb, root: 0,
+             tail: "All " + N + " ranks now hold byte-identical buffers. Stepping the sends one at " +
+                   "a time makes the naive cost visible: the root pushed " + (N - 1) + "×S out of " +
+                   "one port. A ring or tree implementation splits the buffer and pipelines it, " +
+                   "which is why the table below says the cost is S and not " + (N - 1) + "S." };
+  };
+
+  /* scatter — root cuts its buffer into N pieces, rank i gets piece i. */
+  SPEC.scatter = function () {
+    const st = [], mo = [], lb = [];
+    let cur = bempty();
+    cur[0] = R(N).map(function (s) { return ck(s, [0]); });
+    st.push(cur); mo.push(null);
+    lb.push("The root holds all " + N + " pieces. Each piece is destined for a different rank.");
+    for (let d = 1; d < N; d++) {
+      const prev = st[st.length - 1];
+      const m = [mv(0, d, d, d, prev[0][d])];
+      const nx = bclone(prev);
+      nx[0][d].ghost = true;
+      nx[d][d] = ck(d, [0]);
+      st.push(nx); mo.push(m);
+      lb.push("Piece " + L[d] + " leaves the root for GPU " + d + ". Only 1/" + N +
+              " of the buffer moves on this hop.");
+    }
+    return { states: st, moves: mo, labels: lb, root: 0,
+             tail: "The root keeps piece " + L[0] + " and has handed out the other " + (N - 1) +
+                   ". Total off the root: " + (N - 1) + "/" + N + " of S. In MPI the root's send " +
+                   "buffer is not actually destroyed; the faded cells mean “this piece now " +
+                   "belongs to someone else”." };
+  };
+
+  /* gather — the exact inverse of scatter. */
+  SPEC.gather = function () {
+    const st = [], mo = [], lb = [];
+    st.push(bdiag()); mo.push(null);
+    lb.push("Each rank holds one piece. No rank has the whole tensor.");
+    for (let s0 = 1; s0 < N; s0++) {
+      const prev = st[st.length - 1];
+      const m = [mv(s0, 0, s0, s0, prev[s0][s0])];
+      const nx = bclone(prev);
+      nx[s0][s0].ghost = true;
+      nx[0][s0] = ck(s0, [s0]);
+      st.push(nx); mo.push(m);
+      lb.push("GPU " + s0 + " sends piece " + L[s0] + s0 + " to the root, which files it in slot " +
+              L[s0] + ". Nothing is added — the pieces are CONCATENATED.");
+    }
+    return { states: st, moves: mo, labels: lb, root: 0,
+             tail: "The root now holds the concatenation " +
+                   R(N).map(function (i) { return L[i] + i; }).join(", ") +
+                   ". Compare this with reduce below: the same traffic pattern, but reduce would " +
+                   "have summed the pieces on top of each other instead of laying them side by side." };
+  };
+
+  /* all_gather — ring: every rank forwards one chunk right, N-1 times. */
+  SPEC.all_gather = function () {
+    const st = [], mo = [], lb = [];
+    st.push(bdiag()); mo.push(null);
+    lb.push("Each rank holds its own shard and nothing else. This is the FSDP resting state.");
+    for (let k = 1; k <= N - 1; k++) {
+      const prev = st[st.length - 1];
+      const m = [];
+      for (let i = 0; i < N; i++) {
+        const s = mod(i - k + 1, N);
+        m.push(mv(i, mod(i + 1, N), s, s, prev[i][s]));
+      }
+      const nx = bclone(prev);
+      m.forEach(function (t) { nx[t.dst][t.ts] = cclone(t.val); });
+      st.push(nx); mo.push(m);
+      lb.push("Ring step " + k + " of " + (N - 1) + ": every GPU sends one chunk to its right " +
+              "neighbour and receives one from its left. Every link is busy in both directions.");
+    }
+    return { states: st, moves: mo, labels: lb,
+             tail: "After " + (N - 1) + " steps every rank holds all " + N + " shards and each GPU " +
+                   "sent exactly " + (N - 1) + " chunks = " + (N - 1) + "/" + N + " of S. Note what " +
+                   "every rank ends with: the SAME buffer. That is the difference from all_to_all." };
+  };
+
+  /* reduce — elementwise sum, result on the root only. */
+  SPEC.reduce = function () {
+    const st = [], mo = [], lb = [];
+    st.push(bfull()); mo.push(null);
+    lb.push("Every rank holds a full-size buffer with DIFFERENT values in it — its own partial " +
+            "gradients, say.");
+    for (let s0 = 1; s0 < N; s0++) {
+      const prev = st[st.length - 1];
+      const m = R(N).map(function (s) { return mv(s0, 0, s, s, prev[s0][s]); });
+      const nx = bclone(prev);
+      for (let s = 0; s < N; s++) {
+        nx[0][s] = ck(s, prev[0][s].srcs.concat(prev[s0][s].srcs));
+        nx[s0][s].ghost = true;
+      }
+      st.push(nx); mo.push(m);
+      lb.push("GPU " + s0 + " sends its ENTIRE buffer to the root, which adds it elementwise into " +
+              "what it already has. The buffer does not grow — the values inside it change.");
+    }
+    return { states: st, moves: mo, labels: lb, root: 0,
+             tail: "The root holds the elementwise sum; every slot is now a sum of " + N + " terms. " +
+                   "reduce and gather have identical arrows and completely different semantics: " +
+                   "gather moves 1/" + N + " of S per rank and concatenates, reduce moves all of S " +
+                   "per rank and adds." };
+  };
+
+  /* reduce_scatter — ring: sum while you rotate, rank i keeps shard i. */
+  SPEC.reduce_scatter = function () {
+    const st = [], mo = [], lb = [];
+    st.push(bfull()); mo.push(null);
+    lb.push("Every rank holds a full-size buffer of partial values, exactly as for reduce.");
+    for (let k = 0; k < N - 1; k++) {
+      const prev = st[st.length - 1];
+      const m = [];
+      for (let i = 0; i < N; i++) {
+        const s = mod(i - k - 1, N);
+        m.push(mv(i, mod(i + 1, N), s, s, prev[i][s]));
+      }
+      const nx = bclone(prev);
+      m.forEach(function (t) {
+        nx[t.dst][t.ts] = ck(t.ts, prev[t.dst][t.ts].srcs.concat(t.val.srcs));
+        nx[t.src][t.fs].ghost = true;
+      });
+      st.push(nx); mo.push(m);
+      lb.push("Ring step " + (k + 1) + " of " + (N - 1) + ": each GPU sends ONE chunk right and " +
+              "adds the chunk arriving from its left into its own copy. A chunk it has sent is " +
+              "never needed again, so it fades.");
+    }
+    return { states: st, moves: mo, labels: lb,
+             tail: "Each rank now owns the completely-reduced version of exactly one shard, and " +
+                   "nothing else. Each GPU sent " + (N - 1) + " chunks = " + (N - 1) + "/" + N +
+                   " of S — the same wire cost as all_gather, which is not a coincidence: they " +
+                   "are adjoints." };
+  };
+
+  /* all_reduce — shown as its two halves, which is how it is implemented. */
+  SPEC.all_reduce = function () {
+    const st = [], mo = [], lb = [];
+    st.push(bfull()); mo.push(null);
+    lb.push("Every rank holds a full buffer of partial values. Every rank must end up with the sum.");
+
+    /* half 1: reduce-scatter, collapsed into one phase */
+    const p0 = st[0];
+    const m1 = [];
+    for (let j = 0; j < N; j++) {
+      for (let i = 0; i < N; i++) if (i !== j) m1.push(mv(i, j, j, j, p0[i][j]));
+    }
+    const s1 = bclone(p0);
+    for (let j = 0; j < N; j++) {
+      for (let s = 0; s < N; s++) {
+        if (s === j) s1[j][s] = ck(s, R(N));
+        else s1[j][s].ghost = true;
+      }
+    }
+    st.push(s1); mo.push(m1);
+    lb.push("Half one — REDUCE-SCATTER. The " + N + " partial copies of shard j are summed onto " +
+            "rank j. Every rank now owns one finished shard and no rank owns the whole answer.");
+
+    /* half 2: all-gather */
+    const m2 = [];
+    for (let j = 0; j < N; j++) {
+      for (let d = 0; d < N; d++) if (d !== j) m2.push(mv(j, d, j, j, s1[j][j]));
+    }
+    const s2 = R(N).map(function () { return R(N).map(function (s) { return ck(s, R(N)); }); });
+    st.push(s2); mo.push(m2);
+    lb.push("Half two — ALL-GATHER. Each owner broadcasts its finished shard to everyone else. " +
+            "Now every rank holds the complete sum.");
+
+    return { states: st, moves: mo, labels: lb,
+             phaseColor: function (k) {
+               return k === 1 ? NN.gpu.opColor("reduce_scatter")
+                    : k === 2 ? NN.gpu.opColor("all_gather")
+                    : NN.gpu.opColor("all_reduce");
+             },
+             tail: "Two halves, each costing (N-1)/N × S, hence 2(N-1)/N × S in total. Section 4 " +
+                   "takes this apart properly and section 5 shows the real ring schedule underneath it." };
+  };
+
+  /* all_to_all — pairwise exchange (i XOR p). A distributed transpose. */
+  SPEC.all_to_all = function () {
+    const st = [], mo = [], lb = [];
+    st.push(bfull()); mo.push(null);
+    lb.push("Rank i's slot j holds the chunk ADDRESSED to rank j. Read the picture as a matrix: " +
+            "GPU index across, chunk index down.");
+    for (let p = 1; p <= N - 1; p++) {
+      const prev = st[st.length - 1];
+      const m = [], seen = {};
+      for (let i = 0; i < N; i++) {
+        /* eslint-disable no-bitwise */
+        const j = i ^ p;
+        if (j >= N || seen[i]) continue;
+        seen[i] = seen[j] = true;
+        m.push(mv(i, j, j, i, prev[i][j]));
+        m.push(mv(j, i, i, j, prev[j][i]));
+      }
+      const nx = bclone(prev);
+      m.forEach(function (t) { nx[t.dst][t.ts] = cclone(t.val); });
+      st.push(nx); mo.push(m);
+      const pairs = [];
+      for (let i = 0; i < N; i++) { const j = i ^ p; if (j < N && i < j) pairs.push(i + "↔" + j); }
+      lb.push("Exchange round " + p + ": disjoint pairs " + pairs.join(", ") +
+              " swap the chunk each one holds for the other. Both directions of the link carry " +
+              "payload at once.");
+    }
+    return { states: st, moves: mo, labels: lb,
+             tail: "The matrix has been transposed: row i column j became row j column i. Every " +
+                   "rank ends with a DIFFERENT buffer — that is what separates all_to_all from " +
+                   "all_gather, which leaves every rank with the same buffer. Each GPU sent " +
+                   (N - 1) + " chunks = " + (N - 1) + "/" + N + " of S." };
+  };
+
+  /* p2p — for the contrast in section 1. Not a collective. */
+  SPEC.p2p = function () {
+    const st = [], mo = [], lb = [];
+    st.push(bfull()); mo.push(null);
+    lb.push("Four independent GPUs, each with its own buffer. Nothing is coordinated.");
+    const prev = st[0];
+    const m = [mv(0, 2, 0, 0, prev[0][0])];
+    const nx = bclone(prev);
+    nx[2][0] = ck(0, [0]);
+    st.push(nx); mo.push(m);
+    lb.push("send(rank 0 → rank 2). GPU 1 and GPU 3 are not involved, do not block, and do " +
+            "not need to call anything.");
+    return { states: st, moves: mo, labels: lb,
+             tail: "One sender, one receiver, one arrow. Everything else on this page is the case " +
+                   "where ALL ranks call the same routine at the same time." };
+  };
+
+  /* combined ring all-reduce: N-1 reduce-scatter phases then N-1 all-gather. */
+  function ringSpec() {
+    const rs = SPEC.reduce_scatter();
+    const st = rs.states.slice(), mo = rs.moves.slice(), lb = rs.labels.slice();
+    const kinds = ["init"];
+    for (let k = 0; k < N - 1; k++) kinds.push("rs");
+    for (let k = 1; k <= N - 1; k++) {
+      const prev = st[st.length - 1];
+      const m = [];
+      for (let i = 0; i < N; i++) {
+        const s = mod(i - k + 1, N);
+        m.push(mv(i, mod(i + 1, N), s, s, prev[i][s]));
+      }
+      const nx = bclone(prev);
+      m.forEach(function (t) { nx[t.dst][t.ts] = cclone(t.val); });
+      st.push(nx); mo.push(m); kinds.push("ag");
+      lb.push("All-gather step " + k + " of " + (N - 1) + ": each GPU forwards a finished chunk " +
+              "to its right neighbour. Same ring, same one-chunk-per-link, no addition.");
+    }
+    return { states: st, moves: mo, labels: lb, kinds: kinds,
+             phaseColor: function (k) {
+               return kinds[k] === "ag" ? NN.gpu.opColor("all_gather")
+                                        : NN.gpu.opColor("reduce_scatter");
+             } };
+  }
+
+  /* ======================================================================
+     3. THE VISUALISER
+     ----------------------------------------------------------------------
+     One SVG per operation. N GPU boxes in a row, each with N slots. Chunks
+     are rectangles that physically travel along a quadratic Bezier from
+     source slot to destination slot, driven by requestAnimationFrame so
+     the whole thing can be stepped, replayed and reversed.
+     ====================================================================== */
+  const VBW = 920, BOXW = 200, GX = 24, BOXY = 88;
+  const HEAD = 22, PADY = 9, SLOTH = 28, SLOTG = 5, SLOTW = BOXW - 20;
+  const BOXH = HEAD + PADY + N * SLOTH + (N - 1) * SLOTG + PADY;
+  const VBH  = BOXY + BOXH + 26;
+  const bx = function (g) { return GX + g * (BOXW + GX); };
+  const sxOf = function (g) { return bx(g) + 10; };
+  const syOf = function (s) { return BOXY + HEAD + PADY + s * (SLOTH + SLOTG); };
+  const ccx = function (g) { return sxOf(g) + SLOTW / 2; };
+  const ccy = function (s) { return syOf(s) + SLOTH / 2; };
+
+  /* fill / stroke ladder by chunk letter — colour is decoration, the text
+     label on every block is what actually identifies it. */
+  const FILLOP   = [0.30, 0.21, 0.14, 0.09];
+  const STROKEOP = [0.95, 0.72, 0.52, 0.38];
+
+  let vizSeq = 0;
+
+  function buildViz(spec, opName) {
+    const id = "vz" + (++vizSeq);
+    const baseCol = NN.gpu.opColor(opName);
+    const colOf = function (k) { return spec.phaseColor ? spec.phaseColor(k) : baseCol; };
+
+    const root = svg("svg", {
+      class: "opviz", viewBox: "0 0 " + VBW + " " + VBH,
+      preserveAspectRatio: "xMidYMid meet", role: "img",
+      "aria-label": opName + " animation over " + N + " GPUs"
+    });
+    const defs = svg("defs", {});
+    const mk = svg("marker", {
+      id: id + "-ah", viewBox: "0 0 10 10", refX: 9, refY: 5,
+      markerWidth: 6, markerHeight: 6, orient: "auto-start-reverse"
+    });
+    mk.appendChild(svg("path", { d: "M0 0 L10 5 L0 10 z", fill: "var(--accent)" }));
+    defs.appendChild(mk);
+    root.appendChild(defs);
+
+    const gBoxes = svg("g", {});
+    const gArcs  = svg("g", {});
+    const gFly   = svg("g", {});
+    root.appendChild(gBoxes); root.appendChild(gArcs); root.appendChild(gFly);
+
+    /* boxes + slots */
+    const slotRect = [], slotText = [], headText = [];
+    for (let g = 0; g < N; g++) {
+      gBoxes.appendChild(svg("rect", {
+        x: bx(g), y: BOXY, width: BOXW, height: BOXH, rx: 8,
+        fill: "var(--surface-2)", stroke: "var(--hairline)", "stroke-width": 1
+      }));
+      gBoxes.appendChild(svg("rect", {
+        x: bx(g), y: BOXY, width: BOXW, height: HEAD, rx: 8,
+        fill: "var(--surface-3)"
+      }));
+      gBoxes.appendChild(svg("rect", {
+        x: bx(g), y: BOXY + HEAD - 8, width: BOXW, height: 8, fill: "var(--surface-3)"
+      }));
+      const ht = svg("text", {
+        x: bx(g) + 10, y: BOXY + 15, "font-size": 10.5, fill: "var(--ink-2)",
+        "letter-spacing": ".08em"
+      });
+      ht.textContent = "GPU " + g + (spec.root === g ? "  · ROOT" : "");
+      gBoxes.appendChild(ht); headText.push(ht);
+
+      slotRect.push([]); slotText.push([]);
+      for (let s = 0; s < N; s++) {
+        const r = svg("rect", {
+          x: sxOf(g), y: syOf(s), width: SLOTW, height: SLOTH, rx: 4,
+          fill: "var(--surface-3)", "fill-opacity": 0.5,
+          stroke: "var(--hairline)", "stroke-width": 1
+        });
+        const t = svg("text", {
+          x: sxOf(g) + 9, y: syOf(s) + SLOTH / 2 + 4, "font-size": 11.5,
+          fill: "var(--ink-muted)"
+        });
+        gBoxes.appendChild(r); gBoxes.appendChild(t);
+        slotRect[g].push(r); slotText[g].push(t);
+      }
+    }
+
+    /* slot painting */
+    function paint(state, col) {
+      for (let g = 0; g < N; g++) for (let s = 0; s < N; s++) {
+        const c = state[g][s], r = slotRect[g][s], t = slotText[g][s];
+        if (!c) {
+          r.setAttribute("fill", "var(--surface-3)");
+          r.setAttribute("fill-opacity", 0.35);
+          r.setAttribute("stroke", "var(--hairline)");
+          r.setAttribute("stroke-opacity", 1);
+          r.setAttribute("stroke-width", 1);
+          r.setAttribute("stroke-dasharray", "3 3");
+          t.textContent = "·";
+          t.setAttribute("fill", "var(--ink-muted)");
+          t.setAttribute("opacity", 0.5);
+          continue;
+        }
+        const full = c.srcs.length === N;
+        r.setAttribute("fill", col);
+        r.setAttribute("fill-opacity", c.ghost ? 0.05 : FILLOP[c.letter % FILLOP.length]);
+        r.setAttribute("stroke", col);
+        r.setAttribute("stroke-opacity", c.ghost ? 0.25 : STROKEOP[c.letter % STROKEOP.length]);
+        r.setAttribute("stroke-width", full && !c.ghost ? 2.2 : 1);
+        r.setAttribute("stroke-dasharray", c.ghost ? "3 3" : "none");
+        t.textContent = ctext(c);
+        t.setAttribute("fill", col);
+        t.setAttribute("opacity", c.ghost ? 0.3 : 1);
+      }
+    }
+
+    /* the guide arcs for a phase stay on screen when the animation stops,
+       so a paused view still tells you the routing. */
+    function bez(m) {
+      const x1 = ccx(m.src), y1 = ccy(m.fs), x2 = ccx(m.dst), y2 = ccy(m.ts);
+      const dist = Math.abs(m.dst - m.src);
+      const peak = BOXY - 12 - 17 * (Math.min(dist, N) - 1);
+      const cx = (x1 + x2) / 2;
+      const cy = 2 * peak - (y1 + y2) / 2;
+      return { x1: x1, y1: y1, x2: x2, y2: y2, cx: cx, cy: Math.max(6, cy) };
+    }
+    function at(b, t) {
+      const u = 1 - t;
+      return [u * u * b.x1 + 2 * u * t * b.cx + t * t * b.x2,
+              u * u * b.y1 + 2 * u * t * b.cy + t * t * b.y2];
+    }
+    function drawArcs(moves, col) {
+      gArcs.textContent = "";
+      if (!moves) return;
+      moves.forEach(function (m) {
+        const b = bez(m);
+        gArcs.appendChild(svg("path", {
+          d: "M" + b.x1 + " " + b.y1 + " Q" + b.cx + " " + b.cy + " " + b.x2 + " " + b.y2,
+          fill: "none", stroke: col, "stroke-width": 1.4, opacity: 0.35,
+          "stroke-dasharray": "4 4"
+        }));
+      });
+    }
+
+    /* rAF flight */
+    let gen = 0;
+    function stopAnim() { gen++; gFly.textContent = ""; }
+
+    function flyPhase(moves, col, onDone) {
+      gen++;
+      const mine = gen;
+      gFly.textContent = "";
+      if (!moves || !moves.length || REDUCED) { if (onDone) onDone(); return; }
+      const DUR = 620;
+      const stagger = Math.min(70, 300 / moves.length);
+      const flyers = moves.map(function (m, i) {
+        const b = bez(m);
+        const g = svg("g", { opacity: 0 });
+        g.appendChild(svg("rect", {
+          x: -58, y: -11, width: 116, height: 22, rx: 4,
+          fill: col, "fill-opacity": 0.9, stroke: col, "stroke-width": 1.5
+        }));
+        const t = svg("text", {
+          x: 0, y: 4, "text-anchor": "middle", "font-size": 11,
+          fill: "var(--surface-1)", "font-weight": "700"
+        });
+        t.textContent = ctext(m.val);
+        g.appendChild(t);
+        gFly.appendChild(g);
+        return { g: g, b: b, delay: i * stagger };
+      });
+      const t0 = performance.now();
+      const total = DUR + (flyers.length - 1) * stagger;
+      (function frame(now) {
+        if (mine !== gen) return;
+        const e = now - t0;
+        flyers.forEach(function (f) {
+          const p = NN.clamp((e - f.delay) / DUR, 0, 1);
+          if (e < f.delay) { f.g.setAttribute("opacity", 0); return; }
+          const k = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;   /* ease in-out */
+          const q = at(f.b, k);
+          f.g.setAttribute("transform", "translate(" + q[0].toFixed(2) + "," + q[1].toFixed(2) + ")");
+          f.g.setAttribute("opacity", p >= 1 ? 0 : (p < 0.12 ? p / 0.12 : 1));
+        });
+        if (e < total + 40) requestAnimationFrame(frame);
+        else { gFly.textContent = ""; if (onDone) onDone(); }
+      })(t0);
+    }
+
+    /* public API */
+    const api = { node: root, count: spec.states.length };
+    api.show = function (k, animate) {
+      const col = colOf(k);
+      drawArcs(spec.moves[k], col);
+      if (animate && spec.moves[k]) {
+        paint(spec.states[k - 1], colOf(k));
+        flyPhase(spec.moves[k], col, function () { paint(spec.states[k], col); });
+      } else {
+        stopAnim();
+        paint(spec.states[k], col);
+      }
+    };
+    api.stop = stopAnim;
+    api.show(0, false);
+    return api;
+  }
+
+  /* ---------------------------------------------------------- costing */
+  function phaseCost(moves) {
+    const per = R(N).map(function () { return 0; });
+    (moves || []).forEach(function (m) { per[m.src] += 1; });
+    return { per: per, max: Math.max.apply(null, per), total: (moves || []).length };
+  }
+  function frac(chunks) {
+    if (chunks === 0) return "0";
+    const g = (function gcd(a, b) { return b ? gcd(b, a % b) : a; })(chunks, N);
+    const n = chunks / g, d = N / g;
+    return d === 1 ? n + "×S" : n + "/" + d + "×S";
+  }
+
+  /* ------------------------------------------------- local step control */
+  /* NN.Stepper installs a document-level key handler, which would make one
+     arrow-press advance all ten widgets on this page at once. The op cards
+     therefore use this local control; NN.Stepper drives the ring in §5,
+     where a single global keyboard target is exactly what you want. */
+  function localStepper(o) {
+    const back  = el("button", { class: "btn" }, "← Back");
+    const fwd   = el("button", { class: "btn primary" }, "Next →");
+    const play  = el("button", { class: "btn" }, "▶ Replay");
+    const dots  = el("div", { class: "progressdots" });
+    const count = el("div", { class: "stepcount" });
+    let i = 0, timer = null;
+
+    const ds = [];
+    for (let k = 0; k < o.count; k++) {
+      const d = el("i", { title: "Phase " + k });
+      d.addEventListener("click", function () { stop(); go(k, false); });
+      dots.appendChild(d); ds.push(d);
+    }
+    function render() {
+      back.disabled = i === 0;
+      fwd.disabled  = i === o.count - 1;
+      count.textContent = "Phase " + i + " / " + (o.count - 1);
+      ds.forEach(function (d, k) {
+        d.classList.toggle("done", k < i);
+        d.classList.toggle("now", k === i);
+      });
+    }
+    function go(k, animate) {
+      i = NN.clamp(k, 0, o.count - 1);
+      render();
+      o.onStep(i, animate);
+    }
+    function stop() { if (timer) { clearTimeout(timer); timer = null; } play.textContent = "▶ Replay"; }
+    function replay() {
+      stop();
+      go(0, false);
+      play.textContent = "▶ Replay";
+      let k = 0;
+      (function tick() {
+        if (k >= o.count - 1) { stop(); return; }
+        k++;
+        go(k, true);
+        timer = setTimeout(tick, REDUCED ? 260 : 1050);
+      })();
+    }
+    back.addEventListener("click", function () { stop(); go(i - 1, false); });
+    fwd.addEventListener("click",  function () { stop(); go(i + 1, true); });
+    play.addEventListener("click", replay);
+
+    const bar = el("div", { class: "controls" }, [back, fwd, play, dots, count]);
+    render();
+    return { bar: bar, go: go, replay: replay };
+  }
+
+  /* --------------------------------------------------- before/after HTML */
+  function bufBlocks(state, col, title) {
+    const grid = el("div", { class: "bagrid" });
+    for (let g = 0; g < N; g++) {
+      const cells = [];
+      for (let s = 0; s < N; s++) {
+        const c = state[g][s];
+        if (!c || c.ghost) {
+          cells.push(el("div", { class: "bacell void", title: "slot " + L[s] + ": empty" }, "—"));
+        } else {
+          const txt = ctext(c);
+          cells.push(el("div", {
+            class: "bacell",
+            title: "slot " + L[s] + " = " + txt,
+            style: {
+              background: "color-mix(in srgb, " + col + " " +
+                          Math.round(FILLOP[c.letter % FILLOP.length] * 100) + "%, var(--surface-2))",
+              borderColor: col, color: "var(--ink)"
+            }
+          }, txt));
+        }
+      }
+      grid.appendChild(el("div", { class: "bagpu" },
+        [el("div", { class: "g" }, "GPU " + g)].concat(cells)));
+    }
+    return el("div", {}, [el("div", { class: "bahead" }, title), grid]);
+  }
+
+  /* ------------------------------------------------------- the op card */
+  function opCard(opName, spec) {
+    const meta = byOp[opName];
+    const col  = NN.gpu.opColor(opName);
+    const viz  = buildViz(spec, opName);
+
+    const note = el("div", { class: "phasenote" });
+    function setNote(i) {
+      note.textContent = "";
+      const c = phaseCost(spec.moves[i]);
+      let cum = 0;
+      for (let k = 1; k <= i; k++) cum += phaseCost(spec.moves[k]).max;
+      note.appendChild(el("span", { html: spec.labels[i] || "" }));
+      note.appendChild(el("span", { class: "cost" },
+        i === 0
+          ? "nothing on the wire yet"
+          : "this phase: " + c.total + " chunk(s) in flight, at most " + c.max +
+            " out of any one GPU = " + frac(c.max) + "  ·  cumulative worst-case egress: " +
+            frac(cum)));
+      if (i === spec.states.length - 1 && spec.tail) {
+        note.appendChild(el("span", { class: "cost", style: { color: "var(--ink-2)" } }, spec.tail));
+      }
+    }
+    setNote(0);
+
+    const step = localStepper({
+      count: spec.states.length,
+      onStep: function (i, animate) { viz.show(i, animate); setNote(i); }
+    });
+
+    return el("section", {
+      class: "opcard", id: "op-" + opName, style: { borderTopColor: col }
+    }, [
+      el("div", { class: "hd" }, [
+        el("span", { class: "opname", style: { color: col } }, meta.op),
+        el("span", { class: "opsig" }, meta.sig),
+        el("span", { class: "opcost" }, "ring cost / GPU: " + meta.ring_factor)
+      ]),
+      el("div", { class: "bd" }, [
+        el("p", { class: "what" }, meta.what),
+        viz.node,
+        step.bar,
+        note,
+        el("div", { class: "ba" }, [
+          bufBlocks(spec.states[0], col, "Before — what each GPU holds"),
+          bufBlocks(spec.states[spec.states.length - 1], col, "After — what each GPU holds")
+        ]),
+        el("div", { class: "metarow" }, [
+          el("div", { class: "metabox" }, [
+            el("div", { class: "k" }, "used for"),
+            el("div", { class: "v" }, meta.used_for)
+          ]),
+          el("div", { class: "metabox" }, [
+            el("div", { class: "k" }, "inverse"),
+            el("div", { class: "v", html: meta.inverse === "itself"
+              ? "<b>itself</b> — self-inverse; the backward pass runs the same collective."
+              : "<b>" + meta.inverse + "</b> — the backward pass of this is a <code>" +
+                meta.inverse + "</code>." })
+          ]),
+          el("div", { class: "metabox" }, [
+            el("div", { class: "k" }, "bytes each GPU sends"),
+            el("div", { class: "v", html: "<b>" + meta.ring_factor + "</b> where S is the buffer " +
+              "size. At N=" + N + " that is <b>" + NN.fmt(ringFactor(opName, N), 3) +
+              "×S</b>." })
+          ])
+        ])
+      ])
+    ]);
+  }
+
+  /* ======================================================================
+     4. RING COST — mirrors ring_cost() in code/parallel_toy.py exactly.
+     The multiplier for each op is also carried as a STRING in
+     PARALLEL.collectives[].ring_factor and both are rendered side by side
+     on every card, so a drift between them would be visible.
+     ====================================================================== */
+  function ringFactor(op, world) {
+    const n = world;
+    if (n <= 1) return 0;
+    const f = {
+      all_reduce: 2 * (n - 1) / n,
+      all_gather: (n - 1) / n,
+      reduce_scatter: (n - 1) / n,
+      all_to_all: (n - 1) / n,
+      scatter: (n - 1) / n,
+      gather: (n - 1) / n,
+      broadcast: 1,
+      reduce: 1,
+      p2p: 1
+    };
+    return f[op] !== undefined ? f[op] : 1;
+  }
+  /* number of sequential hops on the critical path of a ring implementation */
+  function ringHops(op, world) {
+    const n = world;
+    if (n <= 1) return 0;
+    if (op === "p2p") return 1;
+    if (op === "all_reduce") return 2 * (n - 1);
+    return n - 1;
+  }
+
+  /* ======================================================================
+     SECTION 1 — the setup
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#setupBody");
+
+    host.appendChild(el("p", { html:
+      "Take " + N + " GPUs. Each one holds a buffer of the same shape and size — call it " +
+      "<b>S</b> bytes. The buffers hold different numbers: on GPU 2 that buffer might be the " +
+      "gradients computed from GPU 2's slice of the batch, on GPU 3 the gradients from GPU 3's " +
+      "slice. Nothing so far requires the GPUs to talk." }));
+
+    host.appendChild(NN.gpu.grid({
+      count: N,
+      label: function (g) { return "GPU " + g; },
+      render: function (g) {
+        return [
+          el("div", { class: "gpu-line" }, "buffer  S bytes"),
+          NN.gpu.shard({ name: "buf", parts: N, mine: g, color: NN.gpu.opColor("all_reduce") }),
+          el("div", { class: "gpu-line", style: { color: "var(--ink-muted)" } },
+            "holds " + R(N).map(function (s) { return L[s] + g; }).join(", "))
+        ];
+      }
+    }));
+
+    host.appendChild(el("p", { html:
+      "A <b>collective</b> is an operation that every rank in the group calls, at the same point " +
+      "in its program, with the same op and the same group. It is not a message; it is a " +
+      "rendezvous with a data movement pattern attached. Nobody finishes until everybody arrives " +
+      "— which is why one slow rank stalls the whole job, and why a rank that forgets to call " +
+      "the collective produces a hang rather than an error." }));
+
+    host.appendChild(el("p", { html:
+      "The alternative is <b>point-to-point</b>: one named sender, one named receiver, nobody " +
+      "else involved. Pipeline parallelism is built from these; everything else on this site is " +
+      "built from collectives. Switch between the two:" }));
+
+    const p2pSpec = SPEC.p2p();
+    const arSpec  = SPEC.all_reduce();
+    const holder  = el("div", {});
+    const noteEl  = el("div", { class: "phasenote" });
+    const btnRow  = el("div", { class: "togglerow" });
+    let current = null;
+
+    function mount(kind) {
+      holder.textContent = "";
+      const spec = kind === "p2p" ? p2pSpec : arSpec;
+      const viz = buildViz(spec, kind === "p2p" ? "p2p" : "all_reduce");
+      const st = localStepper({
+        count: spec.states.length,
+        onStep: function (i, animate) {
+          viz.show(i, animate);
+          noteEl.textContent = spec.labels[i] || "";
+        }
+      });
+      noteEl.textContent = spec.labels[0];
+      holder.appendChild(viz.node);
+      holder.appendChild(st.bar);
+      current = { viz: viz, step: st };
+      NN.$$(".btn", btnRow).forEach(function (b) {
+        b.classList.toggle("on", b.dataset.kind === kind);
+      });
+    }
+    ["p2p", "collective"].forEach(function (k) {
+      const b = el("button", { class: "btn" },
+        k === "p2p" ? "point-to-point  send(0→2)" : "collective  all_reduce");
+      b.dataset.kind = k;
+      b.addEventListener("click", function () { mount(k); if (current) current.step.replay(); });
+      btnRow.appendChild(b);
+    });
+    host.appendChild(btnRow);
+    host.appendChild(holder);
+    host.appendChild(noteEl);
+    mount("p2p");
+
+    host.appendChild(NN.callout("key", "This is the whole vocabulary",
+      "There is no third mechanism. Data crosses between GPUs either as a point-to-point " +
+      "send/recv or as one of a small closed set of collectives — and the set is closed because " +
+      "these are the patterns a network can implement at full bandwidth without a scheduler. " +
+      "Every parallelism strategy in pages 10–14 is therefore just an answer to two " +
+      "questions: <em>which tensor is sharded</em>, and <em>which collective repairs the sharding, " +
+      "when</em>. DDP is one <code>all_reduce</code> per step. ZeRO-2 is a " +
+      "<code>reduce_scatter</code> plus an <code>all_gather</code>. Tensor parallel is two " +
+      "<code>all_reduce</code>s per block, on the critical path. Pipeline parallel is " +
+      "<code>p2p</code> and nothing else."));
+
+    host.appendChild(el("div", { class: "srcnote", html:
+      "The " + P.collectives.length + " entries below come from " +
+      "<code>PARALLEL.collectives</code>, generated by <code>code/parallel_toy.py</code>. " +
+      "The chunk contents in every animation are computed by applying the operation's own " +
+      "definition to a symbolic buffer, so the “after” picture is derived, not drawn." }));
+  })();
+
+  /* ======================================================================
+     SECTION 2 — the eight operations
+     ====================================================================== */
+  const OPS = ["broadcast", "scatter", "gather", "all_gather",
+               "reduce", "reduce_scatter", "all_reduce", "all_to_all"];
+  (function () {
+    const host = NN.$("#opsBody");
+
+    host.appendChild(el("p", { html:
+      "Eight operations. Each card animates the same " + N + "-GPU picture: " + N +
+      " boxes, " + N + " chunk slots each, real blocks travelling between them. Step through with " +
+      "<b>Next</b>, or hit <b>Replay</b> to watch the whole thing. The dashed arcs show the routing " +
+      "for the phase you are on, so a paused frame still reads. Colour follows " +
+      "<code>NN.gpu.opColor</code> — orange for operations that move gradients, blue for weights, " +
+      "green for activations — and every block is labelled, because the colour is decoration and " +
+      "the label is the identity." }));
+
+    const jump = el("div", { class: "opjump" });
+    OPS.forEach(function (o) {
+      jump.appendChild(el("a", { href: "#op-" + o, style: { color: NN.gpu.opColor(o) } }, o));
+    });
+    host.appendChild(jump);
+
+    host.appendChild(el("p", { class: "small muted", html:
+      "Notation: <code>" + L[0] + "2</code> is chunk-slot " + L[0] + " as it started life on GPU 2. " +
+      "<code>" + L[0] + "0+" + L[0] + "1+" + L[0] + "2+" + L[0] +
+      "3</code> is that slot after an elementwise sum across all " + N + " ranks. A faded, dashed " +
+      "block is data this GPU has handed off and will not use again." }));
+
+    OPS.forEach(function (o) { host.appendChild(opCard(o, SPEC[o]())); });
+
+    host.appendChild(NN.callout("warn", "The two pairs people mix up",
+      "<p><b>reduce vs gather.</b> They draw the same arrows — everything converges on one rank. " +
+      "They are not the same operation. <code>gather</code> moves 1/N of the buffer from each " +
+      "rank and lays the pieces side by side; the result is N times bigger than any input. " +
+      "<code>reduce</code> moves the WHOLE buffer from each rank and adds the values on top of " +
+      "each other; the result is exactly the same shape as any input. If your output shape " +
+      "changed, it was a gather.</p>" +
+      "<p><b>all_gather vs all_to_all.</b> Both are all-to-all in the informal sense, both cost " +
+      "(N-1)/N × S, and both end with every rank having talked to every other rank. Look at what " +
+      "each rank ENDS with. After <code>all_gather</code> every rank holds the identical " +
+      "concatenation. After <code>all_to_all</code> every rank holds something different — it is " +
+      "a transpose, and the output of rank j is column j of the input matrix. If all ranks agree " +
+      "afterwards it was an all-gather.</p>"));
+  })();
+
+  /* ======================================================================
+     SECTION 3 — duality
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#dualBody");
+
+    host.appendChild(el("p", { html:
+      "Read the <code>inverse</code> column of the previous section and the pattern is hard to " +
+      "miss: the eight operations are four pairs. <code>broadcast</code>↔" +
+      "<code>reduce</code>, <code>scatter</code>↔<code>gather</code>, " +
+      "<code>all_gather</code>↔<code>reduce_scatter</code>, and two operations that are " +
+      "their own inverse, <code>all_reduce</code> and <code>all_to_all</code>." }));
+
+    const WHY = {
+      broadcast: "Broadcast is the linear map yᵢ = x, a copy into N outputs. The adjoint of " +
+                 "“copy” is “sum”: dx = Σᵢ dyᵢ, landing on the " +
+                 "one rank that held x. That is a reduce.",
+      reduce:    "Reduce is y = Σᵢ xᵢ. The adjoint of a sum is a copy: every rank's " +
+                 "dxᵢ equals dy. That is a broadcast.",
+      scatter:   "Scatter is a selection: yᵢ = x[i]. Its adjoint writes each piece back into " +
+                 "the slot it came from, concatenated onto the root — a gather.",
+      gather:    "Gather is concatenation onto one rank. Its adjoint slices the incoming gradient " +
+                 "and hands piece i to rank i — a scatter.",
+      all_gather: "All-gather replicates every shard onto every rank. Each shard therefore has N " +
+                 "copies downstream; the adjoint sums those N gradients and leaves the result " +
+                 "where the shard lives — exactly reduce-scatter.",
+      reduce_scatter: "Reduce-scatter sums N copies and keeps one shard. Its adjoint replicates " +
+                 "that shard's gradient back to all N ranks — exactly all-gather.",
+      all_reduce: "The matrix of an all-reduce is the all-ones block J: every output depends on " +
+                 "every input with weight 1. J is symmetric, so Jᵀ = J and the operation is " +
+                 "its own adjoint.",
+      all_to_all: "An all-to-all is a permutation matrix. The transpose of a permutation is its " +
+                 "inverse permutation — which is another all-to-all, with the routing table " +
+                 "reversed.",
+      p2p:       "send(i→j) has adjoint send(j→i): the same primitive with the arrow " +
+                 "turned round. This is why pipeline parallel's backward pass is the forward " +
+                 "pass's p2p graph, reversed."
+    };
+
+    const flipBtn = el("button", { class: "btn" }, "Flip to backward pass");
+    let flipped = false;
+    const tbl = el("table", { class: "data duality" });
+    const cap = el("p", { class: "small muted" });
+
+    function build() {
+      tbl.textContent = "";
+      const head = el("tr", {}, [
+        el("th", {}, flipped ? "backward runs" : "forward runs"),
+        el("th", {}, flipped ? "because forward ran" : "so backward runs"),
+        el("th", { class: "wrap" }, "why (the adjoint)")
+      ]);
+      tbl.appendChild(el("thead", {}, head));
+      const body = el("tbody", {});
+      P.collectives.forEach(function (c, i) {
+        const inv = c.inverse === "itself" ? c.op : c.inverse;
+        const a = flipped ? inv : c.op;
+        const b = flipped ? c.op : inv;
+        const row = el("tr", { class: i % 2 ? "pairA" : "" }, [
+          el("td", {}, [el("span", { class: "opn", style: { color: NN.gpu.opColor(a) } }, a)]),
+          el("td", {}, [
+            el("span", { class: "opn", style: { color: NN.gpu.opColor(b) } }, b),
+            c.inverse === "itself" ? el("span", { class: "selfinv" }, "  (self-inverse)") : null
+          ]),
+          el("td", { class: "wrap", style: { textAlign: "left", fontSize: ".84rem" } },
+            WHY[c.op] || "")
+        ]);
+        body.appendChild(row);
+      });
+      tbl.appendChild(body);
+      cap.innerHTML = flipped
+        ? "Showing the backward direction. Read it as: <em>if the backward pass has to run this, " +
+          "the forward pass ran that.</em>"
+        : "Showing the forward direction. Read it as: <em>if the forward pass runs this, the " +
+          "backward pass must run that.</em>";
+    }
+    flipBtn.addEventListener("click", function () { flipped = !flipped; build(); });
+    build();
+
+    host.appendChild(el("div", { class: "togglerow" }, [flipBtn]));
+    host.appendChild(el("div", { class: "scrollx" }, [tbl]));
+    host.appendChild(cap);
+
+    host.appendChild(NN.callout("why", "Why this matters: forward and backward are conjugates",
+      "<p>A collective is a linear map on the concatenation of all N buffers. Autograd does not " +
+      "care that the map is implemented in a network — it needs the map's <em>adjoint</em> " +
+      "(transpose), the same as for any matmul. So the backward pass of a collective is another " +
+      "collective, and which one is fixed by linear algebra, not by taste.</p>" +
+      "<p>The consequence that surprises people is that <b>a no-op in one direction becomes a " +
+      "collective in the other</b>. If the forward pass merely uses a locally-held shard and does " +
+      "no communication, its adjoint may still have to sum N partial gradients. On page 12 this " +
+      "is the entire content of the two functions Megatron calls <code>f</code> and " +
+      "<code>g</code>: <code>f</code> is identity forward and all-reduce backward, " +
+      "<code>g</code> is all-reduce forward and identity backward. They are the same object seen " +
+      "from the two ends.</p>" +
+      "<p>The same duality is why FSDP's schedule is what it is: <code>all_gather</code> the " +
+      "weights to run the forward, <code>reduce_scatter</code> the gradients on the way back. " +
+      "Page 11 spends its time on that pair.</p>"));
+  })();
+
+  /* ======================================================================
+     SECTION 4 — the decomposition
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#composeBody");
+
+    host.appendChild(el("p", { html:
+      "This is the single most useful fact on the page. An <code>all_reduce</code> is not a " +
+      "primitive. It is a <code>reduce_scatter</code> followed by an <code>all_gather</code>, and " +
+      "every production implementation builds it that way." }));
+
+    const spec = SPEC.all_reduce();
+    const viz  = buildViz(spec, "all_reduce");
+    const note = el("div", { class: "phasenote" });
+    const step = localStepper({
+      count: spec.states.length,
+      onStep: function (i, animate) {
+        viz.show(i, animate);
+        note.textContent = spec.labels[i];
+      }
+    });
+    note.textContent = spec.labels[0];
+    host.appendChild(viz.node);
+    host.appendChild(step.bar);
+    host.appendChild(note);
+
+    const fRS = ringFactor("reduce_scatter", N);
+    const fAG = ringFactor("all_gather", N);
+    const fAR = ringFactor("all_reduce", N);
+
+    const ar = el("table", { class: "arith" });
+    ar.appendChild(el("tr", {}, [
+      el("td", { class: "term" }, "reduce_scatter, " + byOp.reduce_scatter.ring_factor),
+      el("td", { class: "r" }, NN.fmt(fRS, 4) + "×S"),
+      el("td", { class: "term muted" }, "every rank ends owning 1/" + N + " of the answer")
+    ]));
+    ar.appendChild(el("tr", {}, [
+      el("td", { class: "term" }, "all_gather, " + byOp.all_gather.ring_factor),
+      el("td", { class: "r" }, NN.fmt(fAG, 4) + "×S"),
+      el("td", { class: "term muted" }, "every rank ends holding all of it")
+    ]));
+    ar.appendChild(el("tr", { class: "sum" }, [
+      el("td", { class: "term" }, "all_reduce, " + byOp.all_reduce.ring_factor),
+      el("td", { class: "r" }, NN.fmt(fAR, 4) + "×S"),
+      el("td", { class: "term muted" }, "sum of the two halves, exactly")
+    ]));
+    host.appendChild(el("div", { class: "smallcap" }, "the arithmetic, at N = " + N));
+    host.appendChild(ar);
+
+    host.appendChild(NN.callout("key", "Why ZeRO-2 gets gradient sharding for free",
+      "<p>DDP runs one <code>all_reduce</code> over the gradients. ZeRO-2 runs the " +
+      "<code>reduce_scatter</code> half, applies the optimizer to the shard each rank now owns, " +
+      "and <code>all_gather</code>s the updated <em>weights</em> instead of the gradients. The " +
+      "second half was going to happen anyway — ZeRO-2 just moves it to after the optimizer step " +
+      "and carries a smaller object. Same collectives, same total bytes, one Nth of the gradient " +
+      "and optimizer memory.</p>" +
+      "<p>That is why <code>PARALLEL.strategies.zero2.comm_vs_ddp</code> reads " +
+      "<b>" + NN.fmt(P.strategies.zero2.comm_vs_ddp, 2) + "×</b>: not “about the " +
+      "same”, but the same number. The toy model's own schedule proves it below.</p>"));
+
+    const ddpC = P.strategies.ddp.schedule[0];
+    const z2   = P.strategies.zero2.schedule;
+    const z2sent = z2.reduce(function (a, c) { return a + c.sent_per_gpu_elements; }, 0);
+
+    const g2 = el("div", { class: "grid2" });
+    const left = el("div", {}, [
+      el("div", { class: "smallcap" }, "DDP — " + P.strategies.ddp.name),
+      NN.gpu.commCard(ddpC),
+      el("div", { class: "hint", style: { marginTop: "8px" } },
+        "total sent per GPU: " + NN.fmt(ddpC.sent_per_gpu_elements, 2) + " elements")
+    ]);
+    const right = el("div", {}, [
+      el("div", { class: "smallcap" }, "ZeRO-2 — " + P.strategies.zero2.name),
+      z2[0] ? NN.gpu.commCard(z2[0]) : null,
+      z2[1] ? NN.gpu.commCard(z2[1]) : null,
+      el("div", { class: "hint", style: { marginTop: "8px" } },
+        "total sent per GPU: " + NN.fmt(z2sent, 2) + " elements — " +
+        (Math.abs(z2sent - ddpC.sent_per_gpu_elements) < 1e-6
+          ? "identical to DDP" : "different from DDP"))
+    ]);
+    g2.appendChild(left); g2.appendChild(right);
+    host.appendChild(g2);
+
+    host.appendChild(el("div", { class: "smallcap" }, "who owns which gradient shard afterwards"));
+    host.appendChild(NN.gpu.grid({
+      count: N,
+      label: function (g) { return "GPU " + g; },
+      render: function (g) {
+        return [
+          NN.gpu.shard({ name: "grad", parts: N, mine: g, color: NN.gpu.opColor("reduce_scatter") }),
+          NN.gpu.shard({ name: "opt", parts: N, mine: g, color: "var(--optimizer)" }),
+          el("div", { class: "gpu-line", style: { color: "var(--ink-muted)" } },
+            NN.count(Math.round(P.meta.n_params / N)) + " of " + NN.count(P.meta.n_params) + " params")
+        ];
+      }
+    }));
+    host.appendChild(el("p", { class: "small muted", html:
+      "The toy model in <code>code/parallel_toy.py</code> has " + P.meta.n_params + " parameters " +
+      "over " + P.meta.n_layers + " layers on " + N + " GPUs, so each rank owns " +
+      "≈" + NN.fmt(P.meta.n_params / N, 2) + " of them. Page 11 runs the full three-stage " +
+      "version of this and checks it against the single-GPU answer." }));
+  })();
+
+  /* ======================================================================
+     SECTION 5 — the ring
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#ringBody");
+
+    host.appendChild(el("p", { html:
+      "Now the implementation. Arrange the " + N + " GPUs in a logical ring: every GPU sends only " +
+      "to its right neighbour and receives only from its left. Both directions of every link are " +
+      "busy for the whole operation, which is what makes it bandwidth-optimal. The all-reduce " +
+      "takes <b>2(N−1)</b> phases: " + (N - 1) + " reduce-scatter phases, then " + (N - 1) +
+      " all-gather phases." }));
+
+    const spec = ringSpec();
+    const viz  = buildViz(spec, "all_reduce");
+    const ringSvg = NN.gpu.ring({ count: N, size: 260, r: 92 });
+
+    const lay = el("div", { class: "ringlay" });
+    const leftCol = el("div", {}, [ringSvg]);
+    const tbl = el("table", { class: "ringtbl" });
+    const rows = [];
+
+    /* what each GPU sends at each phase, straight out of the spec */
+    const thead = el("tr", {}, [el("th", {}, "phase"), el("th", {}, "half")]);
+    for (let g = 0; g < N; g++) thead.appendChild(el("th", {}, "GPU " + g + " sends"));
+    thead.appendChild(el("th", {}, "sent/GPU"));
+    tbl.appendChild(el("thead", {}, thead));
+    const tb = el("tbody", {});
+    let cum = 0;
+    for (let k = 1; k < spec.states.length; k++) {
+      const kind = spec.kinds[k];
+      cum += phaseCost(spec.moves[k]).max;
+      const tr = el("tr", {}, [
+        el("td", { class: "ph" }, String(k)),
+        el("td", { class: kind }, kind === "rs" ? "reduce-scatter" : "all-gather")
+      ]);
+      for (let g = 0; g < N; g++) {
+        const m = spec.moves[k].filter(function (x) { return x.src === g; })[0];
+        tr.appendChild(el("td", { class: kind },
+          m ? ctext(m.val) + " → G" + m.dst : "—"));
+      }
+      tr.appendChild(el("td", { class: "ph" }, frac(cum)));
+      tb.appendChild(tr); rows.push(tr);
+    }
+    tbl.appendChild(tb);
+    lay.appendChild(leftCol);
+    lay.appendChild(el("div", { class: "scrollx" }, [tbl]));
+
+    const note = el("div", { class: "phasenote" });
+    const mount = el("div", {});
+    host.appendChild(viz.node);
+    host.appendChild(mount);
+    host.appendChild(note);
+    host.appendChild(lay);
+
+    const labels = spec.labels.map(function (_, i) {
+      return i === 0 ? "start" : (spec.kinds[i] === "rs" ? "reduce-scatter " + i
+                                : "all-gather " + (i - (N - 1)));
+    });
+
+    const stepper = new NN.Stepper({
+      mount: mount,
+      count: spec.states.length,
+      labels: labels,
+      autoplayMs: REDUCED ? 300 : 1250,
+      onStep: function (i, dir) {
+        viz.show(i, dir > 0);
+        rows.forEach(function (r, k) { r.classList.toggle("now", k === i - 1); });
+        let c = 0;
+        for (let k = 1; k <= i; k++) c += phaseCost(spec.moves[k]).max;
+        note.textContent = "";
+        note.appendChild(el("span", {}, spec.labels[i]));
+        note.appendChild(el("span", { class: "cost" },
+          i === 0 ? "nothing sent yet"
+                  : "after " + i + " of " + (spec.states.length - 1) + " phases each GPU has sent " +
+                    frac(c) + " (" + i + " chunks of S/" + N + ")"));
+        if (i === 0) { ringSvg.step(null); ringSvg.setLabels(R(N).map(function (g) { return "G" + g; })); }
+        else {
+          ringSvg.step(i, spec.phaseColor(i));
+          ringSvg.setLabels(spec.moves[i].map(function (m) {
+            return L[m.fs] + "→";
+          }));
+        }
+      }
+    });
+
+    host.appendChild(el("p", { class: "small muted" },
+      "Arrow keys step this one; space plays it."));
+
+    /* ---- the cost derivation, straight from the animation ---- */
+    host.appendChild(el("div", { class: "smallcap" }, "reading the cost off the animation"));
+    const der = el("table", { class: "arith" });
+    der.appendChild(el("tr", {}, [
+      el("td", { class: "term" }, "chunk size"),
+      el("td", { class: "r" }, "S / " + N),
+      el("td", { class: "term muted" }, "the buffer is cut into N chunks")
+    ]));
+    der.appendChild(el("tr", {}, [
+      el("td", { class: "term" }, "phases"),
+      el("td", { class: "r" }, "2(N−1) = " + (2 * (N - 1))),
+      el("td", { class: "term muted" }, (N - 1) + " to reduce, " + (N - 1) + " to gather")
+    ]));
+    der.appendChild(el("tr", {}, [
+      el("td", { class: "term" }, "chunks sent per GPU per phase"),
+      el("td", { class: "r" }, "1"),
+      el("td", { class: "term muted" }, "exactly one — look at any row of the table above")
+    ]));
+    der.appendChild(el("tr", { class: "sum" }, [
+      el("td", { class: "term" }, "bytes sent per GPU"),
+      el("td", { class: "r" }, "2(N−1)/N × S = " + NN.fmt(ringFactor("all_reduce", N), 3) + "×S"),
+      el("td", { class: "term muted" }, "matches PARALLEL.ring.table at N=" + N + ": " +
+        (function () {
+          const r = P.ring.table.filter(function (t) { return t.world === N; })[0];
+          return r ? NN.fmt(r.all_reduce, 4) : "—";
+        })())
+    ]));
+    host.appendChild(der);
+
+    host.appendChild(el("div", { class: "smallcap" }, "PARALLEL.ring.table — the factor as N grows"));
+    host.appendChild(NN.chart.bars({
+      items: P.ring.table.map(function (r) {
+        return {
+          label: "N = " + r.world,
+          value: r.all_reduce,
+          color: NN.gpu.opColor("all_reduce"),
+          sub: "×S per GPU"
+        };
+      }),
+      unit: "×S",
+      max: 2.2,
+      limit: { value: 2, label: "asymptote 2×S" }
+    }));
+
+    host.appendChild(NN.callout("key", "The point of the whole algorithm",
+      "<p>2(N−1)/N × S → 2S as N grows. At N=" +
+      P.ring.table[0].world + " it is " + NN.fmt(P.ring.table[0].all_reduce, 4) +
+      "×S; at N=" + P.ring.table[P.ring.table.length - 1].world + " it is " +
+      NN.fmt(P.ring.table[P.ring.table.length - 1].all_reduce, 4) +
+      "×S. <b>The bytes each GPU puts on the wire do not grow with the number of GPUs.</b> " +
+      "Doubling the cluster does not double anyone's egress; it converges on two buffer-sizes " +
+      "and stops. That single property is why ring all-reduce scales to thousands of ranks and " +
+      "why data parallelism stayed viable long after everything else about training changed.</p>" +
+      "<p>The bill is paid elsewhere: the number of sequential phases is 2(N−1), so the " +
+      "latency term grows linearly in N. At N=" + P.ring.table[P.ring.table.length - 1].world +
+      " that is " + (2 * (P.ring.table[P.ring.table.length - 1].world - 1)) +
+      " dependent hops before the operation completes. Section 7 is about what to do instead " +
+      "when that term dominates.</p>"));
+
+    host.appendChild(el("div", { class: "srcnote", html:
+      "<b>PARALLEL.ring.explanation</b> — " + P.ring.explanation }));
+  })();
+
+  /* ======================================================================
+     SECTION 6 — the calculator
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#calcBody");
+
+    /* ------------------------------------------------------------------
+       Interconnect figures are hardware specifications. They are external
+       to this model exactly like T.reference_configs, and are quoted, not
+       derived. Bandwidths are PER DIRECTION per GPU, because that is what
+       a cost model that counts bytes SENT needs; vendors normally quote
+       the sum of both directions, which is where "900 GB/s" comes from.
+       GB = 10^9 bytes, matching NN.bytes and every line-rate figure.
+       ------------------------------------------------------------------ */
+    const LINKS = [
+      { id: "nvl4", name: "NVLink 4 · H100", bw: 450e9, alpha: 2.0e-6, scope: "intra-node",
+        note: "18 links × 25 GB/s per direction. The familiar 900 GB/s figure is both " +
+              "directions summed; a ring counts one." },
+      { id: "nvl5", name: "NVLink 5 · B200", bw: 900e9, alpha: 2.0e-6, scope: "intra-node",
+        note: "18 links × 50 GB/s per direction; 1.8 TB/s bidirectional aggregate." },
+      { id: "nvl3", name: "NVLink 3 · A100", bw: 300e9, alpha: 2.5e-6, scope: "intra-node",
+        note: "12 links × 25 GB/s per direction; 600 GB/s bidirectional." },
+      { id: "ib800", name: "InfiniBand XDR 800G", bw: 100e9, alpha: 3.0e-6, scope: "inter-node",
+        note: "800 Gb/s effective data rate per port per direction = 100 GB/s." },
+      { id: "ib400", name: "InfiniBand NDR 400G", bw: 50e9, alpha: 3.0e-6, scope: "inter-node",
+        note: "400 Gb/s per port per direction = 50 GB/s. A DGX H100 carries eight such ports, " +
+              "one rail per GPU, so this is also the per-GPU figure." },
+      { id: "ib200", name: "InfiniBand HDR 200G", bw: 25e9, alpha: 3.0e-6, scope: "inter-node",
+        note: "200 Gb/s per port per direction = 25 GB/s." },
+      { id: "roce400", name: "RoCEv2 400 GbE", bw: 50e9, alpha: 4.5e-6, scope: "inter-node",
+        note: "Same line rate as NDR. The latency figure is higher and far more variable because " +
+              "it depends on how the Ethernet fabric is configured for losslessness — PFC, " +
+              "ECN/DCQCN tuning, and buffer headroom all show up in the tail, not the mean." },
+      { id: "pcie5", name: "PCIe Gen5 ×16", bw: 64e9, alpha: 2.5e-6, scope: "intra-node",
+        note: "≈64 GB/s per direction of raw signalling; achievable payload is lower after " +
+              "protocol overhead. This is the path when a box has no NVLink." },
+      { id: "pcie4", name: "PCIe Gen4 ×16", bw: 32e9, alpha: 2.5e-6, scope: "intra-node",
+        note: "≈32 GB/s per direction." }
+    ];
+    const LINK_SOURCE = "vendor specifications for the named products; external to this model, " +
+                        "quoted not derived. Latencies are order-of-magnitude figures for a " +
+                        "small message at the NCCL level, including one switch hop — they " +
+                        "are not link-layer wire latencies and they are not a benchmark result.";
+
+    const SIZES = [];
+    for (let e = 3; e <= 10.4; e += 0.05) SIZES.push(e);
+    const WORLDS = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024];
+
+    const state = { sizeIdx: Math.round((7.4 - 3) / 0.05), worldIdx: 3, link: "nvl4", op: "all_reduce" };
+
+    const ctl = el("div", { class: "ctlgrid" });
+
+    function slider(label, max, get, set, fmt) {
+      const rv = el("span", { class: "rv" });
+      const inp = el("input", { type: "range", min: 0, max: String(max), step: "1", value: String(get()) });
+      const f = el("div", { class: "fld" }, [
+        el("label", {}, [el("span", {}, label), rv]), inp
+      ]);
+      inp.addEventListener("input", function () { set(+inp.value); render(); });
+      f.sync = function () { rv.textContent = fmt(); };
+      return f;
+    }
+
+    const sizeF = slider("tensor size S", SIZES.length - 1,
+      function () { return state.sizeIdx; },
+      function (v) { state.sizeIdx = v; },
+      function () { return NN.bytes(bytesS()); });
+
+    const worldF = slider("world size N", WORLDS.length - 1,
+      function () { return state.worldIdx; },
+      function (v) { state.worldIdx = v; },
+      function () { return String(WORLDS[state.worldIdx]); });
+
+    const linkSel = el("select", {});
+    LINKS.forEach(function (k) { linkSel.appendChild(el("option", { value: k.id }, k.name)); });
+    linkSel.value = state.link;
+    linkSel.addEventListener("change", function () { state.link = linkSel.value; render(); });
+
+    const opSel = el("select", {});
+    P.collectives.forEach(function (c) { opSel.appendChild(el("option", { value: c.op }, c.op)); });
+    opSel.value = state.op;
+    opSel.addEventListener("change", function () { state.op = opSel.value; render(); });
+
+    const linkNote = el("div", { class: "hint" });
+
+    ctl.appendChild(el("div", { class: "panel" }, [
+      el("h4", {}, "payload"), sizeF, worldF
+    ]));
+    ctl.appendChild(el("div", { class: "panel" }, [
+      el("h4", {}, "operation"),
+      el("div", { class: "fld" }, [el("label", {}, [el("span", {}, "collective")]), opSel]),
+      el("div", { class: "hint", id: "opHint" })
+    ]));
+    ctl.appendChild(el("div", { class: "panel" }, [
+      el("h4", {}, "interconnect · per direction"),
+      el("div", { class: "fld" }, [el("label", {}, [el("span", {}, "link")]), linkSel]),
+      linkNote
+    ]));
+
+    host.appendChild(el("p", { html:
+      "The ring cost model is two terms: a latency term proportional to the number of sequential " +
+      "hops, and a bandwidth term proportional to the bytes each GPU must put on the wire. " +
+      "<code>t = hops × α + (factor × S) / B</code>. Set the knobs and watch which " +
+      "term wins." }));
+    host.appendChild(ctl);
+
+    const tilesHost = el("div", {});
+    const splitHost = el("div", {});
+    const arithHost = el("div", {});
+    const barsHost  = el("div", {});
+    host.appendChild(tilesHost);
+    host.appendChild(splitHost);
+    host.appendChild(arithHost);
+    host.appendChild(el("div", { class: "smallcap" },
+      "fraction of peak link bandwidth actually reached, at this N and link"));
+    host.appendChild(barsHost);
+
+    function bytesS() { return Math.pow(10, SIZES[state.sizeIdx]); }
+    function link() { return LINKS.filter(function (l) { return l.id === state.link; })[0]; }
+
+    function model(S, world, op, lk) {
+      const f = ringFactor(op, world);
+      const hops = ringHops(op, world);
+      const sent = f * S;
+      const tLat = hops * lk.alpha;
+      const tBw  = sent / lk.bw;
+      const t = tLat + tBw;
+      return { f: f, hops: hops, sent: sent, tLat: tLat, tBw: tBw, t: t,
+               algbw: S / t, busbw: sent / t };
+    }
+
+    function ms(t) {
+      if (t < 1e-6) return NN.fmt(t * 1e9, 1) + " ns";
+      if (t < 1e-3) return NN.fmt(t * 1e6, 1) + " µs";
+      if (t < 1)    return NN.fmt(t * 1e3, 2) + " ms";
+      return NN.fmt(t, 3) + " s";
+    }
+
+    function render() {
+      sizeF.sync(); worldF.sync();
+      const S = bytesS(), world = WORLDS[state.worldIdx], lk = link();
+      const m = model(S, world, state.op, lk);
+      const col = NN.gpu.opColor(state.op);
+      const meta = byOp[state.op];
+
+      linkNote.innerHTML = "<b>" + NN.bytes(lk.bw) + "/s</b> per direction · α ≈ " +
+        NN.fmt(lk.alpha * 1e6, 1) + " µs · " + lk.scope + "<br>" + lk.note;
+      NN.$("#opHint").innerHTML =
+        "<b>" + meta.sig + "</b><br>" + meta.what +
+        "<br><br>ring factor <b>" + meta.ring_factor + "</b> = " + NN.fmt(m.f, 4) +
+        " at N=" + world + "; " + m.hops + " sequential hop(s).";
+
+      tilesHost.textContent = "";
+      tilesHost.appendChild(NN.tiles([
+        { k: "bytes sent / GPU", v: NN.bytes(m.sent), s: NN.fmt(m.f, 3) + "×S" },
+        { k: "wall clock", v: ms(m.t), s: m.hops + " hops + " + NN.bytes(m.sent) + " on the wire" },
+        { k: "latency term", v: ms(m.tLat), s: NN.fmt(m.tLat / m.t * 100, 1) + "% of the time" },
+        { k: "bandwidth term", v: ms(m.tBw), s: NN.fmt(m.tBw / m.t * 100, 1) + "% of the time" },
+        { k: "bus bandwidth", v: NN.bytes(m.busbw) + "/s",
+          s: NN.fmt(m.busbw / lk.bw * 100, 1) + "% of peak" },
+        { k: "algorithm bandwidth", v: NN.bytes(m.algbw) + "/s", s: "S / t, the number users feel" }
+      ]));
+
+      splitHost.textContent = "";
+      const latPct = m.tLat / m.t * 100;
+      const strip = el("div", { class: "splitbar" }, [
+        el("div", { class: "splitseg lat", style: { flexGrow: String(Math.max(m.tLat, 1e-12)) },
+                    title: "latency " + ms(m.tLat) }, latPct > 9 ? "latency " + NN.fmt(latPct, 0) + "%" : ""),
+        el("div", { class: "splitseg bw", style: { flexGrow: String(Math.max(m.tBw, 1e-12)) },
+                    title: "bandwidth " + ms(m.tBw) },
+           100 - latPct > 9 ? "bandwidth " + NN.fmt(100 - latPct, 0) + "%" : "")
+      ]);
+      splitHost.appendChild(el("div", { class: "smallcap" }, "where the time goes"));
+      splitHost.appendChild(strip);
+      splitHost.appendChild(el("div", { class: "hint" },
+        latPct > 50
+          ? "Latency dominates. The wire is idle most of the operation — you are paying for " +
+            (m.hops + " round trips, not for bytes. Making the tensor bigger is almost free here.")
+          : "Bandwidth dominates. The links are the constraint; shrinking the message will not " +
+            "help much, and a lower-precision dtype will."));
+
+      arithHost.textContent = "";
+      const a = el("table", { class: "arith" });
+      a.appendChild(el("tr", {}, [
+        el("td", { class: "term" }, "S"),
+        el("td", { class: "r" }, NN.bytes(S)),
+        el("td", { class: "term muted" }, NN.count(Math.round(S / 4)) + " fp32 or " +
+          NN.count(Math.round(S / 2)) + " bf16 elements")
+      ]));
+      a.appendChild(el("tr", {}, [
+        el("td", { class: "term" }, "× ring factor " + meta.ring_factor),
+        el("td", { class: "r" }, NN.fmt(m.f, 4)),
+        el("td", { class: "term muted" }, "at N = " + world)
+      ]));
+      a.appendChild(el("tr", {}, [
+        el("td", { class: "term" }, "= bytes each GPU sends"),
+        el("td", { class: "r", style: { color: col } }, NN.bytes(m.sent)),
+        el("td", { class: "term muted" }, "and receives the same again")
+      ]));
+      a.appendChild(el("tr", {}, [
+        el("td", { class: "term" }, "÷ " + NN.bytes(lk.bw) + "/s"),
+        el("td", { class: "r" }, ms(m.tBw)),
+        el("td", { class: "term muted" }, "bandwidth term")
+      ]));
+      a.appendChild(el("tr", {}, [
+        el("td", { class: "term" }, "+ " + m.hops + " hops × " + NN.fmt(lk.alpha * 1e6, 1) + " µs"),
+        el("td", { class: "r" }, ms(m.tLat)),
+        el("td", { class: "term muted" }, "latency term")
+      ]));
+      a.appendChild(el("tr", { class: "sum" }, [
+        el("td", { class: "term" }, "= wall clock"),
+        el("td", { class: "r" }, ms(m.t)),
+        el("td", { class: "term muted" }, NN.bytes(m.algbw) + "/s of algorithm bandwidth")
+      ]));
+      arithHost.appendChild(a);
+
+      barsHost.textContent = "";
+      const probes = [64e3, 512e3, 4e6, 25e6, 256e6, 2e9];
+      barsHost.appendChild(NN.chart.bars({
+        items: probes.map(function (b) {
+          const mm = model(b, world, state.op, lk);
+          return {
+            label: NN.bytes(b),
+            value: mm.busbw / lk.bw * 100,
+            color: b === 25e6 ? NN.gpu.opColor("all_reduce") : "var(--accent)",
+            sub: ms(mm.t)
+          };
+        }),
+        unit: "%",
+        max: 105,
+        limit: { value: 100, label: "peak link bandwidth" }
+      }));
+      barsHost.appendChild(el("div", { class: "hint" },
+        "The highlighted bar is 25 MB, which is PyTorch DDP's default gradient bucket size " +
+        "(bucket_cap_mb). The shape of this chart is the entire argument for bucketing: a " +
+        "70-billion-parameter model has tens of thousands of individual gradient tensors, most of " +
+        "them small. All-reducing them one at a time would sit in the left-hand bars forever. " +
+        "DDP therefore concatenates gradients into buckets and fires one all-reduce per bucket, " +
+        "which also lets it overlap the reduction of bucket k with the backward pass that is " +
+        "still computing bucket k+1."));
+    }
+    render();
+
+    host.appendChild(el("div", { class: "srcnote", html:
+      "<b>Interconnect figures:</b> " + LINK_SOURCE + " Real measured bus bandwidth typically " +
+      "lands at 85–95% of the peak used here once protocol overhead, encoding and the " +
+      "receiver's copy engines are accounted for, so treat every time on this page as a floor." }));
+
+    /* --- the tie back to a real model --- */
+    const llama = T.reference_configs.models.filter(function (m) {
+      return m.name === T.reference_configs.default_model;
+    })[0] || T.reference_configs.models[T.reference_configs.models.length - 1];
+    const bf16 = T.memory.dtype_bytes.bf16;
+    const gradBytes = llama.params * bf16;
+    const nvl = LINKS[0];
+    const real = model(gradBytes, 8, "all_reduce", nvl);
+    const ib = LINKS.filter(function (l) { return l.id === "ib400"; })[0];
+    const realIB = model(gradBytes, 512, "all_reduce", ib);
+
+    host.appendChild(NN.callout("mem", "The toy model, and then the real one",
+      "<p>The " + T.meta.n_params + "-parameter model this site opens with produces " +
+      T.memory.param_gradient_elements + " parameter gradients — " +
+      NN.bytes(T.memory.param_gradient_elements * T.memory.dtype_bytes.fp32) + " in fp32. The " +
+      P.meta.n_params + "-parameter model in <code>parallel_toy.py</code> all-reduces " +
+      P.strategies.ddp.schedule[0].elements + " elements per step, of which each GPU sends " +
+      NN.fmt(P.strategies.ddp.schedule[0].sent_per_gpu_elements, 1) + ". Both fit in a single " +
+      "packet. The collective is pure overhead at this scale.</p>" +
+      "<p>Now " + llama.name + ": " + NN.count(llama.params) + " parameters, so a bf16 gradient " +
+      "buffer of <b>" + NN.bytes(gradBytes) + "</b>. One all-reduce over 8 GPUs on " + nvl.name +
+      " moves " + NN.bytes(real.sent) + " out of every GPU and takes <b>" + ms(real.t) +
+      "</b>. Over " + 512 + " GPUs on " + ib.name + " it moves " + NN.bytes(realIB.sent) +
+      " per GPU and takes <b>" + ms(realIB.t) + "</b> — note that the bytes barely moved " +
+      "between those two cases (" + NN.fmt(ringFactor("all_reduce", 8), 3) + "×S versus " +
+      NN.fmt(ringFactor("all_reduce", 512), 3) + "×S) and the link did all the damage. " +
+      "That is the whole reason a training cluster is built the way it is: keep the collective " +
+      "on NVLink where you can, and give the inter-node fabric as little of it as possible.</p>" +
+      "<p>It is also why ZeRO/FSDP and gradient bucketing are not micro-optimisations. At " +
+      NN.bytes(gradBytes) + " per step, a collective that is 30% slower than it needs to be costs " +
+      "real money for the entire run.</p>"));
+
+    host.appendChild(NN.callout("warn", "What this cost model leaves out",
+      "It assumes a homogeneous ring where every link has the same bandwidth, which stops being " +
+      "true the moment the ring crosses a node boundary — a real 512-GPU all-reduce is " +
+      "hierarchical: reduce-scatter on NVLink inside the node, all-reduce across nodes on the " +
+      "fabric, all-gather back on NVLink, so the slow link only ever carries S/8 per GPU. It " +
+      "ignores congestion and the tail: with many concurrent flows, the operation finishes when " +
+      "the <em>slowest</em> rank finishes, so p99 link behaviour matters more than the mean. It " +
+      "ignores kernel launch and CPU-side overhead, which on small messages is often larger than " +
+      "everything modelled here. And it assumes the collective is on the critical path — " +
+      "DDP works hard to overlap it with backward compute, and when the overlap is perfect the " +
+      "right number is not this one but zero."));
+  })();
+
+  /* ======================================================================
+     SECTION 7 — algorithms other than the ring
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#algoBody");
+    host.appendChild(NN.callout("why", "Pointer: ring, tree, and in-network reduction",
+      "<p><b>Ring</b> is bandwidth-optimal and latency-hostile: 2(N−1)/N × S of traffic, " +
+      "which is the theoretical minimum for an all-reduce, but 2(N−1) dependent hops. It is " +
+      "the right choice for large payloads.</p>" +
+      "<p><b>Trees</b> invert that trade. A reduction up a binary tree and a broadcast back down " +
+      "is O(log N) hops instead of O(N), at the cost of leaving half the links idle in each " +
+      "phase. NCCL's answer is the double binary tree: two complementary trees run at once so " +
+      "that every node is a leaf in one and an interior node in the other, recovering full " +
+      "bandwidth while keeping the logarithmic depth. NCCL picks between ring and tree per " +
+      "operation based on message size and world size; small messages at large N go to the tree.</p>" +
+      "<p><b>In-network reduction</b> removes the trade instead of balancing it. NVLink SHARP " +
+      "(NVLS) lets the NVSwitch itself do the multicast and the arithmetic, so an intra-node " +
+      "all-reduce moves roughly S rather than 2(N−1)/N × S — the data is summed in " +
+      "the switch instead of being carried round a ring. InfiniBand SHARP does the same thing in " +
+      "the fabric switch ASIC across nodes, aggregating up a tree of switches so the reduction " +
+      "completes in switch hops rather than rank hops. Both need the collective to be expressible " +
+      "as a tree over the physical topology, which is why the mapping of ranks to rails and " +
+      "switches stops being an implementation detail.</p>" +
+      "<p>This is a pointer, not a treatment. The thing worth carrying forward is that the " +
+      "<em>semantics</em> in section 2 are fixed and the <em>algorithm</em> underneath is a " +
+      "runtime choice — which is exactly why the rest of this site can reason about " +
+      "parallelism in terms of which collective runs when, and leave how it runs to NCCL.</p>"));
+
+    host.appendChild(el("div", { class: "smallcap" }, "the eight, in one line each"));
+    const t = el("table", { class: "data" });
+    const h = el("tr", {}, [
+      el("th", {}, "op"), el("th", {}, "signature"), el("th", {}, "ring cost / GPU"),
+      el("th", {}, "inverse"), el("th", { class: "wrap" }, "where you meet it")
+    ]);
+    t.appendChild(el("thead", {}, h));
+    const tb = el("tbody", {});
+    P.collectives.forEach(function (c) {
+      tb.appendChild(el("tr", {}, [
+        el("td", {}, [el("span", { style: { color: NN.gpu.opColor(c.op), fontWeight: 700 } }, c.op)]),
+        el("td", {}, c.sig),
+        el("td", { class: "n" }, c.ring_factor),
+        el("td", {}, c.inverse),
+        el("td", { class: "wrap", style: { textAlign: "left" } }, c.used_for)
+      ]));
+    });
+    t.appendChild(tb);
+    host.appendChild(el("div", { class: "scrollx" }, [t]));
+
+    host.appendChild(el("p", { class: "small muted", html:
+      "Next: page 10 spends one <code>all_reduce</code> per step and proves the result is " +
+      "numerically identical to single-GPU training. Everything after that is a rearrangement of " +
+      "the eight operations above." }));
+  })();
+
+  NN.page("collectives");
+})();
+</script>
+</body>
+</html>

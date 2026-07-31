@@ -1,0 +1,1710 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 11 ZeRO &amp; FSDP</title>
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* page-local layout only; every colour comes from design.css custom properties */
+.segbtns { display: flex; flex-wrap: wrap; gap: 6px; margin: 16px 0 6px; }
+.panel { background: var(--surface-2); border: 1px solid var(--hairline);
+         border-radius: 8px; padding: 13px 15px; }
+.panel h4 { margin: 0 0 10px; font-family: var(--mono); font-size: .7rem; letter-spacing: .13em;
+            text-transform: uppercase; color: var(--ink-muted); font-weight: 700; }
+.ctlgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+           gap: 13px; margin: 16px 0; }
+.fld { margin: 0 0 11px; }
+.fld:last-child { margin-bottom: 0; }
+.fld > label { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+               font-family: var(--mono); font-size: .74rem; color: var(--ink-2); margin-bottom: 3px; }
+.fld .rv { color: var(--ink); font-weight: 700; font-variant-numeric: tabular-nums; }
+.fld select, .fld input[type="range"] { width: 100%; }
+.fld select {
+  background: var(--surface-3); color: var(--ink); border: 1px solid var(--hairline);
+  border-radius: 6px; padding: 5px 7px; font-family: var(--mono); font-size: .8rem;
+}
+.fld.chk > label { justify-content: flex-start; align-items: center; cursor: pointer; }
+.fld.chk input { accent-color: var(--weight); margin-right: 7px; }
+
+.stagebox { display: grid; grid-template-columns: 1.25fr 1fr; gap: 20px; align-items: start; }
+@media (max-width: 900px) { .stagebox { grid-template-columns: 1fr; } }
+
+.arith { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .8rem;
+         font-variant-numeric: tabular-nums; margin: 4px 0 0; }
+.arith td { padding: 4px 8px; border-bottom: 1px solid var(--hairline-2); white-space: nowrap; }
+.arith td.r { text-align: right; }
+.arith td.term { color: var(--ink-2); white-space: normal; }
+.arith tr.sum td { border-top: 1px solid var(--hairline); border-bottom: none;
+                   font-weight: 700; color: var(--ink); padding-top: 7px; }
+.arith .op { color: var(--ink-muted); }
+
+.verdict { border-radius: 8px; padding: 14px 18px; margin: 14px 0; border: 1px solid var(--hairline);
+           background: var(--surface-2); display: flex; flex-wrap: wrap;
+           align-items: baseline; gap: 6px 18px; }
+.verdict .big { font-size: 1.6rem; font-weight: 800; letter-spacing: -.02em; line-height: 1.15; }
+.verdict .det { font-family: var(--mono); font-size: .85rem; color: var(--ink-2); }
+.verdict.ok  { border-left: 4px solid var(--good); }
+.verdict.ok .big  { color: var(--good); }
+.verdict.bad { border-left: 4px solid var(--critical); }
+.verdict.bad .big { color: var(--critical); }
+
+.stepnote { background: var(--surface-2); border: 1px solid var(--hairline);
+            border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0;
+            padding: 11px 15px; margin: 12px 0; min-height: 74px; }
+.stepnote .h { font-family: var(--mono); font-size: .78rem; font-weight: 700;
+               letter-spacing: .05em; margin-bottom: 4px; }
+.stepnote .b { font-size: .9rem; color: var(--ink-2); line-height: 1.55; }
+
+.walkgrid { display: grid; grid-template-columns: 1fr 220px; gap: 18px; align-items: start; }
+@media (max-width: 900px) { .walkgrid { grid-template-columns: 1fr; } }
+
+.residency { width: 100%; height: 132px; display: block; }
+.residency rect.b { transition: fill .25s, opacity .25s; }
+
+.ok  { color: var(--good); font-weight: 700; }
+.bad { color: var(--critical); font-weight: 700; }
+.kbdhint { font-size: .68rem; color: var(--ink-muted); font-family: var(--mono); margin-top: 6px; }
+table.data td.wrap, table.data th.wrap { white-space: normal; }
+.stripline { display: grid; grid-template-columns: 92px 1fr 150px; gap: 10px;
+             align-items: center; margin: 7px 0; }
+.stripline .nm { font-family: var(--mono); font-size: .78rem; color: var(--ink-2); }
+.stripline .vv { font-family: var(--mono); font-size: .78rem; text-align: right;
+                 font-variant-numeric: tabular-nums; }
+.stripline .memstrip { margin: 0; }
+@media (max-width: 700px) { .stripline { grid-template-columns: 78px 1fr; }
+                            .stripline .vv { grid-column: 2; text-align: left; } }
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 11</div>
+    <h1>ZeRO &amp; FSDP: Stop Replicating What You Don't Need</h1>
+    <p class="lede">DDP replicates everything. Four GPUs hold four identical copies of the
+      weights, the gradients and the optimizer state — three quarters of that is waste that
+      buys nothing. ZeRO asks one question: <em>which of these actually needs to be on every
+      GPU?</em> The answer, one class at a time, is the three stages. Nothing on this page
+      changes a single number the model computes.</p>
+    <noscript><p class="callout warn">This page builds every diagram and every number in the
+      browser from <code>assets/data/parallel.js</code> and <code>assets/data/trace.js</code>.
+      With JavaScript disabled you will see an empty shell.</p></noscript>
+  </div>
+
+  <section class="block" id="spine">
+    <h2>1 · The redundancy, made visible</h2>
+    <div id="spineBody"></div>
+  </section>
+
+  <section class="block" id="z1">
+    <h2>2 · ZeRO-1 — shard the optimizer state</h2>
+    <div id="z1Body"></div>
+  </section>
+
+  <section class="block" id="z2">
+    <h2>3 · ZeRO-2 — shard the gradients, for free</h2>
+    <div id="z2Body"></div>
+  </section>
+
+  <section class="block" id="z3">
+    <h2>4 · ZeRO-3 / FSDP — shard the parameters themselves</h2>
+    <div id="z3Body"></div>
+  </section>
+
+  <section class="block" id="comm">
+    <h2>5 · What it costs to move</h2>
+    <div id="commBody"></div>
+  </section>
+
+  <section class="block" id="ladder">
+    <h2>6 · The memory ladder</h2>
+    <div id="ladderBody"></div>
+  </section>
+
+  <section class="block" id="fsdp">
+    <h2>7 · ZeRO or FSDP: same idea, two implementations</h2>
+    <div id="fsdpBody"></div>
+  </section>
+
+  <section class="block" id="limits">
+    <h2>8 · What ZeRO does not do</h2>
+    <div id="limitsBody"></div>
+  </section>
+
+  <section class="block" id="equiv">
+    <h2>9 · The equivalence claim</h2>
+    <div id="equivBody"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/parallel.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T  = NN.T;          /* toy MLP trace          */
+  const P  = NN.P;          /* 4-GPU parallelism trace */
+  const el = NN.el;
+  const S  = P.strategies;
+
+  const NP   = P.meta.n_params;        /* 193 parameters in the 4-layer toy   */
+  const WD   = P.meta.world;           /* 4 GPUs                              */
+  const NL   = P.meta.n_layers;        /* 4 layers                            */
+  const LP   = P.model.layer_params;   /* params per layer                    */
+  const LS   = P.model.layer_shapes;
+  const ACTE = P.model.activation_elements;
+
+  const x = "×", div = "÷", arrow = "→", tick = "✓", cross = "✗";
+
+  function ints(v) { return NN.fmt(v, 0); }
+  function elems(v) { return ints(v) + " elems"; }
+
+  /* ======================================================================
+     STAGE CATALOGUE — derived, never typed.
+     Whether a class is sharded is read straight out of memory_per_gpu:
+     if the per-GPU figure equals the whole-model figure it is replicated.
+     ====================================================================== */
+  const OPT_ELEMS = 2 * NP;            /* Adam keeps m and v: 2 per parameter */
+
+  function stageOf(key, label, short) {
+    const st = S[key], m = st.memory_per_gpu;
+    return {
+      key: key, st: st, label: label, short: short,
+      mem: m,
+      total: m.weights + m.gradients + m.optimizer,
+      w: m.weights   === NP        ? "full" : "shard",
+      g: m.gradients === NP        ? "full" : "shard",
+      o: m.optimizer === OPT_ELEMS ? "full" : "shard"
+    };
+  }
+  const STAGES = [
+    stageOf("ddp",   S.ddp.name,   "DDP"),
+    stageOf("zero1", S.zero1.name, "ZeRO-1"),
+    stageOf("zero2", S.zero2.name, "ZeRO-2"),
+    stageOf("zero3", S.zero3.name, "ZeRO-3")
+  ];
+  const DDP = STAGES[0], Z1 = STAGES[1], Z2 = STAGES[2], Z3 = STAGES[3];
+
+  /* per-layer shard sizes, floored exactly the way parallel_toy.py floors them */
+  const SH   = LP.map(function (p) { return Math.floor(p / WD); });
+  const REST = SH.reduce(function (a, b) { return a + b; }, 0);
+  const BIGL = LP.indexOf(Math.max.apply(null, LP));   /* the largest layer */
+
+  /* Section 4 measures these off its own timeline; section 5 and 7 quote them. */
+  let PEAK_NOPF = 0, PEAK_PF = 0;
+
+  /** The mixed-precision recipe everyone quotes: 2-byte weights, fp32 master. */
+  const STD_RECIPE = (function () {
+    const hit = T.memory.recipes.filter(function (r) {
+      return r.components.weight === T.memory.dtype_bytes.bf16 &&
+             r.components.gradient === T.memory.dtype_bytes.bf16 &&
+             r.bytes_per_param === 16;
+    });
+    return hit.length ? hit[0] : T.memory.recipes[T.memory.recipes.length - 1];
+  })();
+
+  /* ======================================================================
+     SHARD ROW — a labelled bar showing which quarter of a tensor a GPU owns.
+     Built once with NN.gpu.shard, then mutated so the CSS transitions run
+     when a stage changes. Four modes:
+        full   every segment lit      (replicated: this GPU holds all of it)
+        ghost  every segment lit, faded (present but not the part this GPU uses)
+        shard  only this GPU's segment lit
+        none   nothing lit            (not resident right now)
+     ====================================================================== */
+  function shardRow(name, cls, mine) {
+    const row = NN.gpu.shard({ name: name, parts: WD, mine: -1,
+                               color: "var(--" + cls + ")" });
+    const segs = NN.$$(".shardseg", row);
+    row.setMode = function (mode, owner) {
+      const own = owner === undefined ? mine : owner;
+      segs.forEach(function (s, i) {
+        const lit = mode === "full" || mode === "ghost" || i === own;
+        s.classList.toggle("mine", lit && mode !== "none");
+        s.style.background = (lit && mode !== "none")
+          ? "var(--" + cls + ")" : "var(--surface-3)";
+        s.style.opacity = (mode === "ghost" && i !== own) ? "0.42" : "";
+        s.title = name + " shard " + i +
+          (mode === "none" ? " (not resident)"
+           : i === own ? " (owned by this GPU)"
+           : mode === "shard" ? " (lives on GPU " + i + ")"
+           : " (replicated copy)");
+      });
+    };
+    row.setMode("shard", mine);
+    return row;
+  }
+
+  /* ======================================================================
+     STEPPERS — NN.Stepper installs a document-level keydown handler, and
+     this page has four of them. Left unguarded, one arrow key would advance
+     all four at once. Swallow the constructor's registration and route keys
+     ourselves to whichever stepper is nearest the middle of the viewport.
+     ====================================================================== */
+  const STEPPERS = [];
+  function makeStepper(o) {
+    const orig = document.addEventListener;
+    document.addEventListener = function (t, f, opt) {
+      if (t === "keydown") return;
+      return orig.call(document, t, f, opt);
+    };
+    let s;
+    try { s = new NN.Stepper(o); } finally { document.addEventListener = orig; }
+    STEPPERS.push(s);
+    return s;
+  }
+  document.addEventListener("keydown", function (e) {
+    if (/input|textarea|select|button/i.test(e.target.tagName)) return;
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight" && e.key !== " ") return;
+    const mid = window.innerHeight / 2;
+    let best = null, bd = Infinity;
+    STEPPERS.forEach(function (s) {
+      const r = s.bar.getBoundingClientRect();
+      if (r.bottom < 0 || r.top > window.innerHeight) return;
+      const d = Math.abs((r.top + r.bottom) / 2 - mid);
+      if (d < bd) { bd = d; best = s; }
+    });
+    if (!best) return;
+    if (e.key === "ArrowRight") { best.pause(); best.next(); }
+    else if (e.key === "ArrowLeft") { best.pause(); best.prev(); }
+    else { e.preventDefault(); best.toggle(); }
+  });
+
+  /* ======================================================================
+     1 · THE REDUNDANCY, MADE VISIBLE
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#spineBody");
+
+    host.appendChild(el("p", { html:
+      "The toy here is the same 4-layer network page 10 ran under DDP: " +
+      "<span class='mono'>" + P.meta.dims.join(" " + arrow + " ") + "</span>, " +
+      "<b>" + ints(NP) + " parameters</b>, split over <b>" + WD + " GPUs</b>. " +
+      "Under DDP every one of those GPUs holds the same three things in full: the " +
+      "weights, the gradient buffer, and Adam's two moment buffers. Click through the " +
+      "stages and watch copies disappear. Nothing else about the run changes." }));
+
+    /* ---- controls ---- */
+    const btns = el("div", { class: "segbtns" });
+    const rows = [];
+
+    const grid = NN.gpu.grid({
+      count: WD,
+      label: function (g) { return "GPU " + g; },
+      render: function (g) {
+        const rw = shardRow("W", "weight", g);
+        const rg = shardRow("∇", "gradient", g);
+        const ro = shardRow("opt", "optimizer", g);
+        const line = el("div", { class: "gpu-line" });
+        const line2 = el("div", { class: "gpu-line muted" });
+        rows.push({ g: g, w: rw, gr: rg, o: ro, line: line, line2: line2 });
+        return [rw, rg, ro, line, line2];
+      }
+    });
+
+    const arithHost = el("div", { class: "panel" });
+    const stripHost = el("div", {});
+    const noteHost  = el("div", { class: "stepnote" });
+
+    const box = el("div", { class: "stagebox" }, [
+      el("div", {}, [grid, stripHost]),
+      arithHost
+    ]);
+
+    host.appendChild(btns);
+    host.appendChild(box);
+    host.appendChild(noteHost);
+
+    const NOTES = [
+      "Four GPUs, four identical copies of everything. The cluster is storing the " +
+      "model state " + WD + " times over to hold a model that only exists once. " +
+      "Every collective, every optimizer step, every byte of it is duplicated work.",
+
+      "Adam's <b>m</b> and <b>v</b> are the biggest single block and the least shared: " +
+      "GPU <i>i</i> only ever needs the slice of <b>m</b> and <b>v</b> belonging to the " +
+      "parameters it is going to update. Give each rank one quarter and delete the rest. " +
+      "Weights and gradients stay whole.",
+
+      "The gradient buffer goes next. Once a rank only updates its own quarter of the " +
+      "weights, it only needs its own quarter of the averaged gradient — so the " +
+      "all-reduce becomes a reduce-scatter and the other three quarters are never " +
+      "materialised. This one is free; section 3 shows why.",
+
+      "Finally the weights. No GPU holds a full layer at rest — each keeps a quarter of " +
+      "every layer and gathers a layer back into existence only for the instant it is " +
+      "needed. Cluster-wide, the model state is now stored almost exactly once."
+    ];
+
+    function paint(i) {
+      const s = STAGES[i];
+      NN.$$(".btn", btns).forEach(function (b, k) {
+        b.classList.toggle("primary", k === i);
+      });
+      rows.forEach(function (r) {
+        r.w.setMode(s.w);
+        r.gr.setMode(s.g);
+        r.o.setMode(s.o);
+        r.line.textContent = "model state " + ints(s.total) + " elems";
+        r.line2.textContent = "acts " + div + " " + s.mem.activations_divisor +
+                              " = " + ints(ACTE / s.mem.activations_divisor);
+      });
+
+      /* arithmetic panel */
+      arithHost.innerHTML = "";
+      arithHost.appendChild(el("h4", {}, "per-GPU model state — " + s.label));
+      const t = el("table", { class: "arith" });
+      function row(chipCls, label, whole, per, mode) {
+        const tr = el("tr", {}, [
+          el("td", { class: "term" }, [NN.chip(chipCls)]),
+          el("td", { class: "term" }, label),
+          el("td", { class: "r op" }, mode === "shard"
+            ? ints(whole) + " " + div + " " + WD : ints(whole) + " " + x + " 1"),
+          el("td", { class: "r" }, ints(per))
+        ]);
+        return tr;
+      }
+      t.appendChild(row("weight",    "weights",         NP,        s.mem.weights,   s.w));
+      t.appendChild(row("gradient",  "gradient buffer", NP,        s.mem.gradients, s.g));
+      t.appendChild(row("optimizer", "Adam m + v",      OPT_ELEMS, s.mem.optimizer, s.o));
+      t.appendChild(el("tr", { class: "sum" }, [
+        el("td", { colspan: 3 }, "per GPU"),
+        el("td", { class: "r" }, ints(s.total))
+      ]));
+      t.appendChild(el("tr", {}, [
+        el("td", { class: "term", colspan: 3 }, "× " + WD + " GPUs = cluster total"),
+        el("td", { class: "r" }, ints(s.total * WD))
+      ]));
+      t.appendChild(el("tr", {}, [
+        el("td", { class: "term", colspan: 3 }, "the model state actually is"),
+        el("td", { class: "r" }, ints(DDP.total))
+      ]));
+      t.appendChild(el("tr", {}, [
+        el("td", { class: "term", colspan: 3 }, "copies of the model state held"),
+        el("td", { class: "r" }, NN.fmt(s.total * WD / DDP.total, 2) + x)
+      ]));
+      arithHost.appendChild(t);
+      arithHost.appendChild(el("div", { class: "hint", style: { marginTop: "9px" } },
+        "against DDP: " + NN.fmt(100 * (1 - s.total / DDP.total), 1) + "% less per GPU"));
+
+      /* comparison strips */
+      stripHost.innerHTML = "";
+      STAGES.forEach(function (q, k) {
+        const segs = [
+          { cls: "weight",    bytes: q.mem.weights,   label: "W" },
+          { cls: "gradient",  bytes: q.mem.gradients, label: "∇" },
+          { cls: "optimizer", bytes: q.mem.optimizer, label: "opt" }
+        ];
+        const strip = NN.memstrip(segs, DDP.total);
+        const live = segs.filter(function (v) { return v.bytes > 0; });
+        NN.$$(".memseg", strip).forEach(function (m, j) {
+          if (m.classList.contains("free")) { m.title = "freed vs DDP"; return; }
+          m.title = live[j].label + " — " + elems(live[j].bytes);
+        });
+        stripHost.appendChild(el("div", {
+          class: "stripline",
+          style: { opacity: k === i ? "1" : ".45" }
+        }, [
+          el("span", { class: "nm" }, q.short),
+          strip,
+          el("span", { class: "vv" }, elems(q.total))
+        ]));
+      });
+
+      noteHost.innerHTML = "";
+      noteHost.appendChild(el("div", { class: "h" }, s.label + " — shards " + s.st.splits));
+      noteHost.appendChild(el("div", { class: "b", html: NOTES[i] }));
+    }
+
+    STAGES.forEach(function (s, i) {
+      const b = el("button", { class: "btn", onclick: function () { paint(i); } }, s.short);
+      btns.appendChild(b);
+    });
+
+    host.appendChild(NN.legend(["weight", "gradient", "optimizer", "activation"]));
+    paint(0);
+
+    host.appendChild(NN.callout("key", "THE WHOLE IDEA IN ONE LINE",
+      "Data parallelism replicates the model state <b>" + WD + " times</b> — " +
+      ints(DDP.total * WD) + " elements of storage for a model whose state is " +
+      ints(DDP.total) + " elements. ZeRO deletes the copies one class at a time and " +
+      "re-creates each number, on the rank that needs it, at the moment it is needed. " +
+      "By stage 3 the cluster holds " + ints(Z3.total * WD) + " elements — " +
+      "the model state, essentially once. " +
+      "(The " + ints(DDP.total - Z3.total * WD) + "-element shortfall is the remainder of " +
+      "dividing " + ints(NP) + " and " + ints(OPT_ELEMS) + " by " + WD +
+      "; the toy floors, real implementations pad the last shard.)"));
+  })();
+
+  /* ======================================================================
+     SHARED WALKTHROUGH SCAFFOLD for stages 1 and 2
+     ====================================================================== */
+  function buildWalk(host, spec) {
+    const rows = [];
+    const grid = NN.gpu.grid({
+      count: WD,
+      label: function (g) { return "GPU " + g; },
+      render: function (g) {
+        const rw = shardRow("W", "weight", g);
+        const rg = shardRow("∇", "gradient", g);
+        const ro = shardRow("opt", "optimizer", g);
+        const ra = shardRow("act", "activation", g);
+        const line = el("div", { class: "gpu-line" });
+        rows.push({ g: g, w: rw, gr: rg, o: ro, a: ra, line: line });
+        return [rw, rg, ro, ra, line];
+      }
+    });
+
+    const ring = NN.gpu.ring({ count: WD, size: 200, r: 68 });
+    const ringCap = el("div", { class: "hint center", style: { textAlign: "center" } }, "idle");
+
+    const note = el("div", { class: "stepnote" });
+    const commHost = el("div", {});
+    const ctl = el("div", {});
+
+    host.appendChild(el("div", { class: "walkgrid" }, [
+      el("div", {}, [grid, note, commHost]),
+      el("div", { class: "panel" }, [
+        el("h4", {}, "the " + WD + "-GPU ring"), ring, ringCap
+      ])
+    ]));
+    host.appendChild(ctl);
+    host.appendChild(el("div", { class: "kbdhint" },
+      "← / → step, space plays. Arrow keys drive whichever walkthrough is on screen."));
+
+    const stepper = makeStepper({
+      mount: ctl,
+      count: spec.steps.length,
+      labels: spec.steps.map(function (s) { return s.label; }),
+      autoplayMs: 1500,
+      onStep: function (i) {
+        const s = spec.steps[i];
+        rows.forEach(function (r) {
+          r.w.setMode(s.w);
+          r.gr.setMode(s.g);
+          r.o.setMode(s.o);
+          r.a.setMode(s.a || "shard");
+          r.line.textContent = s.line(r.g);
+        });
+        note.innerHTML = "";
+        note.style.borderLeftColor = s.comm ? NN.gpu.opColor(s.comm.op) : "var(--accent)";
+        note.appendChild(el("div", {
+          class: "h",
+          style: { color: s.comm ? NN.gpu.opColor(s.comm.op) : "var(--ink)" }
+        }, (i + 1) + " · " + s.label));
+        note.appendChild(el("div", { class: "b", html: s.body }));
+        commHost.innerHTML = "";
+        if (s.comm) {
+          commHost.appendChild(NN.gpu.commCard(s.comm));
+          ring.step(0, NN.gpu.opColor(s.comm.op));
+          ringCap.textContent = s.comm.op + " — " +
+            NN.fmt(s.comm.sent_per_gpu_elements, 2) + " elems sent per GPU";
+        } else {
+          ring.step(null);
+          ringCap.textContent = "no communication this step";
+        }
+      }
+    });
+    return stepper;
+  }
+
+  /* ======================================================================
+     2 · ZeRO-1
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#z1Body");
+    const st = S.zero1, m = st.memory_per_gpu;
+    const ar = st.schedule[0], ag = st.schedule[1];
+
+    host.appendChild(el("p", { html:
+      "Adam keeps two fp32 buffers per parameter — <b>m</b> and <b>v</b> — so the optimizer " +
+      "block is <span class='mono'>2 " + x + " " + ints(NP) + " = " + ints(OPT_ELEMS) +
+      "</span> elements, larger than the weights and gradients put together. It is also the " +
+      "block with the least reason to be replicated. Rank <i>i</i> reads <b>m</b> and " +
+      "<b>v</b> for exactly the parameters it updates and never touches the rest. " +
+      "ZeRO-1 gives each rank " + ints(m.optimizer) + " of those " + ints(OPT_ELEMS) +
+      " elements and throws the other " + ints(OPT_ELEMS - m.optimizer) + " away." }));
+
+    host.appendChild(NN.tiles([
+      { k: "shards", v: "optimizer state", s: st.replicates + " still replicated" },
+      { k: "per-GPU model state", v: ints(Z1.total), s: "elements, was " + ints(DDP.total),
+        cls: "optimizer" },
+      { k: "optimizer per GPU", v: ints(m.optimizer),
+        s: ints(OPT_ELEMS) + " " + div + " " + WD, cls: "optimizer" },
+      { k: "collectives per step", v: String(st.schedule.length),
+        s: st.schedule.map(function (c) { return c.op; }).join(" + ") }
+    ]));
+
+    const line = function (which) {
+      return function (g) {
+        return which === "rest"
+          ? "W " + ints(m.weights) + " · opt " + ints(m.optimizer) + " (shard " + g + ")"
+          : which;
+      };
+    };
+
+    buildWalk(host, {
+      steps: [
+        { label: "At rest", w: "full", g: "none", o: "shard", a: "none",
+          line: line("rest"),
+          body: "Between steps every GPU has the full weight tensor (" + ints(m.weights) +
+                " elements) and one quarter of Adam's state (" + ints(m.optimizer) +
+                "). The gradient buffer does not exist yet. Total resident model state: <b>" +
+                ints(Z1.total) + "</b>." },
+
+        { label: "Forward on my micro-batch", w: "full", g: "none", o: "shard", a: "shard",
+          line: function (g) { return "acts for sample " + g + " only"; },
+          body: "Identical to DDP. Each rank runs the whole network on its own slice of the " +
+                "batch, using its own full copy of the weights. Activations are private to " +
+                "the rank, which is the one saving data parallelism already gave you. " +
+                "No communication." },
+
+        { label: "Backward", w: "full", g: "full", o: "shard", a: "shard",
+          line: function () { return "∇ " + ints(m.gradients) + " (local, unreduced)"; },
+          body: "The backward pass materialises a full gradient buffer of " +
+                ints(m.gradients) + " elements on every rank, holding that rank's local " +
+                "gradient. ZeRO-1 does not change this — gradients are still replicated, " +
+                "which is stage 1's remaining drawback: <i>" + st.drawback + "</i>" },
+
+        { label: "all-reduce the gradients", w: "full", g: "full", o: "shard", a: "none",
+          comm: ar,
+          line: function () { return "∇ " + ints(m.gradients) + " (averaged)"; },
+          body: "Exactly the DDP collective, unchanged. Every rank ends up with the same " +
+                "averaged gradient over all " + ints(NP) + " parameters. " +
+                "<b>This is where stage 1 leaves communication on the table:</b> each rank " +
+                "is about to use only a quarter of what it just received. Section 5 comes " +
+                "back to that." },
+
+        { label: "Optimizer step on my shard only", w: "ghost", g: "ghost", o: "shard", a: "none",
+          line: function (g) { return "updates W[shard " + g + "] only"; },
+          body: "Rank <i>g</i> applies Adam to its own quarter of the parameters, using the " +
+                ints(m.optimizer) + " elements of <b>m</b> and <b>v</b> it kept. The other " +
+                "three quarters of the averaged gradient it is holding are now dead weight — " +
+                "faded above. " + WD + " ranks, " + WD + " disjoint slices, and between them " +
+                "the whole update gets applied exactly once." },
+
+        { label: "all-gather the updated weights", w: "full", g: "none", o: "shard", a: "none",
+          comm: ag,
+          line: line("rest"),
+          body: "Each rank broadcasts its freshly updated slice and receives the other three. " +
+                "Every rank is back to a full, identical, up-to-date weight tensor — the " +
+                "state the next forward pass needs. This all-gather is the price of having " +
+                "split the optimizer step." }
+      ]
+    });
+
+    host.appendChild(NN.callout("mem", "WHY THE OPTIMIZER FIRST",
+      "It is the biggest block and the easiest to give up. In the standard mixed-precision " +
+      "recipe from <code>T.memory.recipes</code> — <span class='mono'>" + STD_RECIPE.name +
+      "</span>, " + STD_RECIPE.bytes_per_param + " bytes per parameter — the optimizer term " +
+      "alone is <b>" + STD_RECIPE.components.optimizer + " of those " +
+      STD_RECIPE.bytes_per_param + " bytes</b> (" +
+      NN.fmt(100 * STD_RECIPE.components.optimizer / STD_RECIPE.bytes_per_param, 0) +
+      "%), because it carries the fp32 master copy as well as m and v. " +
+      "Sharding it and nothing else already removes most of the model-state bill, and " +
+      "it costs one extra all-gather. For plain SGD, which keeps no state at all, ZeRO-1 " +
+      "does precisely nothing."));
+  })();
+
+  /* ======================================================================
+     3 · ZeRO-2
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#z2Body");
+    const st = S.zero2, m = st.memory_per_gpu;
+    const rs = st.schedule[0], ag = st.schedule[1];
+    const arDDP = S.ddp.schedule[0];
+    const coll = {};
+    P.collectives.forEach(function (c) { coll[c.op] = c; });
+
+    host.appendChild(el("p", { html:
+      "Stage 1 left an obvious hole. Every rank all-reduced a full gradient and then used a " +
+      "quarter of it. Stage 2 closes that hole, and the way it closes it is the most elegant " +
+      "idea in the whole paper." }));
+
+    host.appendChild(el("h3", {}, "all-reduce is already two collectives"));
+    host.appendChild(el("p", { html:
+      "Page 09 took the ring all-reduce apart: <span class='mono'>" +
+      coll.all_reduce.what + "</span> Its cost factor is <span class='mono'>" +
+      coll.all_reduce.ring_factor + "</span>, and that 2 is not a coincidence — it is " +
+      "<span class='mono'>" + coll.reduce_scatter.ring_factor + "</span> for the " +
+      "reduce-scatter half plus <span class='mono'>" + coll.all_gather.ring_factor +
+      "</span> for the all-gather half. The reduce-scatter does the arithmetic; the " +
+      "all-gather only hands everybody a copy of the answer." }));
+
+    (function () {
+      const t = el("table", { class: "data" });
+      t.appendChild(el("thead", {}, el("tr", {}, [
+        el("th", {}, "half"), el("th", {}, "what it does"),
+        el("th", {}, "ring factor"), el("th", {}, "elems sent / GPU")
+      ])));
+      const tb = el("tbody", {});
+      const half = arDDP.sent_per_gpu_elements / 2;
+      tb.appendChild(el("tr", {}, [
+        el("td", {}, "reduce-scatter"),
+        el("td", { class: "wrap" }, coll.reduce_scatter.what),
+        el("td", { class: "n" }, coll.reduce_scatter.ring_factor),
+        el("td", { class: "n" }, NN.fmt(half, 2))
+      ]));
+      tb.appendChild(el("tr", {}, [
+        el("td", {}, "all-gather"),
+        el("td", { class: "wrap" }, coll.all_gather.what),
+        el("td", { class: "n" }, coll.all_gather.ring_factor),
+        el("td", { class: "n" }, NN.fmt(half, 2))
+      ]));
+      tb.appendChild(el("tr", {}, [
+        el("td", {}, el("b", {}, "= all-reduce")),
+        el("td", { class: "wrap" }, "what DDP does, and what ZeRO-1 still does"),
+        el("td", { class: "n" }, coll.all_reduce.ring_factor),
+        el("td", { class: "n" }, NN.fmt(arDDP.sent_per_gpu_elements, 2))
+      ]));
+      t.appendChild(tb);
+      host.appendChild(t);
+    })();
+
+    host.appendChild(NN.callout("key", "THE GRADIENT SHARDING IS FREE",
+      "If a rank only ever applies its own quarter of the gradient, it does not need the " +
+      "all-gather half. Delete it. What remains is a plain reduce-scatter — same sum, same " +
+      "answer, half the traffic of an all-reduce — and each rank keeps only the " +
+      ints(m.gradients) + " elements it will actually use instead of " + ints(NP) + ". " +
+      "Add back the all-gather of updated weights that ZeRO already owed you and the " +
+      "total is <span class='mono'>" + NN.fmt(rs.sent_per_gpu_elements, 2) + " + " +
+      NN.fmt(ag.sent_per_gpu_elements, 2) + " = " +
+      NN.fmt(rs.sent_per_gpu_elements + ag.sent_per_gpu_elements, 2) + "</span> elements " +
+      "per GPU, against DDP's <span class='mono'>" +
+      NN.fmt(arDDP.sent_per_gpu_elements, 2) + "</span>. " +
+      "<b>Identical. " + NN.fmt(st.comm_vs_ddp, 2) + x + " DDP.</b> " +
+      "Stage 2 removes " + ints(NP - m.gradients) + " elements of gradient memory per GPU " +
+      "and pays nothing for it. That is as close to a free lunch as distributed training gets."));
+
+    host.appendChild(NN.tiles([
+      { k: "shards", v: "optimizer + gradients", s: st.replicates + " still replicated" },
+      { k: "per-GPU model state", v: ints(Z2.total),
+        s: "elements, ZeRO-1 was " + ints(Z1.total), cls: "gradient" },
+      { k: "gradients per GPU", v: ints(m.gradients),
+        s: ints(NP) + " " + div + " " + WD, cls: "gradient" },
+      { k: "comm vs DDP", v: NN.fmt(st.comm_vs_ddp, 2) + x, s: "same bytes on the wire" }
+    ]));
+
+    buildWalk(host, {
+      steps: [
+        { label: "At rest", w: "full", g: "shard", o: "shard", a: "none",
+          line: function (g) {
+            return "W " + ints(m.weights) + " · ∇ " + ints(m.gradients) +
+                   " · opt " + ints(m.optimizer);
+          },
+          body: "Full weights, one quarter of the gradient buffer, one quarter of Adam. " +
+                "Resident model state <b>" + ints(Z2.total) + "</b> elements against " +
+                "ZeRO-1's " + ints(Z1.total) + "." },
+
+        { label: "Forward on my micro-batch", w: "full", g: "shard", o: "shard", a: "shard",
+          line: function (g) { return "acts for sample " + g + " only"; },
+          body: "Unchanged again. The weights are still replicated in stage 2, so the " +
+                "forward pass does not communicate at all." },
+
+        { label: "Backward, bucket by bucket", w: "full", g: "ghost", o: "shard", a: "shard",
+          line: function () { return "∇ produced in buckets"; },
+          body: "Gradients appear layer by layer as the backward pass walks the graph. " +
+                "Real implementations bucket them and fire the reduce-scatter for a bucket " +
+                "the moment it is complete, so a rank never holds all " + ints(NP) +
+                " gradient elements at once — the reduction overlaps the rest of the " +
+                "backward pass. The faded segments above are the buckets still in flight." },
+
+        { label: "reduce-scatter the gradients", w: "full", g: "shard", o: "shard", a: "none",
+          comm: rs,
+          line: function (g) { return "∇[shard " + g + "] = " + ints(m.gradients); },
+          body: "Sum <em>and</em> split in a single operation. Rank <i>g</i> ends up with the " +
+                "correctly averaged gradient for its own quarter of the parameters and " +
+                "nothing else. The other three quarters were summed on the ranks that own " +
+                "them; no rank ever allocates a full averaged gradient buffer." },
+
+        { label: "Optimizer step on my shard", w: "ghost", g: "shard", o: "shard", a: "none",
+          line: function (g) { return "updates W[shard " + g + "] only"; },
+          body: "Gradient shard, m shard, v shard, weight shard — all four line up on the " +
+                "same quarter of the parameters. No waste anywhere in this step. This is " +
+                "the state ZeRO-1 was reaching for and getting to the long way round." },
+
+        { label: "all-gather the updated weights", w: "full", g: "none", o: "shard", a: "none",
+          comm: ag,
+          line: function () { return "W " + ints(m.weights) + " (fresh)"; },
+          body: "Same closing move as stage 1. Every rank ends with the full updated weight " +
+                "tensor. Stage 2's remaining drawback: <i>" + st.drawback + "</i>" }
+      ]
+    });
+  })();
+
+  /* ======================================================================
+     4 · ZeRO-3 / FSDP
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#z3Body");
+    const st = S.zero3, m = st.memory_per_gpu;
+    const sched = st.schedule;
+    const fwd = sched.filter(function (c) { return c.phase === "forward"; });
+    const bwd = sched.filter(function (c) { return c.phase === "backward"; });
+    const rs  = sched.filter(function (c) { return c.phase === "after backward"; })[0];
+
+    function layerOf(c) {
+      const mt = /W(\d+)/.exec(c.tensor || "");
+      return mt ? parseInt(mt[1], 10) : 0;
+    }
+
+    host.appendChild(el("p", { html:
+      "Stage 3 takes the last thing standing. The weights are sharded too, which means " +
+      "<b>no GPU holds a complete layer at rest</b> — GPU 0 has the first quarter of every " +
+      "weight matrix, GPU 1 the second, and so on. That is obviously impossible to compute " +
+      "with, so ZeRO-3 does the only thing left: before a layer's forward it all-gathers " +
+      "that layer's weights, uses them, and frees them again immediately. Then it does the " +
+      "whole thing a second time on the way back down." }));
+
+    (function () {
+      const t = el("table", { class: "data" });
+      t.appendChild(el("thead", {}, el("tr", {}, [
+        el("th", {}, "layer"), el("th", {}, "shape"), el("th", {}, "params"),
+        el("th", {}, "shard per GPU"), el("th", {}, "gathered to")
+      ])));
+      const tb = el("tbody", {});
+      LP.forEach(function (p, L) {
+        tb.appendChild(el("tr", {}, [
+          el("td", {}, "W" + L),
+          el("td", { class: "n" }, "(" + LS[L].join(x) + ") + b"),
+          el("td", { class: "n" }, ints(p)),
+          el("td", { class: "n" }, ints(SH[L])),
+          el("td", { class: "n" }, ints(p))
+        ]));
+      });
+      tb.appendChild(el("tr", {}, [
+        el("td", {}, el("b", {}, "total")),
+        el("td", {}, ""),
+        el("td", { class: "n" }, el("b", {}, ints(NP))),
+        el("td", { class: "n" }, el("b", {}, ints(REST))),
+        el("td", { class: "n" }, "")
+      ]));
+      t.appendChild(tb);
+      host.appendChild(t);
+      host.appendChild(el("p", { class: "small muted", html:
+        "The per-GPU weight shards sum to " + ints(REST) + " elements, which is what " +
+        "<code>strategies.zero3.memory_per_gpu.weights</code> reports (" +
+        ints(m.weights) + ") " +
+        (REST === m.weights ? "<span class='ok'>" + tick + "</span>" :
+                              "<span class='bad'>" + cross + "</span>") +
+        ". That is the <b>at rest</b> figure. It is not the figure that has to fit — " +
+        "keep reading." }));
+    })();
+
+    /* ------------- build the event timeline -------------------------- */
+    const EV = [];
+    EV.push({ t: "rest", label: "At rest — nothing is whole" });
+    fwd.forEach(function (c) {
+      const L = layerOf(c);
+      EV.push({ t: "gather", phase: "forward", L: L, c: c,
+                label: "all-gather W" + L + " (forward)" });
+      EV.push({ t: "free", phase: "forward", L: L,
+                label: "compute layer " + L + ", free W" + L });
+    });
+    bwd.forEach(function (c) {
+      const L = layerOf(c);
+      EV.push({ t: "gather", phase: "backward", L: L, c: c,
+                label: "all-gather W" + L + " again (backward)" });
+      EV.push({ t: "free", phase: "backward", L: L,
+                label: "grads for layer " + L + ", free W" + L });
+    });
+    EV.push({ t: "rs", c: rs, label: "reduce-scatter the gradients" });
+    EV.push({ t: "opt", label: "optimizer step on my shard — done" });
+
+    function nextLayer(ev) {
+      if (ev.phase === "forward") return ev.L + 1 < NL ? ev.L + 1 : null;
+      return ev.L - 1 >= 0 ? ev.L - 1 : null;
+    }
+    /** Which layers are whole on a GPU during this event. */
+    function residentSet(i, prefetch) {
+      const ev = EV[i], out = [];
+      if (ev.t === "gather") {
+        out.push(ev.L);
+        if (prefetch) { const n = nextLayer(ev); if (n !== null) out.push(n); }
+      } else if (ev.t === "free") {
+        if (prefetch) { const n = nextLayer(ev); if (n !== null) out.push(n); }
+      }
+      return out;
+    }
+    function residentElems(i, prefetch) {
+      return residentSet(i, prefetch).reduce(function (a, L) {
+        return a + (LP[L] - SH[L]);
+      }, REST);
+    }
+    function peakOf(prefetch) {
+      let mx = 0;
+      for (let i = 0; i < EV.length; i++) mx = Math.max(mx, residentElems(i, prefetch));
+      return mx;
+    }
+
+    /* ------------- controls + tiles ---------------------------------- */
+    const pfWrap = el("label", { style: { cursor: "pointer", display: "inline-flex",
+                                          alignItems: "center", gap: "7px" } });
+    const pfBox = el("input", { type: "checkbox" });
+    pfBox.style.accentColor = "var(--weight)";
+    pfWrap.appendChild(pfBox);
+    pfWrap.appendChild(el("span", { class: "mono", style: { fontSize: ".8rem" } },
+      "prefetch the next layer's all-gather"));
+
+    const tileHost = el("div", {});
+    function paintTiles() {
+      const pf = pfBox.checked;
+      tileHost.innerHTML = "";
+      tileHost.appendChild(NN.tiles([
+        { k: "at rest", v: ints(m.weights), s: "weight elements per GPU", cls: "weight" },
+        { k: "peak while computing", v: ints(peakOf(pf)),
+          s: pf ? "one layer + the prefetched next" : "at rest + the largest layer",
+          cls: "weight" },
+        { k: "DDP holds", v: ints(NP), s: "all the time" },
+        { k: "collectives per step", v: String(sched.length),
+          s: fwd.length + " forward + " + bwd.length + " backward + 1 reduce-scatter" }
+      ]));
+    }
+
+    host.appendChild(el("h3", {}, "Gather, use, free — " + NL + " layers, twice"));
+    host.appendChild(tileHost);
+
+    /* ------------- the GPU grid, one shard row per layer -------------- */
+    const rows = [];
+    const grid = NN.gpu.grid({
+      count: WD,
+      label: function (g) { return "GPU " + g; },
+      render: function (g) {
+        const ws = [];
+        for (let L = 0; L < NL; L++) ws.push(shardRow("W" + L, "weight", g));
+        const rg = shardRow("∇", "gradient", g);
+        const ro = shardRow("opt", "optimizer", g);
+        const line = el("div", { class: "gpu-line" });
+        rows.push({ g: g, ws: ws, gr: rg, o: ro, line: line });
+        return ws.concat([rg, ro, line]);
+      }
+    });
+
+    const note = el("div", { class: "stepnote" });
+    const commHost = el("div", {});
+    const stripHost = el("div", { class: "panel" });
+    const ctl = el("div", {});
+
+    host.appendChild(el("div", { class: "walkgrid" }, [
+      el("div", {}, [grid, note, commHost]),
+      el("div", {}, [stripHost, el("div", { style: { marginTop: "12px" } }, pfWrap)])
+    ]));
+    host.appendChild(ctl);
+    host.appendChild(el("div", { class: "kbdhint" },
+      "← / → step, space plays. " + EV.length + " states in one training step."));
+
+    /* ------------- residency strip (bespoke SVG) --------------------- */
+    let markFn = function () {};
+    function drawStrip() {
+      const pf = pfBox.checked;
+      stripHost.innerHTML = "";
+      stripHost.appendChild(el("h4", {}, "whole weights resident per GPU"));
+
+      const W = 300, H = 132, padT = 12, padB = 26, padL = 4, padR = 4;
+      const ih = H - padT - padB;
+      const vals = EV.map(function (_, i) { return residentElems(i, pf); });
+      const top = Math.max(NP, Math.max.apply(null, vals)) * 1.06;
+      const bw = (W - padL - padR) / EV.length;
+      const Y = function (v) { return padT + ih - v / top * ih; };
+
+      const root = NN.svg("svg", {
+        class: "residency", viewBox: "0 0 " + W + " " + H, role: "img",
+        "aria-label": "weight elements resident per GPU across one ZeRO-3 step"
+      });
+
+      /* reference lines */
+      [{ v: NP, t: "DDP holds " + ints(NP), c: "var(--critical)" },
+       { v: REST, t: "at rest " + ints(REST), c: "var(--accent)" }].forEach(function (r) {
+        root.appendChild(NN.svg("line", {
+          x1: padL, x2: W - padR, y1: Y(r.v), y2: Y(r.v),
+          stroke: r.c, "stroke-width": 1, "stroke-dasharray": "4 3", opacity: .8
+        }));
+        const tx = NN.svg("text", { x: W - padR, y: Y(r.v) - 3, "text-anchor": "end",
+                                    fill: r.c, "font-size": 8.5 });
+        tx.textContent = r.t;
+        root.appendChild(tx);
+      });
+
+      const bars = vals.map(function (v, i) {
+        const b = NN.svg("rect", {
+          class: "b", x: padL + i * bw + 0.6, y: Y(v),
+          width: Math.max(1, bw - 1.2), height: padT + ih - Y(v),
+          fill: "var(--weight)", opacity: .35, rx: 1
+        });
+        const ttl = NN.svg("title");
+        ttl.textContent = EV[i].label + " — " + elems(v);
+        b.appendChild(ttl);
+        root.appendChild(b);
+        return b;
+      });
+
+      const ax = NN.svg("line", { x1: padL, x2: W - padR, y1: padT + ih, y2: padT + ih,
+                                  stroke: "var(--hairline)", "stroke-width": 1 });
+      root.appendChild(ax);
+
+      const bnd = padL + bw * (1 + 2 * fwd.length);
+      root.appendChild(NN.svg("line", {
+        x1: bnd, x2: bnd, y1: padT, y2: padT + ih,
+        stroke: "var(--hairline)", "stroke-width": 1
+      }));
+      [["forward", padL + bw * (1 + fwd.length), "start"],
+       ["backward", W - padR - 4, "end"]].forEach(function (p) {
+        const t2 = NN.svg("text", { x: p[1], y: H - 13, "text-anchor": p[2],
+                                    fill: "var(--ink-muted)", "font-size": 8.5 });
+        t2.textContent = p[0];
+        root.appendChild(t2);
+      });
+
+      const cap = el("div", { class: "hint" });
+      stripHost.appendChild(root);
+      stripHost.appendChild(cap);
+
+      markFn = function (i) {
+        bars.forEach(function (b, k) {
+          b.setAttribute("opacity", k === i ? 1 : (k < i ? .45 : .22));
+        });
+        cap.textContent = "step " + (i + 1) + ": " + elems(vals[i]) +
+          " whole  ·  peak " + elems(peakOf(pf));
+      };
+    }
+
+    /* ------------- stepper ------------------------------------------- */
+    let stepper = null;
+    function paint(i) {
+      const ev = EV[i];
+      const pf = pfBox.checked;
+      const res = residentSet(i, pf);
+      /* the local gradient buffer: absent until backward starts, accumulating
+         through backward, reduced to a shard, then consumed by the step. */
+      const gm = (ev.t === "rs" || ev.t === "opt") ? "shard"
+               : (ev.phase === "backward") ? "ghost" : "none";
+
+      rows.forEach(function (r) {
+        r.ws.forEach(function (row, L) {
+          row.setMode(res.indexOf(L) >= 0 ? "full" : "shard");
+        });
+        r.gr.setMode(gm);
+        r.o.setMode("shard");
+        r.line.textContent = "whole W: " + elems(residentElems(i, pf));
+      });
+
+      note.innerHTML = "";
+      const col = ev.c ? NN.gpu.opColor(ev.c.op)
+                : ev.t === "free" ? "var(--accent)" : "var(--ink)";
+      note.style.borderLeftColor = ev.c ? col : "var(--accent)";
+      note.appendChild(el("div", { class: "h", style: { color: col } },
+        (i + 1) + " · " + ev.label));
+
+      let body;
+      if (ev.t === "rest") {
+        body = "Every GPU holds one quarter of every layer: " +
+          LP.map(function (p, L) { return "W" + L + " " + ints(SH[L]); }).join(", ") +
+          " = <b>" + ints(REST) + "</b> elements. Not one of those quarters can be " +
+          "multiplied by anything on its own. Nothing else is resident.";
+      } else if (ev.t === "gather") {
+        const other = pf ? nextLayer(ev) : null;
+        body = "The " + WD + " quarters of W" + ev.L + " are exchanged so that every rank " +
+          "has the whole matrix: " + ints(SH[ev.L]) + " " + arrow + " " + ints(LP[ev.L]) +
+          " elements. " + ints(ev.c.sent_per_gpu_elements) + " elements leave each GPU. " +
+          (other !== null
+            ? "Prefetch is on, so W" + other + "'s gather is already in flight as well — " +
+              "two layers whole at once, " + elems(residentElems(i, pf)) + " resident."
+            : "Resident weights rise to " + elems(residentElems(i, pf)) + ".");
+      } else if (ev.t === "free") {
+        const isF = ev.phase === "forward";
+        body = (isF
+          ? "The matmul for layer " + ev.L + " runs against the full W" + ev.L + ", the " +
+            "output activation is saved for backward, and <b>W" + ev.L + " is freed the " +
+            "moment the kernel returns</b>. "
+          : "Layer " + ev.L + "'s gradients are computed against the full W" + ev.L +
+            ", accumulated into the local gradient buffer, and <b>W" + ev.L +
+            " is freed again</b>. ") +
+          "Back to " + ints(SH[ev.L]) + " elements for that layer. This freeing is the " +
+          "whole trick: the peak is one layer, not the model.";
+      } else if (ev.t === "rs") {
+        body = "One reduce-scatter over the full " + ints(NP) + "-element gradient, exactly " +
+          "as in ZeRO-2. Each rank keeps " + ints(m.gradients) + " elements — the gradient " +
+          "for the parameters it owns.";
+      } else {
+        body = "Adam updates the " + ints(m.weights) + " weight elements this rank owns, " +
+          "using the " + ints(m.gradients) + " gradient elements and " + ints(m.optimizer) +
+          " optimizer elements it owns. <b>And then it stops.</b> There is no closing " +
+          "all-gather: the sharded weights <em>are</em> the model. The next forward pass " +
+          "will gather layer 0 again when it needs it.";
+      }
+      note.appendChild(el("div", { class: "b", html: body }));
+
+      commHost.innerHTML = "";
+      if (ev.c) commHost.appendChild(NN.gpu.commCard(ev.c));
+      markFn(i);
+    }
+
+    stepper = makeStepper({
+      mount: ctl, count: EV.length,
+      labels: EV.map(function (e) { return e.label; }),
+      autoplayMs: 1100,
+      onStep: paint
+    });
+
+    pfBox.addEventListener("change", function () {
+      paintTiles(); drawStrip(); paint(stepper.i);
+    });
+    paintTiles(); drawStrip(); paint(0);
+
+    PEAK_NOPF = peakOf(false);
+    PEAK_PF   = peakOf(true);
+
+    host.appendChild(NN.callout("mem", "THE NUMBER THAT HAS TO FIT IS NOT " + ints(m.weights),
+      "<code>memory_per_gpu.weights</code> says " + ints(m.weights) + " and that is true " +
+      "at rest. But a GPU cannot compute with a quarter of a matrix, so during layer " +
+      "<i>L</i> it is holding its " + ints(REST) + " shards <em>plus</em> the whole of W" +
+      "<i>L</i> minus the shard it already had. The peak is <b>" + ints(PEAK_NOPF) +
+      "</b> elements — <span class='mono'>" + ints(REST) + " + (" + ints(LP[BIGL]) + " − " +
+      ints(SH[BIGL]) + ")</span> for the largest layer, W" + BIGL +
+      ". Turn prefetch on and it becomes <b>" + ints(PEAK_PF) +
+      "</b>, because two layers overlap. Against DDP's flat " + ints(NP) + " that is still " +
+      "a large win, but it is " + NN.fmt(PEAK_PF / m.weights, 2) + x + " the at-rest " +
+      "figure. This gap is exactly what FSDP's wrapping policy controls, and it is why " +
+      "ZeRO-3 cannot save you when a <em>single layer</em> is too big — section 8."));
+  })();
+
+  /* ======================================================================
+     5 · COMMUNICATION COST
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#commBody");
+    function sent(st) {
+      return st.schedule.reduce(function (a, c) { return a + c.sent_per_gpu_elements; }, 0);
+    }
+    const base = sent(S.ddp);
+
+    host.appendChild(el("p", { html:
+      "Memory is not free; it is bought with bandwidth. The ring cost of every collective " +
+      "on this page is a fixed multiple of the buffer size (page 09), so the total each " +
+      "strategy pushes through each GPU's NIC per step is just a sum over its schedule." }));
+
+    const t = el("table", { class: "data" });
+    t.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "strategy"), el("th", {}, "schedule"),
+      el("th", {}, "elems sent / GPU"), el("th", {}, "vs DDP"),
+      el("th", {}, "model state / GPU")
+    ])));
+    /** "all_gather ×8 + reduce_scatter" — the ops, counted, in schedule order. */
+    function opsOf(st) {
+      const seen = [], n = {};
+      st.schedule.forEach(function (c) {
+        if (n[c.op] === undefined) { n[c.op] = 0; seen.push(c.op); }
+        n[c.op]++;
+      });
+      return seen.map(function (o) {
+        return o + (n[o] > 1 ? " " + x + n[o] : "");
+      }).join(" + ");
+    }
+
+    const tb = el("tbody", {});
+    STAGES.forEach(function (q) {
+      const v = sent(q.st);
+      tb.appendChild(el("tr", {}, [
+        el("td", {}, q.short),
+        el("td", { class: "wrap" }, opsOf(q.st)),
+        el("td", { class: "n" }, NN.fmt(v, 2)),
+        el("td", { class: "n" }, NN.fmt(v / base, 3) + x),
+        el("td", { class: "n" }, ints(q.total))
+      ]));
+    });
+    t.appendChild(tb);
+    host.appendChild(t);
+
+    host.appendChild(NN.chart.bars({
+      items: STAGES.map(function (q) {
+        return { label: q.short + "  " + opsOf(q.st),
+                 value: sent(q.st), color: "var(--accent)",
+                 sub: "(" + NN.fmt(sent(q.st) / base, 2) + x + " DDP)" };
+      }),
+      unit: "elems/GPU"
+    }));
+
+    host.appendChild(el("h3", {}, "Where the 1.5" + x + " comes from"));
+    host.appendChild(el("p", { html:
+      "<b>ZeRO-2 is exactly DDP.</b> <span class='mono'>" +
+      NN.fmt(sent(S.zero2) / base, 3) + x + "</span>: the reduce-scatter and the weight " +
+      "all-gather together cost precisely what one all-reduce costs. " +
+      "<b>ZeRO-3 is <span class='mono'>" + NN.fmt(S.zero3.comm_vs_ddp, 2) + x +
+      "</span></b>, and the reason is visible in its schedule — " + S.zero3.schedule.filter(
+        function (c) { return c.op === "all_gather"; }).length + " parameter all-gathers, " +
+      "half of them in the forward pass and half repeating the same work in the backward " +
+      "pass because the weights were thrown away in between. Count it in ring units of " +
+      "<span class='mono'>(N−1)/N · S</span>: the forward gathers are one whole model's " +
+      "worth, the backward gathers are another, the gradient reduce-scatter is a third — " +
+      "<span class='mono'>3</span> units, against the <span class='mono'>2</span> units " +
+      "an all-reduce is. <span class='mono'>3 " + div + " 2 = " +
+      NN.fmt(S.zero3.comm_vs_ddp, 2) + "</span>." }));
+
+    host.appendChild(NN.callout("warn", "THE TOY'S ZeRO-1 SCHEDULE IS THE NAÏVE ONE",
+      "<code>strategies.zero1.comm_vs_ddp</code> reads <b>" +
+      NN.fmt(S.zero1.comm_vs_ddp, 2) + x + "</b>, not 1.0" + x + ", because " +
+      "<code>parallel_toy.py</code> schedules stage 1 literally: a full " +
+      "<span class='mono'>all_reduce</span> of the gradients (" +
+      NN.fmt(S.zero1.schedule[0].sent_per_gpu_elements, 2) + ") followed by the weight " +
+      "<span class='mono'>all_gather</span> (" +
+      NN.fmt(S.zero1.schedule[1].sent_per_gpu_elements, 2) + "). " +
+      "A real ZeRO-1 does not do that. Since each rank only applies its own shard, the " +
+      "all-reduce can be a <b>reduce-scatter</b> just as in stage 2 — the full gradient " +
+      "buffer still sits in memory (that is what “gradients replicated” means: it " +
+      "is a memory statement, not a wire statement), but nobody needs the all-gather half " +
+      "of it. DeepSpeed's ZeRO-1 therefore also lands at 1.0" + x + " DDP. Read the toy's " +
+      "1.5" + x + " as the cost of the schedule as written, and stage 2's " +
+      "<b>free</b> gradient sharding as the reason nobody ships the naïve version."));
+
+    host.appendChild(NN.callout("key", "WHY ZeRO-3 WANTS FAST INTERCONNECT, AND PREFETCH",
+      "DDP's single all-reduce sits at the end of the backward pass and can be overlapped " +
+      "with the backward pass itself. ZeRO-3's all-gathers sit <b>on the critical path of " +
+      "every layer</b>: layer <i>L</i> cannot start until its weights have arrived. The only " +
+      "defence is to issue layer <i>L+1</i>'s all-gather before layer <i>L</i>'s compute " +
+      "begins, so the transfer hides under the matmul. That is what FSDP's " +
+      "<span class='mono'>backward_prefetch</span> and forward prefetching do, and it is " +
+      "the checkbox in section 4 — it buys latency with peak memory: the toy's peak whole-" +
+      "weight residency goes from <b>" + ints(PEAK_NOPF) + "</b> elements to <b>" +
+      ints(PEAK_PF) + "</b> when one layer is prefetched, against " + ints(REST) +
+      " at rest. If the interconnect is slow enough that the gather cannot hide under the " +
+      "compute, ZeRO-3 becomes bandwidth-bound and the GPUs idle waiting for weights. " +
+      "This is the whole reason FSDP is usually deployed with fast intra-node links, or " +
+      "with a hybrid sharding group that keeps the all-gathers inside a node."));
+  })();
+
+  /* ======================================================================
+     6 · THE MEMORY LADDER
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#ladderBody");
+    const REF = T.reference_configs;
+    const MODELS = REF.models, GPUS = REF.gpus, RECIPES = T.memory.recipes;
+    const NLIST = [1, 2, 4, 8, 16, 32, 64, 128, 256];
+    const GB = 1e9;
+
+    /* ------------------------------------------------------------------
+       Activation accounting. The per-(token x d_model) byte coefficients
+       are the same structural constants page 08 derives and documents:
+         2 LayerNorm inputs 4, QKV input 2, attn-over-V out 2, out-proj
+         dropout mask 1, MLP first-linear input 2, MLP dropout mask 1 = 12
+         + Q 2 + K,V 4*(kv_heads/heads) + MLP internals 4*(d_ff/d_model).
+       With activation checkpointing only the layer input survives: 2 bytes
+       per (b x s x d) per layer. These are architecture bookkeeping, not
+       model numbers; every model-specific value below comes from
+       T.reference_configs.
+       ------------------------------------------------------------------ */
+    const ACT_FIXED = 12, ACT_Q = 2, ACT_KV = 4, ACT_MLP = 4, ACT_BOUND = 2;
+    function actCoef(m) {
+      const kv = (m.n_kv_heads || m.n_heads) / m.n_heads;
+      const ff = (m.d_ff || 4 * m.d_model) / m.d_model;
+      return ACT_FIXED + ACT_Q + ACT_KV * kv + ACT_MLP * ff;
+    }
+    function actBytes(m, ckpt, mb) {
+      return (ckpt ? ACT_BOUND : actCoef(m)) * mb * m.seq * m.d_model * m.n_layers;
+    }
+
+    /* ---------------------------- state ---------------------------- */
+    const DEF_RECIPE = (function () {
+      let idx = 0;
+      RECIPES.forEach(function (r, i) { if (r.bytes_per_param === 16 && r.components.weight === 2) idx = i; });
+      return idx;
+    })();
+    const st = {
+      model: "toy",
+      recipe: DEF_RECIPE,
+      ni: NLIST.indexOf(WD),
+      gpu: REF.default_gpu,
+      ckpt: true,
+      mb: 1
+    };
+
+    function isToy() { return st.model === "toy"; }
+    function modelObj() {
+      const h = MODELS.filter(function (m) { return m.name === st.model; });
+      return h.length ? h[0] : null;
+    }
+    function gpuObj() {
+      const h = GPUS.filter(function (g) { return g.name === st.gpu; });
+      return h.length ? h[0] : GPUS[GPUS.length - 1];
+    }
+
+    /* ------------------- the ladder formula ------------------------ */
+    /* per-parameter units. The toy counts ELEMENTS: one weight, one
+       gradient, and Adam's m and v = 2. That is the same shape as the
+       fp32 Adam recipe divided by fp32's 4 bytes, which is exactly how
+       parallel_toy.py builds memory_per_gpu.                            */
+    function units() {
+      if (isToy()) return { w: 1, g: 1, o: 2 };
+      const c = RECIPES[st.recipe].components;
+      return { w: c.weight || 0, g: c.gradient || 0, o: c.optimizer || 0 };
+    }
+    /** Per-GPU model state for one stage. `floorIt` reproduces the toy's
+        integer floor so the cross-check against parallel.js is exact. */
+    function bill(stage, Pn, N, u, floorIt) {
+      const cut = function (v) { return floorIt ? Math.floor(v / N) : v / N; };
+      const w = stage.w === "shard" ? cut(u.w * Pn) : u.w * Pn;
+      const g = stage.g === "shard" ? cut(u.g * Pn) : u.g * Pn;
+      const o = stage.o === "shard" ? cut(u.o * Pn) : u.o * Pn;
+      return { w: w, g: g, o: o, model: w + g + o };
+    }
+
+    /* ------------------------- controls ---------------------------- */
+    const ctls = el("div", { class: "ctlgrid" });
+    function fld(parent, label, valueEl, rvEl) {
+      const f = el("div", { class: "fld" }, [
+        el("label", {}, [el("span", {}, label), rvEl || null]), valueEl
+      ]);
+      parent.appendChild(f);
+      return f;
+    }
+
+    const pModel = el("div", { class: "panel" }, el("h4", {}, "what you are training"));
+    const selModel = el("select", {});
+    selModel.appendChild(el("option", { value: "toy" },
+      "Toy model — " + ints(NP) + " params (elements)"));
+    MODELS.forEach(function (m) {
+      selModel.appendChild(el("option", { value: m.name },
+        m.name + " — " + NN.count(m.params) + " params"));
+    });
+    selModel.value = st.model;
+    fld(pModel, "model", selModel);
+
+    const selRecipe = el("select", {});
+    RECIPES.forEach(function (r, i) {
+      selRecipe.appendChild(el("option", { value: String(i) },
+        r.name + " (" + r.bytes_per_param + " B/param)"));
+    });
+    selRecipe.value = String(st.recipe);
+    const fRecipe = fld(pModel, "memory recipe", selRecipe);
+
+    const pWorld = el("div", { class: "panel" }, el("h4", {}, "how many GPUs"));
+    const rvN = el("span", { class: "rv" });
+    const rngN = el("input", { type: "range", min: "0", max: String(NLIST.length - 1),
+                               step: "1", value: String(st.ni) });
+    fld(pWorld, "world size N", rngN, rvN);
+    const selGpu = el("select", {});
+    GPUS.forEach(function (g) {
+      selGpu.appendChild(el("option", { value: g.name },
+        g.name + " — " + NN.gibytes(g.hbm_bytes)));
+    });
+    selGpu.value = st.gpu;
+    const fGpu = fld(pWorld, "device", selGpu);
+
+    const pAct = el("div", { class: "panel" }, el("h4", {}, "the part that never shards"));
+    const selMb = el("select", {});
+    [1, 2, 4, 8].forEach(function (v) {
+      selMb.appendChild(el("option", { value: String(v) }, String(v)));
+    });
+    selMb.value = String(st.mb);
+    const fMb = fld(pAct, "micro-batch per GPU", selMb);
+    const ckWrap = el("div", { class: "fld chk" });
+    const ckLbl = el("label", {});
+    const ckBox = el("input", { type: "checkbox" });
+    ckBox.checked = st.ckpt;
+    ckLbl.appendChild(ckBox);
+    ckLbl.appendChild(el("span", {}, "activation checkpointing"));
+    ckWrap.appendChild(ckLbl);
+    pAct.appendChild(ckWrap);
+    const preset = el("button", { class: "btn" }, "70B on 64 GPUs →");
+    pAct.appendChild(preset);
+
+    ctls.appendChild(pModel);
+    ctls.appendChild(pWorld);
+    ctls.appendChild(pAct);
+
+    host.appendChild(el("p", { html:
+      "The formula is the one section 1 showed, with the divisors turned into a variable. " +
+      "Per GPU: <span class='mono'>weights + gradients + optimizer</span>, each term either " +
+      "whole or <span class='mono'>" + div + " N</span> depending on the stage. Set it to " +
+      "the toy model at N = " + WD + " and it reproduces <code>parallel.js</code> exactly; " +
+      "set it to a real model and it is the bill you would actually pay." }));
+    host.appendChild(ctls);
+
+    const out = el("div", {});
+    host.appendChild(out);
+
+    /* --------------------------- render ---------------------------- */
+    function render() {
+      const N = NLIST[st.ni];
+      const toy = isToy();
+      const m = modelObj();
+      const Pn = toy ? NP : m.params;
+      const u = units();
+      const cap = toy ? null : gpuObj().hbm_bytes;
+      const act = toy ? ACTE / WD : actBytes(m, st.ckpt, st.mb);
+      const fmtU = toy ? elems : NN.bytes;
+
+      rvN.textContent = String(N);
+      fRecipe.style.display = toy ? "none" : "";
+      fGpu.style.display = toy ? "none" : "";
+      fMb.style.display = toy ? "none" : "";
+      ckWrap.style.display = toy ? "none" : "";
+
+      const bills = STAGES.map(function (q) {
+        return { q: q, b: bill(q, Pn, N, u, toy) };
+      });
+      const topTotal = bills[0].b.model + act;
+
+      out.innerHTML = "";
+
+      /* ---- strips ---- */
+      out.appendChild(el("h3", {}, "Per-GPU bill at N = " + N +
+        (toy ? "" : ", " + m.name + ", " + RECIPES[st.recipe].bytes_per_param + " B/param")));
+      bills.forEach(function (r) {
+        const segs = [
+          { cls: "weight",     bytes: r.b.w, label: "W" },
+          { cls: "gradient",   bytes: r.b.g, label: "∇" },
+          { cls: "optimizer",  bytes: r.b.o, label: "opt" },
+          { cls: "activation", bytes: act,   label: "act" }
+        ];
+        const live = segs.filter(function (s2) { return s2.bytes > 0; });
+        const strip = NN.memstrip(segs, topTotal);
+        NN.$$(".memseg", strip).forEach(function (mm, j) {
+          if (mm.classList.contains("free")) { mm.title = "headroom vs DDP"; return; }
+          mm.title = live[j].label + " — " + fmtU(live[j].bytes);
+        });
+        out.appendChild(el("div", { class: "stripline" }, [
+          el("span", { class: "nm" }, r.q.short),
+          strip,
+          el("span", { class: "vv" }, fmtU(r.b.model + act))
+        ]));
+      });
+
+      /* ---- table ---- */
+      const t = el("table", { class: "data", style: { marginTop: "18px" } });
+      t.appendChild(el("thead", {}, el("tr", {}, [
+        el("th", {}, "strategy"), el("th", {}, "weights"), el("th", {}, "gradients"),
+        el("th", {}, "optimizer"), el("th", {}, "model state"),
+        el("th", {}, "+ activations"), el("th", {}, "total / GPU"),
+        el("th", {}, toy ? "vs DDP" : "fits " + NN.gibytes(cap) + "?")
+      ])));
+      const tb = el("tbody", {});
+      bills.forEach(function (r) {
+        const tot = r.b.model + act;
+        const fits = cap !== null && tot <= cap;
+        tb.appendChild(el("tr", {}, [
+          el("td", {}, r.q.short),
+          el("td", { class: "n" }, fmtU(r.b.w)),
+          el("td", { class: "n" }, fmtU(r.b.g)),
+          el("td", { class: "n" }, fmtU(r.b.o)),
+          el("td", { class: "n" }, fmtU(r.b.model)),
+          el("td", { class: "n" }, fmtU(act)),
+          el("td", { class: "n" }, el("b", {}, fmtU(tot))),
+          el("td", { class: "n", html: cap === null
+            ? NN.fmt(r.b.model / bills[0].b.model, 3) + x
+            : (fits ? "<span class='ok'>" + tick + " " + NN.fmt(100 * tot / cap, 0) + "%</span>"
+                    : "<span class='bad'>" + cross + " " + NN.fmt(tot / cap, 1) + x +
+                      " over</span>") })
+        ]));
+      });
+      t.appendChild(tb);
+      out.appendChild(t);
+
+      /* ---- verdict ---- */
+      if (!toy) {
+        const z3 = bills[3], tot = z3.b.model + act;
+        const fits = tot <= cap;
+        out.appendChild(el("div", { class: "verdict " + (fits ? "ok" : "bad") }, [
+          el("div", { class: "big" }, "ZeRO-3: " + NN.bytes(tot) + " per GPU"),
+          el("div", { class: "det" },
+            NN.bytes(z3.b.model) + " model state + " + NN.bytes(act) + " activations " +
+            "vs " + NN.gibytes(cap) + " (" + NN.bytes(cap) + ") of " + gpuObj().name),
+          el("div", { class: "det" }, fits ? tick + " fits" : cross + " does not fit")
+        ]));
+        out.appendChild(el("p", { class: "small muted", html:
+          "DDP at the same setting needs " + NN.bytes(bills[0].b.model + act) +
+          " per GPU, which is " + NN.fmt((bills[0].b.model + act) / cap, 1) + x +
+          " one " + gpuObj().name + ". Model state alone: DDP " +
+          NN.bytes(bills[0].b.model) + " " + arrow + " ZeRO-3 " + NN.bytes(z3.b.model) +
+          " (" + NN.fmt(bills[0].b.model / z3.b.model, 0) + x + " less, which is just N)." }));
+      }
+
+      /* ---- cross-check ---- */
+      const chk = el("div", { class: "panel", style: { marginTop: "18px" } });
+      chk.appendChild(el("h4", {}, "cross-check against parallel.js — toy model, N = " + WD));
+      const ct = el("table", { class: "data" });
+      ct.appendChild(el("thead", {}, el("tr", {}, [
+        el("th", {}, "strategy"), el("th", {}, "formula here"),
+        el("th", {}, "strategies.*.memory_per_gpu"), el("th", {}, "")
+      ])));
+      const ctb = el("tbody", {});
+      let allOk = true;
+      STAGES.forEach(function (q) {
+        const b = bill(q, NP, WD, { w: 1, g: 1, o: 2 }, true);
+        const ok = b.w === q.mem.weights && b.g === q.mem.gradients &&
+                   b.o === q.mem.optimizer;
+        if (!ok) allOk = false;
+        ctb.appendChild(el("tr", {}, [
+          el("td", {}, q.short),
+          el("td", { class: "n" }, ints(b.w) + " + " + ints(b.g) + " + " + ints(b.o) +
+                                   " = " + ints(b.model)),
+          el("td", { class: "n" }, ints(q.mem.weights) + " + " + ints(q.mem.gradients) +
+                                   " + " + ints(q.mem.optimizer) + " = " + ints(q.total)),
+          el("td", { html: ok ? "<span class='ok'>" + tick + "</span>"
+                              : "<span class='bad'>" + cross + "</span>" })
+        ]));
+      });
+      ct.appendChild(ctb);
+      chk.appendChild(ct);
+      chk.appendChild(el("div", { class: "hint", style: { marginTop: "8px" } },
+        allOk ? tick + " all four match the generated trace exactly"
+              : cross + " MISMATCH — the formula and parallel_toy.py disagree"));
+      out.appendChild(chk);
+
+      /* ---- the asymptote ---- */
+      out.appendChild(el("h3", {}, "The asymptote: what is left when N gets large"));
+      const actLine = NLIST.map(function (n, i) { return [i, Math.max(act, 1e-9)]; });
+      const series = [
+        { name: "weights " + div + " N", color: "var(--weight)",
+          points: NLIST.map(function (n, i) { return [i, u.w * Pn / n]; }) },
+        { name: "gradients " + div + " N", color: "var(--gradient)",
+          points: NLIST.map(function (n, i) { return [i, u.g * Pn / n]; }) },
+        { name: "optimizer " + div + " N", color: "var(--optimizer)",
+          points: NLIST.map(function (n, i) { return [i, u.o * Pn / n]; }) },
+        { name: "activations (never sharded)", color: "var(--activation)",
+          points: actLine, dash: "6 4" }
+      ];
+      out.appendChild(NN.chart.line({
+        series: series, width: 700, height: 260, logY: true,
+        xMin: 0, xMax: NLIST.length - 1,
+        xlabel: "log₂ N   (world size = 2^x)",
+        ylabel: toy ? "elements per GPU" : "bytes per GPU"
+      }));
+      out.appendChild(NN.legend(["weight", "gradient", "optimizer", "activation"]));
+      const crossN = NLIST.filter(function (n) {
+        return (u.w + u.g + u.o) * Pn / n < act;
+      })[0];
+      out.appendChild(el("p", { class: "small", html:
+        "ZeRO-3 divides all three of the sloped lines by N, so per-GPU model state " +
+        "→ 0 as the cluster grows. The flat green line does not move: activation " +
+        "memory is set by the micro-batch each GPU processes, and adding GPUs does not " +
+        "shrink it. " +
+        (crossN
+          ? "At <b>N = " + crossN + "</b> the model state drops below the activation " +
+            "floor and activations become the binding constraint. "
+          : "Even at N = " + NLIST[NLIST.length - 1] + " the model state has not fallen " +
+            "below the activation floor here. ") +
+        "That is precisely the point page 08 makes, and it is why activation " +
+        "checkpointing, sequence parallelism and the layer split of page 13 exist: past " +
+        "some N, ZeRO has nothing left to give you." }));
+    }
+
+    selModel.addEventListener("change", function () { st.model = selModel.value; render(); });
+    selRecipe.addEventListener("change", function () { st.recipe = +selRecipe.value; render(); });
+    rngN.addEventListener("input", function () { st.ni = +rngN.value; render(); });
+    selGpu.addEventListener("change", function () { st.gpu = selGpu.value; render(); });
+    selMb.addEventListener("change", function () { st.mb = +selMb.value; render(); });
+    ckBox.addEventListener("change", function () { st.ckpt = ckBox.checked; render(); });
+    preset.addEventListener("click", function () {
+      st.model = REF.default_model;
+      st.gpu = REF.default_gpu;
+      st.ni = NLIST.indexOf(64);
+      st.recipe = DEF_RECIPE;
+      st.ckpt = true; st.mb = 1;
+      selModel.value = st.model; selGpu.value = st.gpu;
+      rngN.value = String(st.ni); selRecipe.value = String(st.recipe);
+      ckBox.checked = true; selMb.value = "1";
+      render();
+      host.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+
+    render();
+
+    host.appendChild(NN.callout("why", "READ THE 70B ROW CAREFULLY",
+      "Press the preset: " + REF.default_model + " on 64 " + REF.default_gpu +
+      "s under <span class='mono'>" + STD_RECIPE.name + "</span>. Every figure in the table " +
+      "above is computed from <code>T.reference_configs</code> and " +
+      "<code>T.memory.recipes</code>, so read them off it rather than off this sentence. " +
+      "The <em>shape</em> of the answer is the thing to hold onto. ZeRO-1 removes the " +
+      "optimizer term — <span class='mono'>" + STD_RECIPE.components.optimizer + " of " +
+      STD_RECIPE.bytes_per_param + " bytes per parameter</span> — and lands in the hundreds " +
+      "of GB. ZeRO-2 removes the gradient term and roughly halves that again. ZeRO-3 divides " +
+      "all " + STD_RECIPE.bytes_per_param + " bytes by N and lands in the tens of GB, under " +
+      "the " + NN.gibytes(gpuObj().hbm_bytes) + " line with room for activations. Then turn " +
+      "checkpointing off and watch it stop fitting for an entirely different reason — one " +
+      "that no ZeRO stage can do anything about."));
+  })();
+
+  /* ======================================================================
+     7 · ZeRO vs FSDP
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#fsdpBody");
+
+    host.appendChild(el("p", { html:
+      "ZeRO is the algorithm, published by the DeepSpeed team; FSDP — Fully Sharded Data " +
+      "Parallel — is PyTorch core's implementation of the same algorithm. They are not " +
+      "competing ideas. If you have understood sections 2 to 4 you have understood both. " +
+      "What differs is packaging and the granularity knob." }));
+
+    const t = el("table", { class: "data" });
+    t.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, ""), el("th", {}, "DeepSpeed ZeRO"), el("th", {}, "PyTorch FSDP")
+    ])));
+    const tb = el("tbody", {});
+    function r(k, a, b) {
+      tb.appendChild(el("tr", {}, [
+        el("td", { class: "wrap" }, k),
+        el("td", { class: "wrap" , html: a }),
+        el("td", { class: "wrap", html: b })
+      ]));
+    }
+    r("the maths", "identical", "identical");
+    r("the collectives",
+      "all-gather parameters, reduce-scatter gradients",
+      "all-gather parameters, reduce-scatter gradients");
+    r("stage names",
+      "<span class='mono'>stage 1 / 2 / 3</span> in a JSON config",
+      "<span class='mono'>ShardingStrategy</span>: <span class='mono'>NO_SHARD</span> " +
+      "(= DDP), <span class='mono'>SHARD_GRAD_OP</span> (≈ stage 2), " +
+      "<span class='mono'>FULL_SHARD</span> (= stage 3)");
+    r("a distinct stage 1",
+      "yes, optimizer-only sharding is its own mode",
+      "no separate mode; the practical choices are grad+opt or full");
+    r("unit of sharding",
+      "parameters are flattened into contiguous buckets and those are sharded; " +
+      "the partitioning is largely invisible to your module tree",
+      "parameters are grouped per <b>wrapped unit</b> — one flat buffer per unit — and " +
+      "each unit is sharded independently. <b>You choose the units</b>, with " +
+      "<span class='mono'>auto_wrap_policy</span> (FSDP1) or by calling " +
+      "<span class='mono'>fully_shard</span> on submodules (FSDP2)");
+    r("what a gather gathers",
+      "a bucket",
+      "one whole unit — so a unit is the granule that must fit whole");
+    r("integration",
+      "a training engine you hand your model, optimizer and a config to",
+      "a module wrapper inside your own loop; FSDP2 uses DTensor and per-parameter sharding");
+    r("offload",
+      "ZeRO-Offload and ZeRO-Infinity push state to CPU and NVMe",
+      "<span class='mono'>CPUOffload</span> for parameters and gradients");
+    t.appendChild(tb);
+    host.appendChild(t);
+
+    host.appendChild(NN.callout("key", "THE WRAPPING GRANULARITY IS A REAL KNOB",
+      "Section 4 measured it. In the toy, the peak whole-weight residency is set by the " +
+      "largest thing you gather at once: gather per layer and the peak is the biggest " +
+      "layer; gather two layers at once (prefetch) and it is the biggest adjacent pair. " +
+      "Scale that up. <b>Wrap too coarsely</b> — say the whole model as one unit — and the " +
+      "all-gather materialises every parameter on every GPU and you are back to DDP's " +
+      "memory at ZeRO-3's communication cost. <b>Wrap too finely</b> — every " +
+      "<span class='mono'>Linear</span> its own unit — and you issue thousands of tiny " +
+      "all-gathers, each paying full collective latency with almost no payload, and the " +
+      "network never reaches peak bandwidth. The usual answer is one unit per transformer " +
+      "block: big enough to amortise the latency, small enough that one block's weights " +
+      "are a rounding error against HBM."));
+  })();
+
+  /* ======================================================================
+     8 · WHAT ZeRO DOES NOT DO
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#limitsBody");
+    const z3 = S.zero3, ddp = S.ddp;
+    const biggest = Math.max.apply(null, LP);
+    const biggestL = LP.indexOf(biggest);
+
+    host.appendChild(el("p", { html:
+      "Three limits, all of them structural. None of them is a bug you can configure away." }));
+
+    host.appendChild(el("h3", {}, "It does not make the model smaller"));
+    host.appendChild(el("p", { html:
+      "ZeRO removes <em>duplication</em>, not content. Cluster-wide, DDP stores " +
+      ints(DDP.total) + " " + x + " " + WD + " = " + ints(DDP.total * WD) +
+      " elements and ZeRO-3 stores " + ints(Z3.total) + " " + x + " " + WD + " = " +
+      ints(Z3.total * WD) + " — but that floor is the model state itself and nothing gets " +
+      "you under it. The whole thing still has to exist, in aggregate, somewhere in the " +
+      "cluster. If your total HBM across all GPUs is less than one copy of weights + " +
+      "gradients + optimizer, ZeRO cannot help; you need a smaller model, a cheaper " +
+      "optimizer, narrower dtypes, or offload to host memory." }));
+
+    host.appendChild(el("h3", {}, "It does not touch activations"));
+    host.appendChild(el("p", { html:
+      "Every stage reports the same <code>activations_divisor</code>: " +
+      STAGES.map(function (q) {
+        return q.short + " " + q.mem.activations_divisor;
+      }).join(", ") + ". That divisor is <b>N</b>, and it comes from data parallelism " +
+      "splitting the batch — DDP already had it. ZeRO adds exactly zero activation savings " +
+      "on top. Section 6's flat green line is the visual: shard the model state as hard as " +
+      "you like and the activations sit there unmoved. Activation memory is attacked with " +
+      "checkpointing, FlashAttention, sequence parallelism and micro-batching — page 08's " +
+      "subject, not this page's." }));
+
+    host.appendChild(el("h3", {}, "It does not help if one layer does not fit"));
+    host.appendChild(el("p", { html:
+      "This is the hard stop, and section 4's peak measurement is the proof. ZeRO-3 shards " +
+      "W" + biggestL + " into " + WD + " pieces of " + ints(SH[biggestL]) + " elements, but " +
+      "to compute with it, it must <b>reassemble all " + ints(biggest) + " on every GPU</b>. " +
+      "A layer is the granule. Raise N to a thousand and each shard becomes tiny, but the " +
+      "gathered layer is exactly as large as it always was. If a single weight matrix — a " +
+      "large vocabulary embedding, an MLP in a very wide model — exceeds what one device " +
+      "can hold alongside its activations, no value of N in ZeRO-3 saves you." }));
+
+    host.appendChild(NN.callout("warn", "WHICH IS WHY THE NEXT PAGE EXISTS",
+      "To get under the single-layer floor you have to stop reassembling the layer at all: " +
+      "split the weight matrix itself and let each GPU compute a <em>piece</em> of the " +
+      "output, with the matmul rewritten so the pieces add up. That is tensor parallelism — " +
+      "<b>page 12</b>. It is strictly harder than ZeRO, because the collectives move " +
+      "activations and sit inside the arithmetic rather than around it (" +
+      S.tp.schedule.filter(function (c) { return c.op !== "none"; }).length +
+      " collectives per step in the same toy, every one of them an " +
+      "<span class='mono'>all_reduce</span> of partial sums), which is why it is normally " +
+      "confined to a single node with NVLink between the GPUs — and why the usual production " +
+      "answer is ZeRO/FSDP <em>across</em> nodes with tensor parallel <em>inside</em> them."));
+  })();
+
+  /* ======================================================================
+     9 · EQUIVALENCE
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#equivBody");
+    const v3 = S.zero3.verify, vd = S.ddp.verify;
+
+    host.appendChild(el("p", { html:
+      "Everything on this page is a storage and scheduling change. It is worth stating what " +
+      "that means precisely, because it is the reason ZeRO is safe to turn on: " }));
+
+    host.appendChild(el("div", { class: "callout key" }, [
+      el("div", { class: "t" }, "STRATEGIES.ZERO3.VERIFY"),
+      el("div", { html: "“" + v3.claim + "”" })
+    ]));
+
+    host.appendChild(NN.tiles([
+      { k: "forward max error", v: NN.fmt(v3.forward_max_err, 1),
+        s: "ZeRO-3 vs single-GPU", cls: "activation" },
+      { k: "gradient max error", v: NN.fmt(vd.grad_max_err, 1),
+        s: "data-parallel average vs full batch", cls: "gradient" },
+      { k: "loss max error", v: NN.fmt(vd.loss_max_err, 1), s: "same" },
+      { k: "verified", v: (v3.passed && vd.passed) ? tick : cross,
+        s: "code/parallel_toy.py" }
+    ]));
+
+    host.appendChild(el("p", { html:
+      "Compare that with the one number that <em>does</em> move: DDP's gradient average " +
+      "differs from the full-batch gradient by " + NN.fmt(vd.grad_max_err, 1) +
+      ", which is floating-point summation order, not mathematics. ZeRO adds nothing to " +
+      "even that. Change the stage and the loss curve is bit-comparable up to the same " +
+      "reordering; change the world size and it is not, because the reduction tree changes " +
+      "shape — but that is DDP's property, inherited, not something ZeRO introduced." }));
+
+    host.appendChild(NN.callout("mem", "THE ONE-SENTENCE SUMMARY",
+      "<b>ZeRO changes where numbers live and when they are materialised, never what is " +
+      "computed.</b> Stage 1 moves the optimizer state (" + ints(DDP.total) + " " + arrow +
+      " " + ints(Z1.total) + " elements per GPU here), stage 2 moves the gradients (" +
+      arrow + " " + ints(Z2.total) + ") and costs nothing extra on the wire, stage 3 moves " +
+      "the parameters (" + arrow + " " + ints(Z3.total) + ") and costs " +
+      NN.fmt(S.zero3.comm_vs_ddp, 2) + x + " the bandwidth plus a per-layer gather on the " +
+      "critical path. Underneath, the same " + ints(NP) + " parameters take the same step."));
+  })();
+
+  NN.page("zero");
+})();
+</script>
+</body>
+</html>

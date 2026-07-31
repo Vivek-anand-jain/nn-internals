@@ -1,0 +1,1168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 13 Pipeline Parallel</title>
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* page-local layout only; every colour comes from design.css custom properties */
+.segbtns { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 4px; }
+.panel { background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 8px; padding: 12px 14px; }
+.panel h4 { margin: 0 0 10px; font-family: var(--mono); font-size: .7rem; letter-spacing: .13em;
+            text-transform: uppercase; color: var(--ink-muted); font-weight: 700; }
+.ctlgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 13px; margin: 16px 0; }
+.fld { margin: 0 0 11px; }
+.fld:last-child { margin-bottom: 0; }
+.fld > label { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+               font-family: var(--mono); font-size: .74rem; color: var(--ink-2); margin-bottom: 3px; }
+.fld .rv { color: var(--ink); font-weight: 700; font-variant-numeric: tabular-nums; }
+.fld input[type="range"] { width: 100%; }
+.hint { font-size: .68rem; color: var(--ink-muted); font-family: var(--mono); line-height: 1.5; }
+
+.pipelegend { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin: 12px 0; }
+.pipelegend .lg { display: inline-flex; align-items: center; gap: 7px;
+                  font-family: var(--mono); font-size: .74rem; color: var(--ink-2); }
+.pipelegend .sw { width: 22px; height: 16px; border-radius: 3px; display: inline-flex;
+                  align-items: center; justify-content: center; font-size: .56rem;
+                  font-weight: 700; color: #fff; }
+.pipelegend .sw.f { background: var(--activation); }
+.pipelegend .sw.b { background: var(--gradient); }
+.pipelegend .sw.i { background: repeating-linear-gradient(45deg,
+                      var(--surface-3), var(--surface-3) 4px,
+                      var(--surface-2) 4px, var(--surface-2) 8px); }
+
+.statusrow { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+             gap: 9px; margin: 14px 0; }
+.statuscard { background: var(--surface-2); border: 1px solid var(--hairline);
+              border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0; padding: 9px 12px;
+              transition: border-color .25s, opacity .25s; }
+.statuscard.f { border-left-color: var(--activation); }
+.statuscard.b { border-left-color: var(--gradient); }
+.statuscard.i { opacity: .5; border-left-style: dashed; }
+.statuscard .who { font-family: var(--mono); font-size: .68rem; color: var(--ink-muted);
+                   text-transform: uppercase; letter-spacing: .07em; }
+.statuscard .what { font-family: var(--mono); font-size: .84rem; font-weight: 700; color: var(--ink); }
+.statuscard .wire { font-family: var(--mono); font-size: .68rem; color: var(--ink-2); margin-top: 2px; }
+
+.miniplay { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+            padding: 10px 13px; background: var(--surface-2); border: 1px solid var(--hairline);
+            border-radius: 8px; margin: 14px 0; }
+.miniplay input[type="range"] { flex: 1; min-width: 120px; }
+.miniplay .rd { font-family: var(--mono); font-size: .8rem; color: var(--ink-2);
+                font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.arith { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .8rem;
+         font-variant-numeric: tabular-nums; margin: 6px 0 0; }
+.arith td { padding: 5px 8px; border-bottom: 1px solid var(--hairline-2); white-space: nowrap; }
+.arith td.r { text-align: right; }
+.arith td.term { color: var(--ink-2); white-space: normal; }
+.arith tr.sum td { border-top: 1px solid var(--hairline); border-bottom: none;
+                   font-weight: 700; color: var(--ink); padding-top: 8px; }
+
+table.data td.wrap, table.data th.wrap { white-space: normal; max-width: 300px; text-align: left; }
+table.data tr.hi { background: var(--surface-3); }
+.gridhost { margin: 14px 0; }
+/* a pipeline grid is wider than its column; let it scroll inside the column
+   instead of stretching the grid track (min-width:auto would do the latter) */
+.grid2 > *, .ctlgrid > *, .grid3 > * { min-width: 0; }
+.scrollx { max-width: 100%; }
+@media (max-width: 860px) {
+  .statusrow { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+}
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 13</div>
+    <h1>Pipeline Parallel</h1>
+    <p class="lede">Tensor parallelism all-reduces activations at every layer, so it needs a fast
+      link and stays inside one node. To go beyond a node you need a strategy that tolerates a slow
+      one. Pipeline parallelism splits the model by <em>depth</em> and communicates only at layer
+      boundaries: one activation tensor per boundary, point-to-point, no collectives. It is the
+      cheapest communication of any strategy, which is exactly why it is the one that crosses
+      nodes. The bill it pays is time — the bubble.</p>
+    <noscript><p class="callout warn">This page builds every diagram and every number in the
+      browser from <code>assets/data/parallel.js</code>. With JavaScript disabled you will see an
+      empty shell.</p></noscript>
+  </div>
+
+  <section class="block" id="layout">
+    <h2>1 · Split by depth: one layer per GPU</h2>
+    <div id="layoutBody"></div>
+  </section>
+
+  <section class="block" id="naive">
+    <h2>2 · The naive pipeline, and why it is terrible</h2>
+    <div id="naiveBody"></div>
+  </section>
+
+  <section class="block" id="micro">
+    <h2>3 · Micro-batching: the occupancy chart</h2>
+    <div id="microBody"></div>
+  </section>
+
+  <section class="block" id="bubble">
+    <h2>4 · The bubble, derived and dialled</h2>
+    <div id="bubbleBody"></div>
+  </section>
+
+  <section class="block" id="schedules">
+    <h2>5 · GPipe vs 1F1B: same bubble, very different memory</h2>
+    <div id="schedBody"></div>
+  </section>
+
+  <section class="block" id="interleaved">
+    <h2>6 · Interleaved (virtual) pipeline stages</h2>
+    <div id="interBody"></div>
+  </section>
+
+  <section class="block" id="comm">
+    <h2>7 · The communication: one tensor per stage boundary</h2>
+    <div id="commBody"></div>
+  </section>
+
+  <section class="block" id="problems">
+    <h2>8 · What pipeline parallelism actually costs you</h2>
+    <div id="probBody"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/parallel.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T   = NN.T;
+  const PAR = NN.P;                       // window.PARALLEL
+  const pp  = PAR.strategies.pp;
+  const tp  = PAR.strategies.tp;
+  const ddp = PAR.strategies.ddp;
+
+  const WORLD  = PAR.meta.world;          // 4 GPUs
+  const DIMS   = PAR.meta.dims;           // [4,8,8,8,1]
+  const NLAY   = PAR.meta.n_layers;       // 4 layers
+  const BATCH  = PAR.meta.batch;          // 4 samples
+  const NPARAM = PAR.meta.n_params;       // 193
+  const NMICRO = pp.n_micro;              // 4
+  const MICRO  = BATCH / NMICRO;          // samples per micro-batch
+  const FP32   = T.memory.dtype_bytes.fp32;
+  const BF16   = T.memory.dtype_bytes.bf16;
+
+  const el = NN.el;
+  const pct = function (x) { return NN.fmt(x * 100, 1) + "%"; };
+  function p(html) { return el("p", { html: html }); }
+  function h3(t)   { return el("h3", { text: t }); }
+  function mono(t) { return "<code>" + t + "</code>"; }
+
+  /* ==================================================================== */
+  /*  THE SIMULATOR                                                       */
+  /*  Slot-level pipeline simulation. Every cell of every occupancy chart */
+  /*  on this page comes out of this one function, and it is checked      */
+  /*  against the shipped strategies.pp.grid before anything is drawn.    */
+  /*  Dependencies: F(m,s) needs F(m,s-1); B(m,s) needs B(m,s+1), and     */
+  /*  B(m,P-1) needs F(m,P-1). One op per stage per slot.                 */
+  /* ==================================================================== */
+  function simulate(P, M, policy) {
+    const ops = [];
+    for (let s = 0; s < P; s++) {
+      const L = [];
+      if (policy === "gpipe") {
+        for (let m = 0; m < M; m++) L.push("F" + m);
+        for (let m = 0; m < M; m++) L.push("B" + m);
+      } else {                                   // 1F1B / PipeDream-Flush
+        const warm = Math.min(P - 1 - s, M);
+        for (let m = 0; m < warm; m++) L.push("F" + m);
+        let b = 0;
+        for (let m = warm; m < M; m++) { L.push("F" + m); L.push("B" + b); b++; }
+        for (; b < M; b++) L.push("B" + b);
+      }
+      ops.push(L);
+    }
+
+    const ptr  = new Array(P).fill(0);
+    const dF   = ops.map(function () { return new Array(M).fill(-1); });
+    const dB   = ops.map(function () { return new Array(M).fill(-1); });
+    const rows = ops.map(function () { return []; });
+    const guard = 8 * (M + P) + 24;
+    let t = 0, remaining = true;
+
+    while (remaining && t < guard) {
+      const fire = new Array(P).fill(null);
+      for (let s = 0; s < P; s++) {
+        const op = ops[s][ptr[s]];
+        if (!op) continue;
+        const kind = op.charAt(0), m = +op.slice(1);
+        let ready;
+        if (kind === "F") ready = (s === 0) || (dF[s - 1][m] >= 0 && dF[s - 1][m] < t);
+        else ready = (s === P - 1) ? (dF[s][m] >= 0 && dF[s][m] < t)
+                                   : (dB[s + 1][m] >= 0 && dB[s + 1][m] < t);
+        if (ready) fire[s] = op;
+      }
+      for (let s = 0; s < P; s++) {
+        rows[s].push(fire[s]);
+        if (fire[s]) {
+          const kind = fire[s].charAt(0), m = +fire[s].slice(1);
+          (kind === "F" ? dF : dB)[s][m] = t;
+          ptr[s]++;
+        }
+      }
+      t++;
+      remaining = ptr.some(function (v, s) { return v < ops[s].length; });
+    }
+
+    const slots = t;
+    /* live activation sets: micro-batches whose forward is done on this
+       stage but whose backward has not run yet. This is the memory the
+       schedule is really trading against. */
+    const peakStage = [];
+    let peakAll = 0, peakAt = 0;
+    for (let s = 0; s < P; s++) {
+      let best = 0;
+      for (let tt = 0; tt < slots; tt++) {
+        let live = 0;
+        for (let m = 0; m < M; m++) {
+          if (dF[s][m] >= 0 && dF[s][m] <= tt && (dB[s][m] < 0 || dB[s][m] > tt)) live++;
+        }
+        if (live > best) best = live;
+        if (live > peakAll) { peakAll = live; peakAt = tt; }
+      }
+      peakStage.push(best);
+    }
+
+    const busyPerStage = 2 * M;
+    return {
+      grid: rows, slots: slots, P: P, M: M, policy: policy,
+      busyPerStage: busyPerStage,
+      idleFraction: (slots - busyPerStage) / slots,
+      peakStage: peakStage, peakLive: peakAll, peakAt: peakAt,
+      liveAt: function (s, tt) {
+        let live = 0;
+        for (let m = 0; m < M; m++) {
+          if (dF[s][m] >= 0 && dF[s][m] <= tt && (dB[s][m] < 0 || dB[s][m] > tt)) live++;
+        }
+        return live;
+      }
+    };
+  }
+
+  /* self-check: the GPipe policy must reproduce the shipped grid exactly */
+  const SIM_OK = JSON.stringify(simulate(WORLD, NMICRO, "gpipe").grid) ===
+                 JSON.stringify(pp.grid);
+
+  function bubbleFormula(P, M, chunks) {
+    const v = chunks || 1;
+    return (P - 1) / (v * M + P - 1);
+  }
+
+  function pipeLegend() {
+    return el("div", { class: "pipelegend" }, [
+      el("span", { class: "lg" }, [el("span", { class: "sw f" }, "F"), "forward — an activation is produced"]),
+      el("span", { class: "lg" }, [el("span", { class: "sw b" }, "B"), "backward — a gradient is produced"]),
+      el("span", { class: "lg" }, [el("span", { class: "sw i" }, ""), "idle — the bubble"]),
+      NN.chip("activation"), NN.chip("gradient")
+    ]);
+  }
+
+  function cellPx(slots) {
+    return NN.clamp(Math.floor(820 / slots), 13, 30);
+  }
+
+  function segButtons(opts, initial, onPick) {
+    const row = el("div", { class: "segbtns" });
+    const btns = opts.map(function (o) {
+      const b = el("button", { class: "btn" + (o.k === initial ? " primary" : "") }, o.label);
+      b.addEventListener("click", function () {
+        btns.forEach(function (x) { x.className = "btn"; });
+        b.className = "btn primary";
+        onPick(o.k);
+      });
+      row.appendChild(b);
+      return b;
+    });
+    return row;
+  }
+
+  function slider(labelText, min, max, val, onInput) {
+    const rv  = el("span", { class: "rv" }, String(val));
+    const inp = el("input", { type: "range", min: min, max: max, step: 1, value: val });
+    inp.addEventListener("input", function () {
+      rv.textContent = inp.value;
+      onInput(+inp.value);
+    });
+    const f = el("div", { class: "fld" }, [
+      el("label", {}, [el("span", { text: labelText }), rv]), inp
+    ]);
+    f.input = inp; f.readout = rv;
+    return f;
+  }
+
+  /* ==================================================================== */
+  /*  1 · THE LAYOUT                                                      */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#layoutBody");
+
+    host.appendChild(p(
+      "The model in <code>code/parallel_toy.py</code> is " + DIMS.join(" → ") + ": " +
+      NLAY + " layers, " + NN.count(NPARAM) + " parameters, on " + WORLD + " GPUs. " +
+      "Pipeline parallelism assigns <b>stage g = layer g</b>. GPU 0 owns layer 0 and nothing " +
+      "else; GPU 3 owns layer 3 and nothing else. Nothing is replicated, and no tensor is split."
+    ));
+    host.appendChild(p(
+      "That is the structural difference from the previous two pages. Flip between the three " +
+      "layouts below and watch what each GPU holds. Each row is one layer of the model; each " +
+      "row is drawn as " + WORLD + " slices so you can see which parts of it live on this GPU."
+    ));
+
+    const gridHost = el("div", { class: "gridhost" });
+    const caption  = el("div", { class: "hint" });
+
+    const MODES = {
+      ddp: {
+        label: "DDP — replicate everything",
+        held: function (g, L) { return [0, 1, 2, 3].map(function () { return true; }); },
+        params: function () { return NPARAM; },
+        color: "var(--weight)",
+        note: "Every GPU holds a full copy of every layer. " + NN.count(NPARAM) +
+              " params on each of " + WORLD + " GPUs — " + NN.count(NPARAM * WORLD) +
+              " params stored to train a " + NN.count(NPARAM) + "-param model. " +
+              "The batch is what got split, not the model.",
+        splits: ddp.splits, replicates: ddp.replicates
+      },
+      tp: {
+        label: "TP — every GPU, a slice of every layer",
+        held: function (g, L) { return [0, 1, 2, 3].map(function (i) { return i === g; }); },
+        params: function () { return tp.memory_per_gpu.weights; },
+        color: "var(--weight)",
+        note: "Each GPU holds one quarter of <em>every</em> weight matrix — about " +
+              NN.count(tp.memory_per_gpu.weights) + " params. Because every layer is " +
+              "split, every layer needs its partial results reconciled, which is why TP " +
+              "communicates inside each block.",
+        splits: tp.splits, replicates: tp.replicates
+      },
+      pp: {
+        label: "PP — one whole layer each",
+        held: function (g, L) { return [0, 1, 2, 3].map(function () { return L === g; }); },
+        params: function (g) { return pp.stages[g].params; },
+        color: "var(--weight)",
+        note: "GPU g holds all of layer g and none of any other layer. The stages are " +
+              pp.stages.map(function (s) { return NN.count(s.params); }).join(" / ") +
+              " params — deliberately uneven, which section 8 comes back to. " +
+              "Because a GPU holds no piece of a layer it does not own, the only thing that " +
+              "ever has to cross a link is the tensor handed over at a boundary.",
+        splits: pp.splits, replicates: pp.replicates
+      }
+    };
+
+    function heldRow(name, held, color, titleFor) {
+      const bar = el("div", { class: "shardbar" });
+      held.forEach(function (h, i) {
+        bar.appendChild(el("div", {
+          class: "shardseg" + (h ? " mine" : ""),
+          style: { background: h ? color : "var(--surface-3)" },
+          title: titleFor(i, h)
+        }));
+      });
+      return el("div", { class: "shardrow" }, [
+        el("span", { class: "shardname" }, name), bar
+      ]);
+    }
+
+    function draw(mode) {
+      const M = MODES[mode];
+      gridHost.innerHTML = "";
+      gridHost.appendChild(NN.gpu.grid({
+        count: WORLD,
+        label: function (g) { return mode === "pp" ? "GPU " + g + " · stage " + g : "GPU " + g; },
+        render: function (g) {
+          const kids = [];
+          for (let L = 0; L < NLAY; L++) {
+            const held = M.held(g, L);
+            kids.push(heldRow("L" + L, held, M.color, function (i, h) {
+              return "layer " + L + " (" + DIMS[L + 1] + "×" + DIMS[L] + "), quarter " + i +
+                     (h ? " — held on GPU " + g : " — not on GPU " + g);
+            }));
+          }
+          kids.push(el("div", { class: "gpu-line", style: { marginTop: "6px" } },
+            "weights: " + NN.count(M.params(g)) + " params"));
+          if (mode === "pp") {
+            kids.push(el("div", { class: "gpu-line" },
+              "W" + g + " (" + pp.stages[g].shape.join("×") + ")"));
+          }
+          return kids;
+        }
+      }));
+      caption.innerHTML = M.note;
+    }
+
+    host.appendChild(segButtons([
+      { k: "pp",  label: MODES.pp.label },
+      { k: "tp",  label: MODES.tp.label },
+      { k: "ddp", label: MODES.ddp.label }
+    ], "pp", draw));
+    host.appendChild(gridHost);
+    host.appendChild(caption);
+    host.appendChild(NN.legend(["weight"]));
+    draw("pp");
+
+    const tbl = el("table", { class: "data" });
+    tbl.innerHTML =
+      "<thead><tr><th>strategy</th><th class='wrap'>splits</th><th class='wrap'>replicates</th>" +
+      "<th>weights / GPU</th><th class='wrap'>what crosses the link</th></tr></thead><tbody>" +
+      "<tr><td>DDP</td><td class='wrap'>" + ddp.splits + "</td><td class='wrap'>" + ddp.replicates +
+        "</td><td class='n'>" + NN.count(ddp.memory_per_gpu.weights) + "</td>" +
+        "<td class='wrap'>one all-reduce of " + NN.count(ddp.schedule[0].elements) +
+        " gradient elements per step, across all " + WORLD + " ranks</td></tr>" +
+      "<tr><td>TP</td><td class='wrap'>" + tp.splits + "</td><td class='wrap'>" + tp.replicates +
+        "</td><td class='n'>" + NN.count(tp.memory_per_gpu.weights) + "</td>" +
+        "<td class='wrap'>" + tp.schedule.filter(function (c) { return c.op !== "none"; }).length +
+        " all-reduces of activations and input-gradients per step, across all " + WORLD +
+        " ranks, on the critical path</td></tr>" +
+      "<tr><td>PP</td><td class='wrap'>" + pp.splits + "</td><td class='wrap'>" + pp.replicates +
+        "</td><td class='n'>" + pp.stages.map(function (s) { return s.params; }).join(" / ") +
+        "</td><td class='wrap'>" + pp.schedule.length + " point-to-point sends of " +
+        NN.count(pp.schedule[0].elements) + " elements each, " +
+        "between " + pp.schedule[0].world + " ranks at a time</td></tr>" +
+      "</tbody>";
+    host.appendChild(tbl);
+
+    host.appendChild(NN.callout("why", "WHY THIS IS THE ONE THAT CROSSES NODES",
+      "Look at the last column. DDP and TP both need a collective over all " + WORLD +
+      " ranks; TP needs one <em>inside every block</em>, on the critical path, which is why it " +
+      "wants NVLink and stays in a node. PP needs a send from exactly one rank to exactly one " +
+      "other rank, at a stage boundary, and there are only P−1 = " + (WORLD - 1) +
+      " boundaries no matter how many layers the model has. That is a link requirement Ethernet " +
+      "can meet. Section 7 puts the byte counts side by side."));
+  })();
+
+  /* ==================================================================== */
+  /*  2 · THE NAIVE PIPELINE                                              */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#naiveBody");
+    const sim  = simulate(WORLD, 1, "gpipe");
+
+    host.appendChild(p(
+      "Start with the obvious version: feed the whole batch of " + BATCH +
+      " samples in as one lump. Layer 1 cannot start until layer 0 has produced its output, so " +
+      "stage 1 waits for stage 0, stage 2 waits for stage 1, and so on down and then back up " +
+      "through the backward pass. The dependency chain is strictly serial. At any instant " +
+      "exactly one GPU is doing arithmetic."
+    ));
+
+    host.appendChild(pipeLegend());
+
+    const gridEl = NN.gpu.pipelineGrid(sim.grid, { cell: 44 });
+    host.appendChild(gridEl);
+
+    /* who is busy, live */
+    const statusHost = el("div", { class: "statusrow" });
+    const cards = [];
+    for (let s = 0; s < WORLD; s++) {
+      const who  = el("div", { class: "who" }, "GPU " + s + " · stage " + s);
+      const what = el("div", { class: "what" }, "");
+      const c = el("div", { class: "statuscard" }, [who, what]);
+      statusHost.appendChild(c);
+      cards.push({ card: c, what: what });
+    }
+
+    const readout = el("span", { class: "rd" });
+    const range   = el("input", { type: "range", min: 0, max: sim.slots - 1, step: 1, value: 0 });
+    const play    = el("button", { class: "btn primary" }, "▶ Play");
+    let timer = null;
+
+    function paint(t) {
+      gridEl.mark(t);
+      let busy = 0;
+      for (let s = 0; s < WORLD; s++) {
+        const v = sim.grid[s][t];
+        cards[s].card.className = "statuscard " + (v ? (v.charAt(0) === "F" ? "f" : "b") : "i");
+        cards[s].what.textContent = v
+          ? (v.charAt(0) === "F" ? "forward, layer " + s : "backward, layer " + s)
+          : "idle — waiting";
+        if (v) busy++;
+      }
+      readout.textContent = "slot " + t + " / " + (sim.slots - 1) +
+        "  ·  busy " + busy + " of " + WORLD + " GPUs  ·  " +
+        pct(busy / WORLD) + " of the machine in use";
+    }
+    range.addEventListener("input", function () { paint(+range.value); });
+    play.addEventListener("click", function () {
+      if (timer) { clearInterval(timer); timer = null; play.textContent = "▶ Play"; return; }
+      play.textContent = "⏸ Pause";
+      timer = setInterval(function () {
+        const nt = (+range.value + 1) % sim.slots;
+        range.value = nt; paint(nt);
+      }, 800);
+    });
+
+    host.appendChild(el("div", { class: "miniplay" }, [play, range, readout]));
+    host.appendChild(statusHost);
+    paint(0);
+
+    const busyCells  = sim.busyPerStage * WORLD;
+    const totalCells = sim.slots * WORLD;
+    const arith = el("table", { class: "arith" });
+    arith.innerHTML =
+      "<tr><td class='term'>stages × slots (the whole machine, for the whole step)</td>" +
+      "<td class='r'>" + WORLD + " × " + sim.slots + "</td><td class='r'>" + totalCells + " GPU-slots</td></tr>" +
+      "<tr><td class='term'>slots that did arithmetic (one forward + one backward per stage)</td>" +
+      "<td class='r'>" + WORLD + " × " + sim.busyPerStage + "</td><td class='r'>" + busyCells + " GPU-slots</td></tr>" +
+      "<tr class='sum'><td class='term'>idle fraction</td><td class='r'>" +
+      (totalCells - busyCells) + " / " + totalCells + "</td><td class='r'>" +
+      pct(sim.idleFraction) + "</td></tr>";
+    host.appendChild(arith);
+
+    host.appendChild(NN.callout("warn", "FOUR GPUS, ONE GPU'S THROUGHPUT",
+      "With one batch in flight, " + pct(sim.idleFraction) + " of the machine's time is idle. " +
+      "You bought " + WORLD + " GPUs and got roughly the throughput of one, plus the latency of " +
+      "the interconnect. Nothing about this is a communication problem — the links are nearly " +
+      "silent. It is a <em>scheduling</em> problem: there is only one unit of work and it can " +
+      "only be in one place at a time."));
+
+    host.appendChild(p(
+      "Note the shape of the number. The pipeline needs " + sim.slots + " slots to do " +
+      sim.busyPerStage + " slots of work per stage, so each stage idles for " +
+      (sim.slots - sim.busyPerStage) + " of them. That ratio is " +
+      mono("(P−1)/(M+P−1)") + " with M = 1: " + (WORLD - 1) + "/" + WORLD + " = " +
+      pct(bubbleFormula(WORLD, 1)) + ". The fix is to raise M."
+    ));
+  })();
+
+  /* ==================================================================== */
+  /*  3 · MICRO-BATCHING (the centrepiece)                                */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#microBody");
+    const sim  = simulate(WORLD, NMICRO, "gpipe");
+
+    host.appendChild(p(
+      "Split the batch. Instead of one lump of " + BATCH + " samples, send " + NMICRO +
+      " micro-batches of " + MICRO + ". Now stage 0 does not have to wait for anything after it " +
+      "finishes micro-batch 0 — it hands that activation to stage 1 and immediately starts " +
+      "micro-batch 1. The pipeline <em>fills</em>. This is the entire idea, and it is worth " +
+      "watching a slot at a time."
+    ));
+
+    host.appendChild(pipeLegend());
+
+    const gridEl = NN.gpu.pipelineGrid(pp.grid, { cell: cellPx(pp.grid[0].length) });
+    host.appendChild(gridEl);
+
+    const statusHost = el("div", { class: "statusrow" });
+    const cards = [];
+    for (let s = 0; s < WORLD; s++) {
+      const what = el("div", { class: "what" }, "");
+      const wire = el("div", { class: "wire" }, "");
+      const c = el("div", { class: "statuscard" }, [
+        el("div", { class: "who" }, "GPU " + s + " · stage " + s + " · layer " + s), what, wire
+      ]);
+      statusHost.appendChild(c);
+      cards.push({ card: c, what: what, wire: wire });
+    }
+    host.appendChild(statusHost);
+
+    const tally  = el("div", { class: "hint", style: { marginTop: "6px" } });
+    const stepHost = el("div");
+    host.appendChild(stepHost);
+    host.appendChild(tally);
+
+    const SLOTS = pp.grid[0].length;
+    const labels = [];
+    for (let t = 0; t < SLOTS; t++) {
+      let busy = 0;
+      for (let s = 0; s < WORLD; s++) if (pp.grid[s][t]) busy++;
+      labels.push("slot " + t + ": " + busy + "/" + WORLD + " stages busy");
+    }
+
+    const fwdBytes = pp.schedule[0].elements;
+    function paint(t) {
+      gridEl.mark(t);
+      let busy = 0, cum = 0, cumTotal = (t + 1) * WORLD;
+      for (let s = 0; s < WORLD; s++) {
+        const v = pp.grid[s][t];
+        cards[s].card.className = "statuscard " + (v ? (v.charAt(0) === "F" ? "f" : "b") : "i");
+        if (v) {
+          const m = v.slice(1);
+          busy++;
+          cards[s].what.textContent = (v.charAt(0) === "F" ? "forward" : "backward") +
+            " · micro-batch " + m;
+          cards[s].wire.textContent = v.charAt(0) === "F"
+            ? (s < WORLD - 1 ? "→ sends " + fwdBytes + " activation elems to stage " + (s + 1)
+                             : "→ loss for micro-batch " + m)
+            : (s > 0 ? "← sends " + fwdBytes + " grad elems to stage " + (s - 1)
+                     : "← chain rule ends here");
+        } else {
+          cards[s].what.textContent = "idle — bubble";
+          cards[s].wire.textContent = pp.grid[s].slice(0, t).some(Boolean)
+            ? "waiting for work to come back" : "waiting for the pipe to fill";
+        }
+        for (let k = 0; k <= t; k++) if (pp.grid[s][k]) cum++;
+      }
+      tally.innerHTML =
+        "slot " + t + " — <b>" + busy + " of " + WORLD + "</b> stages busy. " +
+        "Cumulative utilisation through this slot: " + cum + " / " + cumTotal + " GPU-slots = " +
+        "<b>" + pct(cum / cumTotal) + "</b>. Steady state (the middle of the chart) is " +
+        "100%; the ramp at each end is the bubble.";
+    }
+
+    new NN.Stepper({
+      mount: stepHost, count: SLOTS, labels: labels, autoplayMs: 750,
+      onStep: function (i) { paint(i); }
+    });
+
+    host.appendChild(NN.callout("key", "READ THE CHART DIAGONALLY",
+      "A micro-batch is a diagonal. F0 walks down the stages one slot at a time, then B0 walks " +
+      "back up. The reason the machine is ever fully busy is that " + WORLD + " different " +
+      "diagonals overlap in the middle. The reason it is not <em>always</em> fully busy is that " +
+      "the first diagonal has to reach the bottom before any backward can start, and the last " +
+      "one has to drain."));
+
+    host.appendChild(p(
+      "This chart is <code>strategies.pp.grid</code>, drawn directly. It is an all-forwards-" +
+      "then-all-backwards (GPipe) schedule: look at stage " + (WORLD - 1) +
+      " — it runs F0…F" + (NMICRO - 1) + " and only then B0…B" + (NMICRO - 1) +
+      ". Section 5 rearranges exactly those cells. The page also re-derives the grid from the " +
+      "dependency rules in the browser and checks it against the shipped one: <b>" +
+      (SIM_OK ? "the simulation reproduces strategies.pp.grid cell for cell"
+              : "MISMATCH — the in-page simulator disagrees with the shipped grid") +
+      "</b>, so every other chart below, which is simulated rather than shipped, is built on the " +
+      "same rules."
+    ));
+
+    host.appendChild(NN.tiles([
+      { k: "stages P", v: String(WORLD), s: "one layer each" },
+      { k: "micro-batches M", v: String(NMICRO), s: MICRO + " sample" + (MICRO === 1 ? "" : "s") + " each" },
+      { k: "slots to finish", v: String(SLOTS), s: "= 2·(M+P−1)" },
+      { k: "busy slots / stage", v: String(sim.busyPerStage), s: "= 2M, one F and one B per micro-batch" },
+      { k: "idle fraction", v: pct(pp.bubble_fraction), s: "strategies.pp.bubble_fraction", cls: "gradient" }
+    ]));
+  })();
+
+  /* ==================================================================== */
+  /*  4 · THE BUBBLE                                                      */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#bubbleBody");
+
+    host.appendChild(p(
+      "The derivation is short. A stage has 2M slots of real work: one forward and one backward " +
+      "per micro-batch. But the pipeline cannot start every stage at slot 0 — stage s only " +
+      "begins when the first micro-batch reaches it, which takes s slots, and it only finishes " +
+      "when the last backward gets back to it. The fill and drain together cost P−1 slots of " +
+      "forward and P−1 of backward, so the whole step takes M+P−1 forward-equivalents in each " +
+      "direction:"
+    ));
+
+    host.appendChild(NN.formula({
+      rule: "bubble = idle slots / total slots = ((M+P−1) − M) / (M+P−1)",
+      sub: "(P−1) / (M+P−1)  &nbsp; <span class='muted'>— strategies.pp.bubble_formula: " +
+           pp.bubble_formula + "</span>",
+      result: "(" + WORLD + "−1) / (" + NMICRO + "+" + WORLD + "−1) = " + pct(pp.bubble_fraction),
+      cls: "gradient"
+    }));
+
+    host.appendChild(p(
+      "Two things follow immediately. The bubble does not depend on how big a micro-batch is, " +
+      "only on <em>how many</em> there are relative to the number of stages. And it never " +
+      "reaches zero: for any finite M, P−1 slots of every stage's life are spent waiting. " +
+      "You want <b>M ≫ P</b>."
+    ));
+
+    /* ---- the interactive ------------------------------------------- */
+    const ctl      = el("div", { class: "ctlgrid" });
+    const gridHost = el("div");
+    const tileHost = el("div");
+    const chartHost = el("div");
+    const memHost   = el("div");
+
+    let curP = WORLD, curM = NMICRO, curPol = "gpipe";
+
+    const sP = slider("stages P", 2, 8, curP, function (v) { curP = v; redraw(); });
+    const sM = slider("micro-batches M", 1, 16, curM, function (v) { curM = v; redraw(); });
+    ctl.appendChild(el("div", { class: "panel" }, [
+      el("h4", {}, "pipeline shape"), sP, sM,
+      el("div", { class: "hint" }, "P is how many GPUs the model is cut across. " +
+        "M is how many pieces you cut the batch into.")
+    ]));
+    const polHost = el("div", { class: "panel" }, [el("h4", {}, "schedule")]);
+    polHost.appendChild(segButtons([
+      { k: "gpipe", label: "GPipe" }, { k: "1f1b", label: "1F1B" }
+    ], "gpipe", function (k) { curPol = k; redraw(); }));
+    polHost.appendChild(el("div", { class: "hint" },
+      "Both give the same bubble. Section 5 is about why you still pick one."));
+    ctl.appendChild(polHost);
+
+    host.appendChild(ctl);
+    host.appendChild(pipeLegend());
+    host.appendChild(gridHost);
+    host.appendChild(tileHost);
+
+    function redraw() {
+      const sim = simulate(curP, curM, curPol);
+      gridHost.innerHTML = "";
+      gridHost.appendChild(NN.gpu.pipelineGrid(sim.grid, { cell: cellPx(sim.slots) }));
+
+      const formulaVal = bubbleFormula(curP, curM);
+      tileHost.innerHTML = "";
+      tileHost.appendChild(NN.tiles([
+        { k: "bubble (measured)", v: pct(sim.idleFraction),
+          s: (sim.slots - sim.busyPerStage) + " idle of " + sim.slots + " slots", cls: "gradient" },
+        { k: "bubble (P−1)/(M+P−1)", v: pct(formulaVal),
+          s: Math.abs(formulaVal - sim.idleFraction) < 1e-9
+             ? "matches the simulation exactly" : "DISAGREES with the simulation" },
+        { k: "slots to finish", v: String(sim.slots), s: "2·(M+P−1)" },
+        { k: "peak live activation sets", v: String(sim.peakLive),
+          s: "micro-batches held on the busiest stage", cls: "activation" },
+        { k: "activation bytes at peak", v: NN.bytes(sim.peakLive * pp.schedule[0].elements * FP32),
+          s: sim.peakLive + " × " + pp.schedule[0].elements + " elems × " + FP32 + " B (fp32)",
+          cls: "activation" }
+      ]));
+
+      /* bubble vs M, at the current P */
+      const pts = [];
+      for (let m = 1; m <= 32; m++) pts.push([m, bubbleFormula(curP, m)]);
+      chartHost.innerHTML = "";
+      chartHost.appendChild(el("div", { class: "hint" },
+        "Bubble fraction against M, at the P you have selected (" + curP + "). " +
+        "Hover for values. The curve is (P−1)/(M+P−1): hyperbolic, so the first few " +
+        "micro-batches buy far more than the last few."));
+      chartHost.appendChild(NN.chart.line({
+        series: [{ name: "bubble at P=" + curP, color: "var(--gradient)", points: pts, dots: false }],
+        width: 620, height: 230, xlabel: "micro-batches M", ylabel: "idle fraction",
+        yMin: 0, yMax: 1
+      }));
+
+      /* the counterpoint: activations live */
+      const mem = [];
+      for (let m = 1; m <= 32; m++) mem.push([m, simulate(curP, m, curPol).peakLive]);
+      memHost.innerHTML = "";
+      memHost.appendChild(el("div", { class: "hint", html:
+        "The same M on the same axis, against peak live activation sets under the <b>" +
+        (curPol === "gpipe" ? "GPipe" : "1F1B") + "</b> schedule at P=" + curP + ". " +
+        "Under GPipe this line is y = M and it never stops climbing. Under 1F1B it flattens at P." }));
+      memHost.appendChild(NN.chart.line({
+        series: [{ name: "peak live micro-batches", color: "var(--activation)", points: mem, dots: false }],
+        width: 620, height: 230, xlabel: "micro-batches M", ylabel: "live activation sets"
+      }));
+    }
+
+    host.appendChild(el("div", { class: "grid2" }, [chartHost, memHost]));
+    redraw();
+
+    host.appendChild(NN.callout("mem", "THE TENSION IS THE WHOLE DESIGN SPACE",
+      "Raise M and the bubble shrinks. But every micro-batch that has done its forward and not " +
+      "yet its backward is holding a full set of activations on its stage, waiting to be used by " +
+      "the chain rule — the same reason page 04 had to keep them. So raising M trades idle time " +
+      "for activation memory, and activation memory is usually the thing that was already " +
+      "tight. Every real pipeline configuration is a point chosen on those two curves: push M up " +
+      "until the bubble is tolerable or the memory runs out, whichever comes first. The next " +
+      "section changes the shape of the second curve, which is why it matters so much."));
+  })();
+
+  /* ==================================================================== */
+  /*  5 · GPIPE vs 1F1B                                                   */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#schedBody");
+
+    host.appendChild(p(
+      "GPipe runs every forward, then every backward. That is what " +
+      "<code>strategies.pp.grid</code> above does. It is the easy schedule to reason about, and " +
+      "it has a specific flaw: at the moment the last forward finishes, stage 0 is holding the " +
+      "activations of <em>all M</em> micro-batches, because none of them has had its backward " +
+      "yet."
+    ));
+    host.appendChild(p(
+      "1F1B — one-forward-one-backward, the PipeDream-Flush schedule — fixes that by starting " +
+      "backwards as early as the dependencies allow. Stage s does P−1−s forwards to fill the " +
+      "pipe, then alternates one forward with one backward, then drains the remaining backwards. " +
+      "The makespan is unchanged, so the <b>bubble is identical</b>. But a micro-batch's " +
+      "activations are released almost as soon as they are created, so a stage holds at most " +
+      "about P of them instead of M."
+    ));
+
+    const ctl = el("div", { class: "ctlgrid" });
+    const side = el("div", { class: "grid2" });
+    const tileHost = el("div");
+    const chartHost = el("div");
+    let cmpM = 8, cmpP = WORLD;
+
+    ctl.appendChild(el("div", { class: "panel" }, [
+      el("h4", {}, "compare at"),
+      slider("micro-batches M", 1, 16, cmpM, function (v) { cmpM = v; redraw(); }),
+      slider("stages P", 2, 8, cmpP, function (v) { cmpP = v; redraw(); }),
+      el("div", { class: "hint" },
+        "The two schedules only diverge once M > P. At M ≤ P there is no steady state to " +
+        "interleave, and the grids are the same.")
+    ]));
+    host.appendChild(ctl);
+    host.appendChild(pipeLegend());
+    host.appendChild(side);
+    host.appendChild(tileHost);
+    host.appendChild(chartHost);
+
+    function panelFor(sim, title) {
+      const box = el("div", {});
+      box.appendChild(el("h4", { class: "hint", style: { margin: "0 0 6px" } }, title));
+      box.appendChild(NN.gpu.pipelineGrid(sim.grid, { cell: cellPx(sim.slots * 2) }));
+      box.appendChild(el("div", { class: "hint", style: { marginTop: "6px" } },
+        "bubble " + pct(sim.idleFraction) + " · " + sim.slots + " slots · peak " +
+        sim.peakLive + " live activation sets (per-stage peaks: " +
+        sim.peakStage.join(", ") + ")"));
+      return box;
+    }
+
+    function redraw() {
+      const g = simulate(cmpP, cmpM, "gpipe");
+      const f = simulate(cmpP, cmpM, "1f1b");
+      side.innerHTML = "";
+      side.appendChild(panelFor(g, "GPipe — all forwards, then all backwards"));
+      side.appendChild(panelFor(f, "1F1B — interleaved, PipeDream-Flush"));
+
+      const elemsPerSet = pp.schedule[0].elements;
+      tileHost.innerHTML = "";
+      tileHost.appendChild(NN.tiles([
+        { k: "bubble, GPipe", v: pct(g.idleFraction), cls: "gradient" },
+        { k: "bubble, 1F1B", v: pct(f.idleFraction), s: "identical, by construction", cls: "gradient" },
+        { k: "peak sets, GPipe", v: String(g.peakLive),
+          s: NN.bytes(g.peakLive * elemsPerSet * FP32) + " in the toy", cls: "activation" },
+        { k: "peak sets, 1F1B", v: String(f.peakLive),
+          s: NN.bytes(f.peakLive * elemsPerSet * FP32) + " in the toy", cls: "activation" },
+        { k: "memory saved", v: g.peakLive > 0 ? NN.fmt(g.peakLive / f.peakLive, 2) + "×" : "–",
+          s: "same maths, same speed, less resident" }
+      ]));
+
+      const gp = [], fp = [];
+      for (let m = 1; m <= 24; m++) {
+        gp.push([m, simulate(cmpP, m, "gpipe").peakLive]);
+        fp.push([m, simulate(cmpP, m, "1f1b").peakLive]);
+      }
+      chartHost.innerHTML = "";
+      chartHost.appendChild(el("div", { class: "hint", html:
+        "Peak live activation sets against M, both schedules, at P=" + cmpP + ". " +
+        "Both lines are activation memory, so both are drawn in the activation hue and " +
+        "distinguished by stroke: <b>dashed = GPipe</b> (y = M, unbounded), " +
+        "<b>solid = 1F1B</b> (flattens at P = " + cmpP + "). Hover to read both." }));
+      chartHost.appendChild(NN.chart.line({
+        series: [
+          { name: "GPipe (dashed)", color: "var(--activation)", points: gp, dash: "6 4", dots: false },
+          { name: "1F1B (solid)",   color: "var(--activation)", points: fp, dots: false }
+        ],
+        width: 640, height: 260, xlabel: "micro-batches M",
+        ylabel: "peak live activation sets"
+      }));
+    }
+    redraw();
+
+    host.appendChild(NN.callout("key", "THIS IS THE PRACTICALLY IMPORTANT ONE",
+      "1F1B costs nothing. Same arithmetic, same number of slots, same bubble — it is a pure " +
+      "reordering of when each stage runs its backward. In exchange, peak activation memory " +
+      "stops scaling with M and starts scaling with P, which is what lets you push M high " +
+      "enough to make the bubble small. Every production pipeline implementation — Megatron-LM, " +
+      "DeepSpeed, PyTorch's pipelining APIs — schedules 1F1B by default. GPipe is worth " +
+      "understanding because it makes the memory failure mode obvious, not because you should " +
+      "run it."));
+
+    host.appendChild(p(
+      "One caveat the charts do not show: 1F1B's stages hold uneven amounts. The per-stage peaks " +
+      "printed under each grid are highest at stage 0 and lowest at the last stage, because " +
+      "stage 0 has to keep its activations alive across the whole fill-and-return trip. In a " +
+      "real system that shows up as the first pipeline stage being the one that runs out of memory."
+    ));
+  })();
+
+  /* ==================================================================== */
+  /*  6 · INTERLEAVED / VIRTUAL STAGES                                    */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#interBody");
+
+    host.appendChild(p(
+      "There is a third lever. Instead of giving GPU 0 one contiguous chunk of layers, give it " +
+      "<em>v</em> non-contiguous chunks — with v=2 and 8 layers over 4 GPUs, GPU 0 gets layers 0 " +
+      "and 4, GPU 1 gets 1 and 5, and so on. Each GPU now hosts v <b>virtual stages</b> " +
+      "(model chunks), so a micro-batch visits every GPU v times per forward pass."
+    ));
+    host.appendChild(p(
+      "The effect is that the unit of pipelining gets smaller. The fill and drain still cost " +
+      "P−1 stage-visits, but each visit is now 1/v of a stage's work, so the bubble divides by v:"
+    ));
+
+    const chunkHost = el("div");
+    const tblHost   = el("div");
+    let vP = WORLD, vM = 8, vV = 2;
+
+    const ctl = el("div", { class: "ctlgrid" });
+    ctl.appendChild(el("div", { class: "panel" }, [
+      el("h4", {}, "interleaving"),
+      slider("stages P", 2, 8, vP, function (x) { vP = x; redraw(); }),
+      slider("micro-batches M", 1, 16, vM, function (x) { vM = x; redraw(); }),
+      slider("chunks per GPU v", 1, 4, vV, function (x) { vV = x; redraw(); })
+    ]));
+    host.appendChild(ctl);
+    host.appendChild(chunkHost);
+    host.appendChild(tblHost);
+
+    function redraw() {
+      chunkHost.innerHTML = "";
+      chunkHost.appendChild(NN.formula({
+        rule: "bubble<sub>interleaved</sub> = (P−1) / (v·M + P−1)",
+        sub: "(" + vP + "−1) / (" + vV + "·" + vM + " + " + vP + "−1)",
+        result: pct(bubbleFormula(vP, vM, vV)) + "   (v=1 gives " +
+                pct(bubbleFormula(vP, vM, 1)) + ")",
+        cls: "gradient"
+      }));
+
+      const rows = [];
+      for (let v = 1; v <= 4; v++) {
+        const b = bubbleFormula(vP, vM, v);
+        rows.push("<tr" + (v === vV ? " class='hi'" : "") + "><td>v = " + v + "</td>" +
+          "<td class='n'>" + pct(b) + "</td>" +
+          "<td class='n'>" + NN.fmt(bubbleFormula(vP, vM, 1) / b, 2) + "×</td>" +
+          "<td class='n'>" + (v * vP - 1) + "</td>" +
+          "<td class='n'>" + ((v * vP - 1) * 2 * vM) + "</td></tr>");
+      }
+      tblHost.innerHTML =
+        "<table class='data'><thead><tr><th>chunks per GPU</th><th>bubble</th>" +
+        "<th>bubble reduction</th><th>boundary hops per micro-batch (fwd)</th>" +
+        "<th>p2p sends per step</th></tr></thead><tbody>" + rows.join("") + "</tbody></table>";
+    }
+    redraw();
+
+    host.appendChild(p(
+      "The price is in the last two columns. A forward pass now crosses v·P−1 boundaries instead " +
+      "of P−1, so the number of point-to-point messages per step goes up by roughly the same " +
+      "factor v, and each message is a separate latency to hide. You are converting idle time " +
+      "into interconnect traffic, which is only a good trade while the link has headroom — that " +
+      "is, while the pipeline dimension is not the thing crossing the slowest hop. It also " +
+      "requires the layer count to divide by v·P."
+    ));
+
+    host.appendChild(NN.callout("why", "WHERE THIS IS USED",
+      "Megatron-LM calls this the <em>interleaved 1F1B</em> schedule (virtual pipeline stages), " +
+      "and it is the standard configuration for large training runs: the bubble at v=2 is half " +
+      "what it is at v=1 for the same M, at the cost of about double the p2p messages. The " +
+      "activation-memory bound from section 5 still applies per virtual stage, so interleaving " +
+      "does not let you get away with a smaller M — it makes the M you can afford go further."));
+  })();
+
+  /* ==================================================================== */
+  /*  7 · THE COMMUNICATION                                               */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#commBody");
+
+    const fwd = pp.schedule.filter(function (c) { return c.phase === "forward"; });
+    const bwd = pp.schedule.filter(function (c) { return c.phase === "backward"; });
+    const perMicro = pp.schedule.reduce(function (a, c) { return a + c.elements; }, 0);
+
+    host.appendChild(p(
+      "Here is the whole communication schedule for one micro-batch, from " +
+      "<code>strategies.pp.schedule</code>. " + fwd.length + " sends going down the pipe, " +
+      bwd.length + " coming back up. That is it — there is no collective anywhere in pipeline " +
+      "parallelism."
+    ));
+
+    pp.schedule.forEach(function (c) {
+      const card = NN.gpu.commCard(c);
+      card.appendChild(el("div", { class: "commphase" },
+        "rank " + c.src + " → rank " + c.dst + "  ·  " + c.elements + " elems  ·  " +
+        NN.bytes(c.bytes_fp32) + " fp32  ·  " + NN.bytes(c.bytes_bf16) + " bf16"));
+      host.appendChild(card);
+    });
+
+    host.appendChild(NN.legend(["activation", "gradient"]));
+
+    host.appendChild(p(
+      "Two properties matter more than the sizes. First, <b>world size 2</b>: only the sender " +
+      "and the receiver participate, so there is no all-ranks barrier and no ring — a p2p send " +
+      "does not make " + (WORLD - 2) + " other GPUs wait. Second, the count scales with the " +
+      "number of <em>boundaries</em>, not the number of layers. Adding layers to a stage adds " +
+      "zero communication."
+    ));
+
+    const arith = el("table", { class: "arith" });
+    arith.innerHTML =
+      "<tr><td class='term'>boundary tensor, one micro-batch, forward</td>" +
+      "<td class='r'>" + MICRO + " × " + DIMS[1] + "</td>" +
+      "<td class='r'>" + fwd[0].elements + " elems</td>" +
+      "<td class='r'>" + NN.bytes(fwd[0].bytes_fp32) + " fp32</td></tr>" +
+      "<tr><td class='term'>sends per micro-batch (" + fwd.length + " forward + " + bwd.length + " backward)</td>" +
+      "<td class='r'>" + pp.schedule.length + " × " + fwd[0].elements + "</td>" +
+      "<td class='r'>" + perMicro + " elems</td>" +
+      "<td class='r'>" + NN.bytes(perMicro * FP32) + " fp32</td></tr>" +
+      "<tr class='sum'><td class='term'>whole step, all " + NMICRO + " micro-batches</td>" +
+      "<td class='r'>" + NMICRO + " × " + perMicro + "</td>" +
+      "<td class='r'>" + (NMICRO * perMicro) + " elems</td>" +
+      "<td class='r'>" + NN.bytes(NMICRO * perMicro * FP32) + " fp32</td></tr>";
+    host.appendChild(arith);
+
+    /* ---- TP vs PP -------------------------------------------------- */
+    host.appendChild(h3("Against tensor parallel, on the same model"));
+
+    const tpOps = tp.schedule.filter(function (c) { return c.op !== "none"; });
+    const tpSent = tpOps.reduce(function (a, c) { return a + c.sent_per_gpu_elements; }, 0);
+    /* PP: the busiest rank is an interior stage — one send down and one back
+       up per micro-batch, over the whole step. */
+    const ppSentBusiest = 2 * fwd[0].elements * NMICRO;
+
+    const cmp = el("table", { class: "data" });
+    cmp.innerHTML =
+      "<thead><tr><th>&nbsp;</th><th>tensor parallel</th><th class='best'>pipeline parallel</th></tr></thead><tbody>" +
+      "<tr><td>operation</td><td>" + tpOps[0].op + " (collective)</td>" +
+        "<td class='best'>" + pp.schedule[0].op + " (point-to-point)</td></tr>" +
+      "<tr><td>ranks per operation</td><td class='n'>" + tpOps[0].world + "</td>" +
+        "<td class='n best'>" + pp.schedule[0].world + "</td></tr>" +
+      "<tr><td>operations per step</td><td class='n'>" + tpOps.length + " (per " + PAR.meta.n_layers + "-layer model)</td>" +
+        "<td class='n best'>" + pp.schedule.length + " × " + NMICRO + " micro-batches = " +
+        (pp.schedule.length * NMICRO) + "</td></tr>" +
+      "<tr><td>scales with</td><td class='wrap'>the number of LAYERS — two all-reduces per block</td>" +
+        "<td class='wrap best'>the number of BOUNDARIES — P−1, independent of depth</td></tr>" +
+      "<tr><td>elements sent by the busiest GPU</td><td class='n'>" + NN.fmt(tpSent, 0) + "</td>" +
+        "<td class='n best'>" + ppSentBusiest + "</td></tr>" +
+      "<tr><td>on the critical path?</td><td class='wrap'>yes — the block cannot proceed until " +
+        "the all-reduce completes</td>" +
+        "<td class='wrap best'>no — the send overlaps with the next micro-batch's compute</td></tr>" +
+      "<tr><td>link it needs</td><td class='wrap'>NVLink-class; stays inside a node</td>" +
+        "<td class='wrap best'>survives Ethernet; this is the one that crosses nodes</td></tr>" +
+      "</tbody>";
+    host.appendChild(cmp);
+
+    host.appendChild(p(
+      "The raw byte counts are not that far apart in a " + NLAY + "-layer toy — " +
+      NN.fmt(tpSent, 0) + " elements against " + ppSentBusiest + ". The gap is structural, not " +
+      "arithmetic: TP's number is " + tpOps.length + " blocking collectives that every rank must " +
+      "join, and it grows with depth; PP's is a stream of two-party sends that can be issued " +
+      "while other micro-batches compute, and it does not grow with depth at all."
+    ));
+
+    /* ---- scaled to a real model ------------------------------------ */
+    const m70 = T.reference_configs.models.filter(function (m) {
+      return m.name === T.reference_configs.default_model; })[0];
+    const PP_DEG = 8, TP_DEG = 8;
+    const actElems = m70.seq * m70.d_model;                 // one sample's boundary tensor
+    const actBytes = actElems * BF16;
+    const ppFwdBytes = (PP_DEG - 1) * actBytes;
+    const tpFwdBytes = 2 * m70.n_layers * actBytes * (2 * (TP_DEG - 1) / TP_DEG);
+
+    host.appendChild(NN.callout("mem", "THE SAME COMPARISON AT " + m70.name.toUpperCase() + " SCALE",
+      "Taking " + m70.name + " from <code>T.reference_configs</code> (" + m70.n_layers +
+      " layers, d_model " + m70.d_model + ", sequence " + m70.seq +
+      ") in bf16 (" + BF16 + " B/element), one micro-batch of one sequence: the boundary " +
+      "activation is " + m70.seq + " × " + m70.d_model + " = " +
+      NN.count(actElems) + " elements = " + NN.bytes(actBytes) + ". " +
+      "With PP=" + PP_DEG + " that is " + (m70.n_layers / PP_DEG) + " layers per stage and " +
+      (PP_DEG - 1) + " boundaries, so a forward pass moves <b>" + NN.bytes(ppFwdBytes) +
+      "</b> in point-to-point sends. With TP=" + TP_DEG +
+      " the same forward pass all-reduces a tensor of that size twice per block, " + m70.n_layers +
+      " blocks deep, and a ring all-reduce moves 2(N−1)/N of its payload per rank: <b>" +
+      NN.bytes(tpFwdBytes) + " per GPU</b>, roughly " +
+      NN.fmt(tpFwdBytes / ppFwdBytes, 0) + "× more, all of it synchronous. " +
+      "That ratio is why the two are composed rather than chosen between: TP inside the node " +
+      "where the link is fast, PP across nodes where it is not. Page 14 puts them together."));
+  })();
+
+  /* ==================================================================== */
+  /*  8 · THE HONEST PROBLEMS                                             */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#probBody");
+
+    host.appendChild(h3("Load imbalance: the slowest stage sets the clock"));
+    host.appendChild(p(
+      "Every occupancy chart on this page assumes each slot takes the same time. The toy model " +
+      "does not honour that assumption, and neither does any real one. Here is what each stage " +
+      "actually owns:"
+    ));
+
+    const params = pp.stages.map(function (s) { return s.params; });
+    const maxP = Math.max.apply(null, params);
+    const sumP = params.reduce(function (a, b) { return a + b; }, 0);
+    const meanP = sumP / params.length;
+
+    host.appendChild(NN.chart.bars({
+      items: pp.stages.map(function (s) {
+        return {
+          label: "stage " + s.gpu + " · layer " + s.layer + " · W" + s.layer +
+                 " (" + s.shape.join("×") + ")",
+          value: s.params, color: "var(--weight)",
+          sub: s.params === maxP ? "← sets the pace" : ""
+        };
+      }),
+      unit: "params"
+    }));
+
+    const arith = el("table", { class: "arith" });
+    arith.innerHTML =
+      "<tr><td class='term'>heaviest stage</td><td class='r'>" + maxP + " params</td>" +
+      "<td class='term'>every slot is as long as this one</td></tr>" +
+      "<tr><td class='term'>average stage</td><td class='r'>" + NN.fmt(meanP, 2) + " params</td>" +
+      "<td class='term'>what a balanced split would give</td></tr>" +
+      "<tr class='sum'><td class='term'>utilisation ceiling from imbalance alone</td>" +
+      "<td class='r'>" + NN.fmt(meanP, 2) + " / " + maxP + "</td>" +
+      "<td class='r'>" + pct(meanP / maxP) + "</td></tr>";
+    host.appendChild(arith);
+
+    host.appendChild(p(
+      "Stage " + (WORLD - 1) + " holds " + params[WORLD - 1] + " parameters and stage 1 holds " +
+      maxP + ", a factor of " + NN.fmt(maxP / Math.min.apply(null, params), 1) +
+      ". A pipeline runs at the pace of its slowest stage, so the light stages simply wait " +
+      "longer — that idle time is on top of the bubble, and no amount of micro-batching removes " +
+      "it. Note that <code>strategies.pp.memory_per_gpu.weights</code> reports " +
+      pp.memory_per_gpu.weights + ", the average; the average is exactly the number that hides " +
+      "this problem."
+    ));
+    host.appendChild(p(
+      "In a real transformer the layers in the middle are genuinely uniform, which is what makes " +
+      "PP viable at all. The imbalance lives at the ends: the embedding table on the first stage " +
+      "and the LM head plus loss on the last stage are much heavier than a transformer block, " +
+      "and the last stage additionally holds the logits, which are vocabulary-sized. The usual " +
+      "fixes are to give the first and last stages fewer transformer blocks than the middle " +
+      "ones, or to shard the head separately. Layer-to-stage assignment is a tuning parameter, " +
+      "not a detail."
+    ));
+
+    host.appendChild(h3("The bubble never reaches zero"));
+    const bigM = 64;
+    host.appendChild(p(
+      "(P−1)/(M+P−1) → 0 only as M → ∞. At P=" + WORLD + ", M=" + NMICRO + " it is " +
+      pct(pp.bubble_fraction) + "; at M=" + bigM + " it is still " +
+      pct(bubbleFormula(WORLD, bigM)) + ". And M is bounded from two directions: the global " +
+      "batch size has to divide into M pieces that are still large enough to use a GPU " +
+      "efficiently, and the activation memory of section 5 has to fit. Interleaving buys a " +
+      "factor of v and no more. Pipeline parallelism is a strategy you accept a few percent of " +
+      "waste for, not one you tune to zero."
+    ));
+
+    host.appendChild(h3("What it does not change"));
+    host.appendChild(NN.callout("why", "PP IS A SCHEDULE, NOT A DIFFERENT MODEL",
+      "<code>strategies.pp.verify</code>: " + pp.verify.claim +
+      " Forward maximum absolute error against the single-GPU run: <b>" +
+      NN.fmt(pp.verify.forward_max_err, 1) + "</b> — " +
+      (pp.verify.passed ? "passed" : "FAILED") + ". " +
+      "Unlike data parallelism, nothing is summed across ranks; unlike tensor parallelism, no " +
+      "partial result is reconciled. Layer g's arithmetic is bit-for-bit the arithmetic it " +
+      "would have done on one GPU. Every problem on this page is a problem about <em>when</em>, " +
+      "and none of them is a problem about <em>what</em>."));
+
+    host.appendChild(el("div", { class: "hint" },
+      "Numbers on this page come from " + PAR.meta.generated_by + " via " +
+      "assets/data/parallel.js, and the reference model shapes in section 7 from " +
+      "T.reference_configs (" + T.reference_configs._source + ")."));
+  })();
+
+  NN.page("pipelinepar");
+})();
+</script>
+</body>
+</html>
