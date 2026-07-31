@@ -828,6 +828,14 @@ def run_zero(base, stage):
                           "same volume DDP moves.",
                           "after optimizer step", tensor="updated weight shards"))
 
+    # 193 does not divide by 4. Real frameworks do not silently truncate --
+    # FSDP flattens each unit's parameters into one buffer and PADS it up to
+    # a multiple of the world size, so every rank owns an equal shard. The
+    # padding is wasted memory, which is one reason wrapping granularity
+    # matters: many small units means many separately-padded buffers.
+    shard = -(-n_params // N)            # ceil division
+    padding = shard * N - n_params
+
     mem = {
         1: {"weights": n_params, "gradients": n_params,
             "optimizer": 2 * n_params // N},
@@ -887,6 +895,20 @@ def run_zero(base, stage):
         "memory_per_gpu": mem,
         "comm_vs_ddp": round(total_sent / ddp_sent, 3) if ddp_sent else 0,
         "peak": peak_info,
+        "sharding": {
+            "n_params": n_params, "world": N,
+            "divides_evenly": n_params % N == 0,
+            "shard_size": shard,
+            "padded_total": shard * N,
+            "padding_elements": padding,
+            "note": "193 does not divide by 4. Frameworks pad rather than "
+                    "truncate: FSDP flattens a unit's parameters into one "
+                    "buffer and pads it to a multiple of the world size so "
+                    "every rank owns an equal shard. The padding is wasted "
+                    "memory, which is part of why FSDP wrapping granularity "
+                    "is a real tuning knob -- many small units means many "
+                    "separately padded buffers.",
+        },
         "verify": {"claim": "ZeRO does not change the maths. Every rank still "
                             "applies the same update to the same weights; the "
                             "difference is only WHERE each number is stored "

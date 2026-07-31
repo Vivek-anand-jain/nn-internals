@@ -3244,6 +3244,15 @@ window.PARALLEL = {
    },
    "comm_vs_ddp": 1.0,
    "peak": null,
+   "sharding": {
+    "n_params": 193,
+    "world": 4,
+    "divides_evenly": false,
+    "shard_size": 49,
+    "padded_total": 196,
+    "padding_elements": 3,
+    "note": "193 does not divide by 4. Frameworks pad rather than truncate: FSDP flattens a unit's parameters into one buffer and pads it to a multiple of the world size so every rank owns an equal shard. The padding is wasted memory, which is part of why FSDP wrapping granularity is a real tuning knob -- many small units means many separately padded buffers."
+   },
    "verify": {
     "claim": "ZeRO does not change the maths. Every rank still applies the same update to the same weights; the difference is only WHERE each number is stored and WHEN it is materialised.",
     "passed": true,
@@ -3294,6 +3303,15 @@ window.PARALLEL = {
    },
    "comm_vs_ddp": 1.0,
    "peak": null,
+   "sharding": {
+    "n_params": 193,
+    "world": 4,
+    "divides_evenly": false,
+    "shard_size": 49,
+    "padded_total": 196,
+    "padding_elements": 3,
+    "note": "193 does not divide by 4. Frameworks pad rather than truncate: FSDP flattens a unit's parameters into one buffer and pads it to a multiple of the world size so every rank owns an equal shard. The padding is wasted memory, which is part of why FSDP wrapping granularity is a real tuning knob -- many small units means many separately padded buffers."
+   },
    "verify": {
     "claim": "ZeRO does not change the maths. Every rank still applies the same update to the same weights; the difference is only WHERE each number is stored and WHEN it is materialised.",
     "passed": true,
@@ -3460,6 +3478,15 @@ window.PARALLEL = {
     ],
     "ratio_to_at_rest": 2.125,
     "note": "at_rest is what ZeRO-3 is usually quoted as. The peak is what has to fit. A layer bigger than one GPU cannot be sharded away by ZeRO-3 -- that needs tensor parallelism."
+   },
+   "sharding": {
+    "n_params": 193,
+    "world": 4,
+    "divides_evenly": false,
+    "shard_size": 49,
+    "padded_total": 196,
+    "padding_elements": 3,
+    "note": "193 does not divide by 4. Frameworks pad rather than truncate: FSDP flattens a unit's parameters into one buffer and pads it to a multiple of the world size so every rank owns an equal shard. The padding is wasted memory, which is part of why FSDP wrapping granularity is a real tuning knob -- many small units means many separately padded buffers."
    },
    "verify": {
     "claim": "ZeRO does not change the maths. Every rank still applies the same update to the same weights; the difference is only WHERE each number is stored and WHEN it is materialised.",

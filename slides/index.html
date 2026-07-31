@@ -2375,8 +2375,9 @@ S({
           frag(NN.callout("key", "ε is load-bearing",
             "A token whose channels are all equal has variance exactly zero. " +
             "Without <span class='mono'>ε = " + r.eps + "</span> that is a " +
-            "division by zero and the whole step becomes NaN. This is a real " +
-            "failure mode, not a hypothetical one."), "f-right")
+            "division by zero, and every parameter downstream of it becomes " +
+            "not-a-number on the next optimizer step. This is a real failure " +
+            "mode, not a hypothetical one."), "f-right")
         ])
       ])
     ];
@@ -2413,38 +2414,34 @@ S({
     return [
       kicker("Transformer · attention · projection"),
       title("One input, three matrices, three meanings", true),
-      d("cols wide-l", [
-        d("stack", [
-          frag(d("rowflex top", [ctx.inp, h("ar", "×"), ctx.wq, h("ar", "="), ctx.q]), "f-fade"),
-          frag(d("rowflex top", [
-            tn({ name: "K", shape: XF.input.shape, values: XF.attn.k, cls: "activation", digits: 2,
-                 note: "what I advertise" }),
-            tn({ name: "V", shape: XF.input.shape, values: XF.attn.v, cls: "activation", digits: 2,
-                 note: "what I contribute" })
-          ]), "f-fade")
-        ]),
-        d("stack", [
-          frag(NN.formula({ rule: "Q[0][0] = LN1(x)[0] · W_q[:,0]",
-            sub: wk.products.map(function (p) { return f(p.x, 2) + "×" + f(p.w, 1); }).join(" + "),
-            result: f(wk.out, 4), cls: "activation" }), "f-right"),
-          frag(d("rowflex", [
-            d("pill", "query — what this token is looking for"),
-            d("pill", "key — what it advertises"),
-            d("pill", "value — what it contributes if chosen")
-          ]), "f-right"),
-          frag(NN.callout("mem", "Three tensors that must be kept",
-            "Q, K and V are each <span class='mono'>seq × d</span> — " +
-            (3 * XMETA.seq_len * XMETA.d_model) + " elements here. For " +
-            MODEL.name + " at " + CFG.seq + " tokens that is " +
-            BY(3 * CFG.seq * CFG.d * BF16B) + " a block in bf16, before a " +
-            "single attention score exists."), "f-right"),
-          frag(h("small muted",
-            "<b>Heads are a reshape, not a loop.</b> " + XMETA.n_heads +
-            " heads of width " + XMETA.d_head + " means these " +
-            XMETA.d_model + " columns are read in " + XMETA.n_heads +
-            " groups. There is one matmul, not " + XMETA.n_heads + "."), "f-right")
-        ])
-      ])
+      frag(d("rowflex top", [ctx.inp, h("ar", "×"), ctx.wq, h("ar", "="), ctx.q,
+        h("ar", "·"),
+        tn({ name: "K", shape: XF.input.shape, values: XF.attn.k, cls: "activation",
+             digits: 2, note: "what I advertise" }),
+        tn({ name: "V", shape: XF.input.shape, values: XF.attn.v, cls: "activation",
+             digits: 2, note: "what I contribute" })
+      ]), "f-fade"),
+      frag(d("rowflex", [
+        d("pill", "query — what this token is looking for"),
+        d("pill", "key — what it advertises"),
+        d("pill", "value — what it contributes if chosen")
+      ]), "f-fade"),
+      d("cols", [
+        frag(NN.formula({ rule: "Q[0][0] = LN1(x)[0] · W_q[:,0]",
+          sub: wk.products.map(function (p) { return f(p.x, 2) + "×" + f(p.w, 1); }).join(" + "),
+          result: f(wk.out, 4), cls: "activation" }), "f-left"),
+        frag(NN.callout("mem", "Three tensors that must be kept",
+          "Q, K and V are each <span class='mono'>seq × d</span> — " +
+          (3 * XMETA.seq_len * XMETA.d_model) + " elements here. For " +
+          MODEL.name + " at " + CFG.seq + " tokens that is " +
+          BY(3 * CFG.seq * CFG.d * BF16B) + " a block in bf16, before a single " +
+          "attention score exists."), "f-right")
+      ]),
+      frag(h("small muted",
+        "<b>Heads are a reshape, not a loop.</b> " + XMETA.n_heads +
+        " heads of width " + XMETA.d_head + " means these " +
+        XMETA.d_model + " columns are read in " + XMETA.n_heads +
+        " groups. There is one matmul, not " + XMETA.n_heads + "."))
     ];
   },
   render: function (n, ctx) {
@@ -2473,7 +2470,7 @@ S({
     NN.count(CFG.heads * CFG.seq * CFG.seq) + " numbers per layer per sequence.",
   build: function (ctx) {
     const H = XF.attn.heads[0];
-    ctx.hm = heatGrid({ rows: XMETA.seq_len, cols: XMETA.seq_len,
+    ctx.hm = heatGrid({ rows: XMETA.seq_len, cols: XMETA.seq_len, cell: 88,
       rowLab: XMETA.tokens.map(function (t, i) { return "q" + i + " " + t; }),
       colLab: XMETA.tokens.map(function (t, i) { return "k" + i; }),
       caption: "head 0 · scores" });
@@ -2536,7 +2533,7 @@ S({
   build: function (ctx) {
     const H = XF.attn.heads[0];
     ctx.H = H;
-    ctx.hm = heatGrid({ rows: XMETA.seq_len, cols: XMETA.seq_len,
+    ctx.hm = heatGrid({ rows: XMETA.seq_len, cols: XMETA.seq_len, cell: 88,
       rowLab: XMETA.tokens.map(function (t, i) { return "q" + i + " " + t; }),
       colLab: XMETA.tokens.map(function (t, i) { return "k" + i + " " + t; }) });
     ctx.cap = h("phaselabel", "");
@@ -2610,7 +2607,7 @@ S({
   build: function (ctx) {
     const H = XF.attn.heads[0];
     ctx.H = H;
-    ctx.hm = heatGrid({ rows: XMETA.seq_len, cols: XMETA.seq_len,
+    ctx.hm = heatGrid({ rows: XMETA.seq_len, cols: XMETA.seq_len, cell: 88,
       rowLab: XMETA.tokens.map(function (t, i) { return "q" + i + " " + t; }),
       colLab: XMETA.tokens.map(function (t, i) { return "k" + i; }) });
     ctx.cap = h("phaselabel", "");
@@ -2633,7 +2630,8 @@ S({
             cls: "activation" }), "f-left"),
           frag(NN.callout("key", "Why subtract the max",
             "<span class='mono'>exp()</span> of a large score overflows — in " +
-            "fp16 at about 11, which real scores reach. Subtracting the row " +
+            "fp16 once the score passes " + f(Math.log(T.formats.fp16.max_finite), 1) +
+            ", which real scores reach. Subtracting the row " +
             "maximum makes the largest exponent exactly " +
             "<span class='mono'>exp(0) = 1</span>, and the constant cancels " +
             "between numerator and denominator so the answer is unchanged."), "f-left")
@@ -2860,50 +2858,52 @@ S({
     f(XPAR.if_4x_expansion.mlp_share * 100, 0) + "%.",
   build: function () {
     const subs = ["layernorm", "attention", "residual", "mlp"];
-    const rows = XACT.per_tensor.map(function (t) {
-      const q = t.scales.indexOf("^2") >= 0;
-      return el("tr", {}, [
-        el("td", { class: "muted" }, t.sub),
-        el("td", { class: "v-activation" }, t.name),
-        el("td", { class: "n" }, t.shape.join("×")),
-        el("td", { class: "n" }, String(t.elements)),
-        el("td", { class: "n", html: q
-          ? "<span class='v-gradient mono'>" + t.scales + "</span>"
-          : "<span class='muted mono'>" + t.scales + "</span>" })
+    const half = Math.ceil(XACT.per_tensor.length / 2);
+    const table = function (list) {
+      return el("table", { class: "data" }, [
+        el("thead", {}, el("tr", {}, [
+          el("th", { style: { textAlign: "left" } }, "tensor"),
+          el("th", {}, "shape"), el("th", {}, "elems"), el("th", {}, "scales as")])),
+        el("tbody", {}, list.map(function (t) {
+          const q = t.scales.indexOf("^2") >= 0;
+          return el("tr", {}, [
+            el("td", { style: { textAlign: "left" },
+              html: "<span class='v-activation'>" + t.name + "</span>" }),
+            el("td", { class: "n" }, t.shape.join("×")),
+            el("td", { class: "n" }, String(t.elements)),
+            el("td", { class: "n", html: q
+              ? "<span class='v-gradient mono'>" + t.scales + "</span>"
+              : "<span class='muted mono'>" + t.scales + "</span>" })
+          ]);
+        }))
       ]);
-    });
+    };
     return [
       kicker("Transformer · activation census"),
       title(XACT.per_tensor.length + " tensors, " + XACT.total_elements +
-            " elements, none of them free before backward"),
-      d("cols wide-l", [
-        frag(d("panel a", [ph("every activation one block keeps · batch 1"),
-          el("table", { class: "data" }, [
-            el("thead", {}, el("tr", {}, [
-              el("th", {}, "sub-layer"), el("th", {}, "tensor"),
-              el("th", {}, "shape"), el("th", {}, "elems"), el("th", {}, "scales as")])),
-            el("tbody", {}, rows)
-          ])]), "f-left"),
-        d("stack", [
-          frag(NN.tiles(subs.map(function (s) {
-            return { k: s, v: String(XACT.by_submodule[s]), s: "elements", cls: "activation" };
-          })), "f-right"),
-          frag(d("panel a", [ph("linear in seq  vs  quadratic in seq"),
-            NN.memstrip([
-              { cls: "activation", bytes: XACT.linear_elements, label: "linear " + XACT.linear_elements },
-              { cls: "gradient", bytes: XACT.quadratic_elements, label: "seq² " + XACT.quadratic_elements }
-            ], XACT.total_elements)]), "f-right"),
-          frag(NN.callout("warn", "This ratio is a lie at scale",
-            "Here the quadratic term is " + f(XACT.quadratic_share * 100, 0) +
-            "% of the activations, because " + XMETA.seq_len +
-            " tokens is nothing. The linear term grows like " +
-            "<span class='mono'>seq</span> and the quadratic like " +
-            "<span class='mono'>seq²</span>, so at " + CFG.seq +
-            " tokens the order reverses completely. The next slide puts real " +
-            "numbers on that."), "f-right")
-        ])
-      ]),
-      frag(h("small muted", XACT.note))
+            " elements, none of them free before backward", true),
+      frag(d("panel a", [ph("every activation one block keeps · batch 1 · " +
+        "quadratic terms in orange"),
+        d("cols", [table(XACT.per_tensor.slice(0, half)),
+                   table(XACT.per_tensor.slice(half))])]), "f-fade"),
+      frag(NN.tiles(subs.map(function (s) {
+        return { k: s, v: String(XACT.by_submodule[s]), s: "elements", cls: "activation" };
+      })), "f-fade"),
+      frag(d("cols wide-l", [
+        NN.callout("warn", "This ratio is a lie at scale",
+          "Here the quadratic term is " + f(XACT.quadratic_share * 100, 0) +
+          "% of the activations, because " + XMETA.seq_len + " tokens is " +
+          "nothing. The linear term grows like <span class='mono'>seq</span> " +
+          "and the quadratic like <span class='mono'>seq²</span>, so at " +
+          CFG.seq + " tokens the order reverses completely."),
+        d("panel a tight", [ph("linear in seq  vs  quadratic in seq"),
+          NN.memstrip([
+            { cls: "activation", bytes: XACT.linear_elements,
+              label: "linear " + XACT.linear_elements },
+            { cls: "gradient", bytes: XACT.quadratic_elements,
+              label: "seq² " + XACT.quadratic_elements }
+          ], XACT.total_elements)])
+      ]), "f-fade")
     ];
   }
 });
@@ -3311,21 +3311,22 @@ S({
             { k: "without FlashAttention", v: BY(CFG.actFullSeq),
               s: f(CFG.actFullSeq / CFG.actPerSeq, 1) + "× more", cls: "activation" }
           ]), "f-right"),
-          frag(NN.callout("key", "Lever 1 — recompute instead of remember",
-            "Activation checkpointing keeps only the input of each block and " +
-            "re-runs the block's forward during backward. The activation term " +
-            "collapses from per-layer to per-checkpoint; you pay roughly one " +
-            "extra forward pass, about 30% more compute. It is the single " +
-            "highest-leverage memory switch in any training stack."), "f-right"),
-          frag(NN.callout("mem", "Lever 2 — put fewer sequences on each GPU",
-            "Activations are the only one of the four classes that shrinks " +
-            "when you add GPUs without any sharding cleverness at all: give " +
-            "each GPU a slice of the batch and its activation bill divides by " +
-            "the number of GPUs. That is data parallelism, and it is where the " +
-            "rest of this deck starts."), "f-right"),
           ctx.note
         ])
-      ])
+      ]),
+      frag(d("cols", [
+        NN.callout("key", "Lever 1 — recompute instead of remember",
+          "Activation checkpointing keeps only the input of each block and " +
+          "re-runs the block's forward during backward. The activation term " +
+          "collapses from per-layer to per-checkpoint; you pay roughly one " +
+          "extra forward pass, about 30% more compute."),
+        NN.callout("mem", "Lever 2 — put fewer sequences on each GPU",
+          "Activations are the only one of the four classes that shrinks when " +
+          "you add GPUs with no sharding cleverness at all: give each GPU a " +
+          "slice of the batch and its activation bill divides by the world " +
+          "size. That is data parallelism, and it is where the rest of this " +
+          "deck starts.")
+      ]), "f-fade")
     ];
   },
   render: function (n, ctx) {
@@ -3709,10 +3710,12 @@ S({
       const col = NN.gpu.opColor(c.op);
       return el("tr", {}, [
         el("td", { html: "<span class='mono' style='color:" + col + "'>" + c.op + "</span>" }),
-        el("td", { class: "muted" }, c.sig),
-        el("td", { style: { textAlign: "left" } }, c.what),
+        el("td", { class: "muted", style: { textAlign: "left" } }, c.sig),
         el("td", { class: "n mono" }, c.ring_factor),
-        el("td", { class: "mono muted" }, c.inverse)
+        el("td", { class: "mono muted" }, c.inverse),
+        el("td", { html: "<span class='mono' style='color:" + col + "'>" +
+          ({ "var(--gradient)": "gradients", "var(--weight)": "weights",
+             "var(--activation)": "activations" }[col] || "—") + "</span>" })
       ]);
     });
     return [
@@ -3722,9 +3725,10 @@ S({
         ph("every collective in this deck · S = payload in elements, N = world size"),
         el("table", { class: "data" }, [
           el("thead", {}, el("tr", {}, [
-            el("th", {}, "op"), el("th", {}, "signature"),
-            el("th", { style: { textAlign: "left" } }, "what it does"),
-            el("th", {}, "sent per GPU"), el("th", {}, "inverse")])),
+            el("th", {}, "op"),
+            el("th", { style: { textAlign: "left" } }, "signature"),
+            el("th", {}, "sent per GPU"), el("th", {}, "inverse"),
+            el("th", {}, "moves")])),
           el("tbody", {}, rows)
         ])
       ]), "f-fade"),
@@ -3848,7 +3852,9 @@ S({
   render: function (n, ctx) {
     const k = NN.clamp(n - 1, 0, 4);
     ctx.viz.step(k);
-    ctx.cap.innerHTML = ctx.caps[k];
+    /* .phaselabel is a flex row, which would eat the space before a nested
+       <b>; wrap the whole caption so it stays one flex item. */
+    ctx.cap.innerHTML = "<span>" + ctx.caps[k] + "</span>";
   }
 });
 
@@ -3884,7 +3890,7 @@ S({
     "algorithm won.",
   build: function (ctx) {
     ctx.phases = ringPhases(WORLD);
-    ctx.ring = NN.gpu.ring({ count: WORLD, size: 300, r: 108 });
+    ctx.ring = NN.gpu.ring({ count: WORLD, size: 384, r: 140 });
     ctx.lab = h("phaselabel", "");
     ctx.desc = h("say", "");
     const beats = ctx.phases.map(function (p, i) {
@@ -3947,7 +3953,7 @@ S({
     "The total each GPU sends in a ring all-reduce is 2(N−1)/N times the " +
     "buffer. As N grows that factor goes to 2 and stops. At " + WORLD +
     " GPUs it is " + PA.ring.table.filter(function (r) { return r.world === WORLD; })[0].all_reduce +
-    "; at 256 GPUs it is " +
+    "; at " + PA.ring.table[PA.ring.table.length - 1].world + " GPUs it is " +
     PA.ring.table[PA.ring.table.length - 1].all_reduce +
     ". Doubling the cluster does not double the bytes each card has to push. " +
     "That is the property that makes data parallelism scale to thousands of " +
@@ -3987,21 +3993,22 @@ S({
                   el("td", { class: "n v-weight" }, f(r.all_gather, 4))
                 ]);
               }))
-            ])]), "f-right"),
-          frag(NN.callout("key", "Why this is the whole ballgame",
-            "If per-GPU communication grew with N, data parallelism would stop " +
-            "working at a few dozen cards. It does not: it converges to 2S and " +
-            "stays there. Bandwidth-optimal collectives are the reason a " +
-            "training run can span thousands of GPUs at all."), "f-right"),
-          frag(NN.callout("warn", "What this analysis leaves out",
-            "This is the bandwidth term. The <em>latency</em> term is " +
-            "2(N−1) hops and does grow linearly in N, which is why huge rings " +
-            "give way to trees and to hierarchical intra-node/inter-node " +
-            "schemes. And a ring is only bandwidth-optimal if every link is " +
-            "equally fast — one slow hop sets the pace for the whole ring."), "f-right")
+            ])]), "f-right")
         ])
       ]),
-      frag(h("small muted", PA.ring.explanation))
+      frag(d("cols", [
+        NN.callout("key", "Why this is the whole ballgame",
+          "If per-GPU communication grew with N, data parallelism would stop " +
+          "working at a few dozen cards. It does not: it converges to 2S and " +
+          "stays there. Bandwidth-optimal collectives are the reason a training " +
+          "run can span thousands of GPUs at all."),
+        NN.callout("warn", "What this analysis leaves out",
+          "This is the bandwidth term. The <em>latency</em> term is 2(N−1) hops " +
+          "and does grow linearly in N, which is why huge rings give way to " +
+          "trees and to hierarchical schemes. And a ring is bandwidth-optimal " +
+          "only if every link is equally fast — one slow hop sets the pace for " +
+          "the whole ring.")
+      ]), "f-fade")
     ];
   }
 });
@@ -4137,12 +4144,13 @@ S({
         return tn({ name: "GPU " + i, shape: [1, DIMS[LAST]], values: [g],
                     cls: "gradient", digits: 3, signed: true });
       })), "f-fade"),
-      frag(d("rowflex", [h("ar", "↓  sum, then ÷ " + WORLD + "  ↓")]), "f-fade"),
-      frag(d("panel g", [ctx.avg]), "f-pop"),
-      frag(NN.formula({ rule: "element 0",
-        sub: "(" + GLOC.map(function (g) { return f(g[0], 4); }).join(" + ") + ") ÷ " + WORLD,
-        result: f(GBASE[0], 6), cls: "gradient" }), "f-left"),
-      frag(NN.gpu.commCard(DDP.schedule[0]), "f-fade")
+      frag(d("panel g", [ph("↓  all_reduce, then ÷ " + WORLD + "  ↓"), ctx.avg]), "f-pop"),
+      d("cols", [
+        frag(NN.formula({ rule: "element 0",
+          sub: "(" + GLOC.map(function (g) { return f(g[0], 4); }).join(" + ") + ") ÷ " + WORLD,
+          result: f(GBASE[0], 6), cls: "gradient" }), "f-left"),
+        frag(NN.gpu.commCard(DDP.schedule[0]), "f-right")
+      ])
     ];
   },
   render: function (n, ctx) {
@@ -4215,13 +4223,13 @@ S({
     return [
       kicker("Distributed · data parallel · overlap"),
       title("Do not wait for the backward pass to finish"),
-      frag(d("panel crit", [ph("naive · serial"),
+      frag(d("panel crit", [ph("naive · serial · schematic, not to scale"),
         NN.memstrip([
           { cls: "activation", bytes: 50, label: "backward" },
           { cls: "gradient", bytes: 30, label: "all-reduce " + NPAR + " elems" },
           { cls: "optimizer", bytes: 12, label: "step" }
         ], 92)]), "f-left"),
-      frag(d("panel a", [ph("bucketed · the collective overlaps the compute"),
+      frag(d("panel a", [ph("bucketed · the collective overlaps the compute · schematic"),
         NN.memstrip([
           { cls: "activation", bytes: 50, label: "backward (buckets fire as they fill)" },
           { cls: "gradient", bytes: 6, label: "tail" },
@@ -5122,7 +5130,7 @@ S({
             d("pill", "row-parallel"), h("ar", "←"), d("pill", "g · identity")
           ])])
       ]), "f-pop"),
-      frag(d("stack", bw.map(function (c) { return NN.gpu.commCard(c); })), "f-fade"),
+      frag(d("cols", bw.map(function (c) { return NN.gpu.commCard(c); })), "f-fade"),
       frag(NN.callout("key", "Two all-reduces per block per step",
         "One at the end of the forward sub-layer, one at the start of the " +
         "backward. Both are on the critical path — no compute can proceed " +
@@ -5800,15 +5808,15 @@ S({
             result: String(REC.gpus), cls: "weight" }), "f-right"),
           frag(NN.formula({ rule: "headroom for activations",
             sub: CAP(GPU_B) + " − " + BY(REC.stateB),
-            result: BY(GPU_B - REC.stateB) + " per GPU", cls: "activation" }), "f-right"),
-          frag(NN.callout("key", "This is where the batch size comes from",
-            "You do not choose the micro-batch size and hope. You compute the " +
-            "persistent state, subtract it from the card, and divide what is " +
-            "left by the per-sequence activation cost — " + BY(CFG.actPerSeq) +
-            " at " + CFG.seq + " tokens with FlashAttention, further divided " +
-            "by TP because tensor parallelism shards activations too."), "f-right")
+            result: BY(GPU_B - REC.stateB) + " per GPU", cls: "activation" }), "f-right")
         ])
       ]),
+      frag(NN.callout("key", "This is where the micro-batch size comes from",
+        "You do not choose it and hope. You compute the persistent state, " +
+        "subtract it from the card, and divide what is left by the " +
+        "per-sequence activation cost — " + BY(CFG.actPerSeq) + " at " +
+        CFG.seq + " tokens with FlashAttention, further divided by TP because " +
+        "tensor parallelism shards activations too."), "f-fade"),
       frag(h("small muted",
         "The degrees here are a <b>scenario</b>, not a property of the model. " +
         "Every quantity is derived from <span class='mono'>T.reference_configs</span> " +

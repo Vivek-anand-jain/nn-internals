@@ -270,7 +270,12 @@ table.data tr.hi { background: var(--surface-3); }
     return el("div", {}, [t, el("div", { class: "small muted", style: { marginTop: "6px" },
       html: "From <code>relu_masks</code> and <code>live_units_per_layer</code>. Each rank sees " +
         "one sample, so each rank kills a different set of units — the mask is a property of the " +
-        "data, not of the weights, and the weights are identical everywhere." })]);
+        "data, not of the weights, and the weights are identical everywhere." +
+        (focus.L !== L
+          ? " Layer " + (focus.L + 1) + " has no ReLU of its own (it is the output layer), so " +
+            "the last hidden layer's mask is shown instead — that is the one gating what reaches " +
+            "<code>" + focus.key + "</code>."
+          : "") })]);
   }
 
   /* ---- run the proof over EVERY parameter, here, in the browser ------- */

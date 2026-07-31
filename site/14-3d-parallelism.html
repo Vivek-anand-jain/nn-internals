@@ -204,34 +204,62 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
                m: DTB.fp32, v: DTB.fp32 };
 
   /* ----------------------------------------------------------------------
-     HARDWARE CONSTANTS — page-local, APPROXIMATE, and NOT from NN.T.
-     The trace carries HBM capacity and nothing else about a device, so the
-     link bandwidths, the dense tensor-core rate and the utilisation
-     assumption are quoted here and surfaced on the page as estimates.
-     All bandwidths are PER GPU, PER DIRECTION. Vendors usually quote NVLink
-     as the sum of both directions (900 GB/s), which is 450 GB/s each way.
+     HARDWARE — all of it now canonical.
+       link bandwidths   PARALLEL.interconnects.links[]  (per_dir_GBps)
+       cost model        PARALLEL.cost_model             (shared with 10, 12)
+       compute rate      T.reference_configs.gpus[]      (bf16_dense_tflops)
+     A ring cares about ONE direction, so per_dir_GBps is what is used;
+     the bidirectional aggregate vendors headline is shown beside it.
      ---------------------------------------------------------------------- */
+  const COST = P.cost_model;
+  function linkByName(re) {
+    return P.interconnects.links.filter(function (l) { return re.test(l.name); })[0];
+  }
+  const NVL  = linkByName(/NVLink 4/);
+  const NDR  = linkByName(/NDR/);
   const HW = {
     perNode: 8,
-    nvlink: { key: "nvlink", short: "NVLink",
-      name: "NVLink 4 + NVSwitch, inside one 8-GPU node",
-      bw: 450e9,
-      note: "18 links " + x + " 25 GB/s per direction " + approx + " 450 GB/s each way; " +
-            "vendors quote the two directions summed as 900 GB/s. Sub-microsecond, no NIC in the path." },
-    fabric: { key: "fabric", short: "IB/RoCE",
-      name: "400 Gb/s NDR InfiniBand or 400GbE RoCEv2, between nodes",
-      bw: 50e9,
-      note: "one 400 Gb/s port per GPU = 50 GB/s per direction, so " +
-            approx + " 1/9 of NVLink. Add a few µs of switch and adapter latency per hop, " +
-            "and on RoCE the whole thing is contingent on a lossless or well-tuned congestion-controlled fabric." }
+    nvlink: { key: "nvlink", short: "NVLink", spec: NVL,
+      name: NVL.name + " + NVSwitch, inside one 8-GPU node",
+      bw: NVL.per_dir_GBps * GB,
+      note: NVL.per_dir_GBps + " GB/s each way; vendors quote the two directions summed as " +
+            NVL.bidir_GBps + " GB/s" + (NVL.note ? " (" + NVL.note + ")" : "") +
+            ". Sub-microsecond, no NIC in the path." },
+    fabric: { key: "fabric", short: "IB/RoCE", spec: NDR,
+      name: NDR.name + " InfiniBand, or RoCEv2 at the same wire rate, between nodes",
+      bw: NDR.per_dir_GBps * GB,
+      note: (NDR.note || "") + ", so " + approx + " 1/" +
+            Math.round(NVL.per_dir_GBps / NDR.per_dir_GBps) + " of NVLink. Add " +
+            COST.latency_us.inter_node + " µs of switch and adapter latency per collective, " +
+            "and on RoCE the whole thing is contingent on a lossless or well-tuned " +
+            "congestion-controlled fabric." }
   };
-  const LINK_EFF   = 0.85;   // achieved fraction of line rate for large collectives
-  const PEAK_BF16  = 495e12; // dense bf16 tensor-core rate, H100 SXM class (the sparsity figure is 2x this)
-  const MFU        = 0.45;   // model FLOP utilisation actually achieved at this scale
+  const LINK_EFF   = COST.achieved_fraction;              // PARALLEL.cost_model
+  /* DENSE bf16 rate. Vendors headline the 2:4-sparsity figure, which is twice
+     this and does not apply to training. T.reference_configs carries dense. */
+  const PEAK_BF16  = DEV.bf16_dense_tflops * TB;
+  const MFU        = 0.45;   // a STATED MFU, per T.reference_configs.mfu_note
   const OVERLAP_EFF = 0.8;   // fraction of the overlap window that really hides communication
 
   function linkOf(k) { return k === "nvlink" ? HW.nvlink : HW.fabric; }
   function bwOf(k) { return linkOf(k).bw * LINK_EFF; }
+
+  /* Ring factor from PARALLEL.collectives rather than recomputed here; the
+     page's own 2(N−1)/N is kept as a cross-check and both are printed. */
+  const ARC = P.collectives.filter(function (c) { return c.op === "all_reduce"; })[0];
+  function ringFactorJs(N)   { return N > 1 ? 2 * (N - 1) / N : 0; }
+  function ringFactorData(N) {
+    const v = ARC.ring_factor_at_world[String(N)];
+    return v === undefined ? null : v;
+  }
+  function ringFactor(N) {
+    const d = ringFactorData(N);
+    return d === null ? ringFactorJs(N) : d;
+  }
+  const RING_DRIFT = [1, 2, 4, 8, 16, 32, 64, 128, 256].reduce(function (a, n) {
+    const d = ringFactorData(n);
+    return d === null ? a : Math.max(a, Math.abs(d - ringFactorJs(n)));
+  }, 0);
 
   /* ======================================================================
      SHARED CONFIGURATION STATE
@@ -391,7 +419,7 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
     const a = activations(c);
     const bsdB = a.bsdBytes;                                   // one (b,s,d) tensor in bf16
     const arPerLayer = c.ckpt ? 6 : 4;                         // 2 fwd + 2 bwd (+2 on recompute)
-    const tpRing = c.tp > 1 ? 2 * (c.tp - 1) / c.tp : 0;
+    const tpRing = ringFactor(c.tp);
     const tp = arPerLayer * a.layersPerStage * c.micro * tpRing * bsdB;
     const pp = c.pp > 1 ? 2 * c.micro * bsdB / c.tp : 0;       // activations out, gradients back
     const Plocal = C.P / (c.tp * c.pp);
@@ -399,15 +427,24 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
     let dp = 0, dpWhat = "no data-parallel group";
     if (c.dp > 1) {
       if (c.zero === 0) { dp = 2 * f * Plocal * RC.g; dpWhat = "gradient all-reduce"; }
-      else if (c.zero === 1) { dp = 2 * f * Plocal * RC.g + f * Plocal * RC.w;
-        dpWhat = "gradient all-reduce + updated-parameter all-gather"; }
+      /* ZeRO-1 is reduce_scatter + all_gather, NOT all-reduce + all_gather:
+         a rank only owns one shard of the optimizer state, so a shard of the
+         summed gradient is all it can use. Same volume as DDP — which is what
+         PARALLEL.strategies.zero1.comm_vs_ddp records, and what the cross-
+         check under the recipe asserts. */
+      else if (c.zero === 1) { dp = f * Plocal * RC.g + f * Plocal * RC.w;
+        dpWhat = "gradient reduce-scatter + updated-parameter all-gather"; }
       else if (c.zero === 2) { dp = f * Plocal * RC.g + f * Plocal * RC.w;
         dpWhat = "gradient reduce-scatter + parameter all-gather"; }
       else { dp = 2 * f * Plocal * RC.w + f * Plocal * RC.g;
         dpWhat = "two parameter all-gathers (forward, backward) + gradient reduce-scatter"; }
     }
+    /* DDP's volume at the same shard size, so the ratio below is comparable
+       with the simulation's own comm_vs_ddp figure. */
+    const ddpRef = c.dp > 1 ? 2 * f * Plocal * RC.g : 0;
     return { tp: tp, pp: pp, dp: dp, dpWhat: dpWhat, arPerLayer: arPerLayer,
-             tpRing: tpRing, bsdB: bsdB, Plocal: Plocal, f: f };
+             tpRing: tpRing, bsdB: bsdB, Plocal: Plocal, f: f,
+             ddpRef: ddpRef, vsDdp: ddpRef > 0 ? dp / ddpRef : null };
   }
 
   /** First-order step time. Every assumption is printed on the page. */
@@ -854,13 +891,19 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
         el("div", { class: "b" }, HW.fabric.name + ". " + HW.fabric.note)
       ])
     ]));
-    host.appendChild(el("div", { class: "hint" },
-      "These two figures, the dense bf16 rate (" + NN.fmt(PEAK_BF16 / 1e12, 0) + " TFLOP/s), the " +
-      NN.fmt(MFU * 100, 0) + "% utilisation assumption and the " + NN.fmt(LINK_EFF * 100, 0) +
-      "% link efficiency are the only numbers on this page that do not come from NN.T — the trace carries " +
-      "HBM capacity and nothing else about a device. They are approximate, generation-dependent, and " +
-      "quoted to make the ratios legible, not to predict a benchmark. The ratio that matters is " +
-      "roughly <b>" + NN.fmt(HW.nvlink.bw / HW.fabric.bw, 0) + ":1</b> between the two links."));
+    host.appendChild(el("div", { class: "hint", html:
+      "Both link figures are <code>PARALLEL.interconnects.links</code>, taken as " +
+      "<code>per_dir_GBps</code> because a ring cares about one direction: " + P.interconnects._source +
+      ". The dense bf16 rate (" + NN.fmt(PEAK_BF16 / 1e12, 0) + " TFLOP/s) is " +
+      "<code>T.reference_configs.gpus</code> for the " + DEV.name + " — the <em>dense</em> figure, " +
+      "not the 2:4-sparsity number vendors headline, which is twice it and does not apply to " +
+      "training. The " + NN.fmt(LINK_EFF * 100, 0) + "% link efficiency is " +
+      "<code>PARALLEL.cost_model.achieved_fraction</code> (" + COST.achieved_note +
+      "). The " + NN.fmt(MFU * 100, 0) + "% utilisation is the one figure this page states for " +
+      "itself, as <code>T.reference_configs.mfu_note</code> asks: &ldquo;" +
+      T.reference_configs.mfu_note + "&rdquo; The ratio that matters is roughly <b>" +
+      NN.fmt(HW.nvlink.bw / HW.fabric.bw, 0) + ":1</b> between the two links. " +
+      P.interconnects.why_it_matters }));
 
     host.appendChild(el("h3", {}, "Why the usual nesting is TP innermost, then PP, then DP"));
     host.appendChild(el("div", { class: "grid3" }, [
@@ -1002,14 +1045,24 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
 
     const worst = Math.max.apply(null, all.map(function (r) { return r.t.total; }));
     topoOut.appendChild(NN.callout("why", "What the estimate is and is not",
-      "This is a first-order roofline, not a simulator: it assumes every collective runs at " +
-      NN.fmt(LINK_EFF * 100, 0) + "% of line rate on the slowest link its group touches, that compute " +
-      "and communication do not contend for SMs, and that the fabric is uncongested. It has no model of " +
-      "latency, of tail effects, of NIC-to-GPU affinity, or of what happens when four TP groups on a node " +
-      "all hit the same leaf switch at once — all of which make the bad orderings <em>worse</em>, not " +
-      "better. What it does capture is the term that dominates: with this configuration the spread " +
-      "between the best and worst ordering is <b>" + NN.fmt(worst / best, 2) + x + "</b>, and it is " +
-      "almost entirely whether the TP all-reduce found NVLink or a NIC. " +
+      "<b>" + COST._status + "</b> It is <code>PARALLEL.cost_model</code>, the same one pages 10 " +
+      "and 12 price with: <code>" + COST.time_bytes + "</code> at " +
+      NN.fmt(LINK_EFF * 100, 0) + "% of line rate on the slowest link the group touches. " +
+      "By its own account it ignores: <ul style=\"margin:6px 0 6px 18px\">" +
+      COST.ignores.map(function (s) { return "<li>" + s + "</li>"; }).join("") + "</ul>" +
+      "This page adds two of its own: the per-collective latency the cost model carries (" +
+      COST.latency_us.intra_node + " µs intra-node, " + COST.latency_us.inter_node +
+      " µs inter-node — " + COST.latency_us.note + ") is <em>not</em> added to the step times " +
+      "above, and compute and communication are assumed not to contend for SMs. Tail effects, " +
+      "NIC-to-GPU affinity and four TP groups hitting the same leaf switch at once are all " +
+      "absent too, and all of them make the bad orderings <em>worse</em>, not better. " +
+      "Ring factors come from <code>PARALLEL.collectives</code>; this page's own 2(N&minus;1)/N " +
+      "agrees with them to " + (RING_DRIFT === 0 ? "the bit"
+        : RING_DRIFT.toExponential(1) + ", which is the six-decimal rounding in " +
+          "<code>ring_factor_at_world</code> at the largest world sizes and nothing else") + ". " +
+      "What the estimate does capture is the term that dominates: with this configuration the " +
+      "spread between the best and worst ordering is <b>" + NN.fmt(worst / best, 2) + x +
+      "</b>, and it is almost entirely whether the TP all-reduce found NVLink or a NIC. " +
       (S.tp === 1 ? "With TP = 1 there is no TP traffic at all, which is why every ordering ties here. "
                   : "Move TP off the innermost position and " + fsize(t.v.tp) + " per GPU per step " +
                     "walks out of the node.")));
@@ -1209,6 +1262,56 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
           "compare tokens/s."
         : "")));
 
+    /* ---- cross-check: this page's DP volume against the simulation's own
+       comm_vs_ddp figure. Both are printed; a mismatch is a bug in one of
+       them, and the point is that you can see which. -------------------- */
+    if (S.dp > 1) {
+      const zkey = S.zero === 0 ? "ddp" : "zero" + S.zero;
+      const canonRatio = S.zero === 0 ? 1 : P.strategies[zkey].comm_vs_ddp;
+      const pageRatio = t.v.vsDdp;
+      const drift = Math.abs(pageRatio - canonRatio);
+      recipeOut.appendChild(el("div", { class: "hint", html:
+        "<b>Cross-check.</b> At ZeRO-" + S.zero + " this page charges the DP group " +
+        fsize(t.v.dp) + " per GPU per step (" + t.v.dpWhat + "), which is <b>" +
+        NN.fmt(pageRatio, 2) + x + "</b> what plain DDP would move at the same shard size (" +
+        fsize(t.v.ddpRef) + "). " +
+        (S.zero === 0
+          ? "DDP is the baseline the simulation's <code>comm_vs_ddp</code> figures are quoted " +
+            "against, so it is <b>1" + x + "</b> by definition"
+          : "<code>PARALLEL.strategies." + zkey + ".comm_vs_ddp</code>, recorded independently " +
+            "by the " + P.meta.world + "-GPU simulation, is <b>" + NN.fmt(canonRatio, 2) + x +
+            "</b>") +
+        (drift < 1e-9 ? " — they agree."
+                      : " — they disagree by " + NN.fmt(drift, 2) + ", which is a bug.") +
+        (S.zero === 1
+          ? " Stage 1 costing the same as DDP is the point people get wrong: it is a " +
+            "<em>reduce-scatter</em> plus an all-gather, not an all-reduce plus an all-gather. " +
+            "A rank only owns one shard of the optimizer state, so a shard of the summed " +
+            "gradient is all it can use."
+          : "") }));
+    }
+
+    /* ---- ZeRO-3's peak is not its at-rest figure ---------------------- */
+    if (S.zero === 3) {
+      const zp = P.strategies.zero3.peak;
+      const gathered = C.perLayer * RC.w;
+      recipeOut.appendChild(NN.callout("mem", "ZeRO-3: the at-rest figure is not the one that has to fit",
+        "The bill above is <b>at rest</b> — every parameter sharded, nothing gathered. ZeRO-3 " +
+        "does not compute that way: to run a layer it all-gathers that layer whole. In the " +
+        P.meta.world + "-GPU simulation the difference is recorded directly — " +
+        "<code>strategies.zero3.peak</code>: " + zp.at_rest + " elements at rest, " +
+        zp.peak_no_prefetch + " at peak with one layer gathered (<b>" +
+        NN.fmt(zp.ratio_to_at_rest, 2) + x + "</b>), " + zp.peak_with_prefetch +
+        " if the next layer is prefetched while this one runs (<b>" +
+        NN.fmt(zp.peak_with_prefetch / zp.at_rest, 2) + x + "</b>). " + zp.note +
+        " Here one layer of " + MDL.name + " is " +
+        NN.count(C.perLayer) + " parameters = " + fsize(gathered) + " of bf16 weights to " +
+        "materialise on top of the " + fsize(m.total) + " above (plus the same again for its " +
+        "gradient in backward), against " + NN.gibytes(m.cap) + " of HBM — survivable at this " +
+        "scale, which is exactly why the section-5 answer for " + MDL.name + " is that plain " +
+        "FSDP works. At 405B, or with prefetch depth greater than one, it stops being."));
+    }
+
     /* the per-configuration verdict */
     const diag = [];
     if (!m.fits) diag.push("<b>Memory:</b> over the device by " + NN.gibytes(m.total - m.cap) + ".");
@@ -1286,10 +1389,16 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
       "ZeRO/FSDP is the simplest thing that works: no model surgery, no manual layer assignment, one " +
       "wrapper. " + fsize(full) + " " + div + " " + W + " = <b>" + fsize(full / W) +
       "</b> per GPU, and with checkpointing on, ZeRO-3 alone lands " + MDL.name + " at <b>" +
-      fsize(fsdp64.total) + "</b> per GPU on " + W + " devices. It fits. Reach for stage 1 first " +
-      "(optimizer state is " + NN.fmt(100 * (RC.o) / RECIPE.bytes_per_param, 0) +
-      "% of the bill and stage 1 costs almost nothing extra), then 2, then 3. " +
-      "<a href=\"11-zero-fsdp.html\">Page 11</a> is the ladder.");
+      fsize(fsdp64.total) + "</b> per GPU on " + W + " devices — at rest. Add the layer ZeRO-3 " +
+      "has to gather to compute with (" + fsize(C.perLayer * RC.w) + " here; the simulation " +
+      "records the same gap as <code>zero3.peak</code>, where one gathered layer takes the toy " +
+      "from " + P.strategies.zero3.peak.at_rest + " elements to " +
+      P.strategies.zero3.peak.peak_no_prefetch + ", " +
+      NN.fmt(P.strategies.zero3.peak.ratio_to_at_rest, 2) + x + " at rest) and it still fits. " +
+      "Reach for stage 1 first (optimizer state is " +
+      NN.fmt(100 * (RC.o) / RECIPE.bytes_per_param, 0) +
+      "% of the bill and stage 1 costs almost nothing extra — it moves exactly DDP's volume, " +
+      "not more), then 2, then 3. <a href=\"11-zero-fsdp.html\">Page 11</a> is the ladder.");
 
     item("Is the resulting communication still affordable — and will it stay affordable?",
       "This is the question people skip, and it is the one that decides whether you ever need TP. " +

@@ -322,6 +322,40 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
   const ERR_BLOCK0 = maxdiff(RUN.blocks[0].z, RUN.blocks[0].ref);
   const ERR_FWD    = maxdiff(RUN.yhat, MODEL.yhat);
 
+  /* ---- cross-check: recomputation vs recorded intermediates ------------
+     The generator now records every per-GPU intermediate of the partial-sum
+     proof (per_gpu_hidden, per_gpu_partial_out, summed_before_bias,
+     after_bias). The JS above recomputes all of them independently. Neither
+     is trusted over the other: both are rendered, and the agreement between
+     them is the assertion. */
+  const CROSS = (function () {
+    const parts = [];
+    let worst = 0, checked = 0, shapesOK = true;
+    TP.blocks.forEach(function (b, i) {
+      const R = RUN.blocks[i];
+      const pair = function (label, mine, theirs) {
+        if (!theirs) return;
+        const d = maxdiff(mine, theirs);
+        worst = Math.max(worst, d);
+        checked += mine.length * mine[0].length;
+        parts.push({ block: b.block, label: label, err: d });
+      };
+      for (let g = 0; g < WORLD; g++) {
+        pair("per_gpu_hidden[" + g + "]", R.ac[g], b.per_gpu_hidden && b.per_gpu_hidden[g]);
+        pair("per_gpu_partial_out[" + g + "]", R.part[g],
+             b.per_gpu_partial_out && b.per_gpu_partial_out[g]);
+      }
+      pair("summed_before_bias", R.summed, b.summed_before_bias);
+      pair("after_bias", R.z, b.after_bias);
+      if (b.output_shape &&
+          (b.output_shape[0] !== R.z.length || b.output_shape[1] !== R.z[0].length)) {
+        shapesOK = false;
+      }
+    });
+    return { worst: worst, checked: checked, parts: parts, shapesOK: shapesOK,
+             ok: worst < 1e-12 && shapesOK };
+  })();
+
   /* ==================================================================== */
   /*  banded matrix renderer                                              */
   /*  One hue (weight blue) in four luminance steps + an explicit "G0..G3" */
@@ -1078,7 +1112,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
           "the residual is at the scale of a double-precision rounding step and not at the scale " +
           "of the numbers themselves.";
 
-        const ok = ERR_BLOCK0 < 1e-12 && ERR_FWD < 1e-12 && TP.verify.passed;
+        const ok = ERR_BLOCK0 < 1e-12 && ERR_FWD < 1e-12 && TP.verify.passed && CROSS.ok;
         verd.appendChild(el("div", { class: "verdict " + (ok ? "ok" : "bad") }, [
           el("div", { class: "big" }, ok ? "✓ identical" : "✗ mismatch"),
           el("div", { class: "det", html:
@@ -1089,8 +1123,31 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
             "<code>tp.verify.forward_max_err</code> = <b>" +
             TP.verify.forward_max_err.toExponential(2) + "</b>" })
         ]));
+
+        /* the two independent derivations, against each other */
+        verd.appendChild(el("div", { class: "verdict " + (CROSS.ok ? "ok" : "bad") }, [
+          el("div", { class: "big" }, CROSS.ok
+            ? "✓ recomputation agrees with the recorded intermediates"
+            : "✗ the page and the data disagree"),
+          el("div", { class: "det", html:
+            "Every per-GPU intermediate above is now recorded in the data as well — " +
+            "<code>per_gpu_hidden</code>, <code>per_gpu_partial_out</code>, " +
+            "<code>summed_before_bias</code>, <code>after_bias</code>. This page reads those " +
+            "<em>and</em> recomputes them from <code>PARALLEL.model.Ws</code>. " +
+            NN.count(CROSS.checked) + " values compared across " + TP.blocks.length +
+            " blocks: max |Δ| = <b>" + (CROSS.worst === 0 ? "0 (exact)"
+              : CROSS.worst.toExponential(2)) + "</b>" }),
+          el("div", { class: "det", html:
+            "output shapes match <code>blocks[].output_shape</code>: <b>" +
+            (CROSS.shapesOK ? "yes" : "no") + "</b> — " +
+            TP.blocks.map(function (b) {
+              return "block " + b.block + " " + b.output_shape.join("×"); }).join(", ") })
+        ]));
         verd.appendChild(el("p", { class: "small muted", html:
-          "<code>parallel_toy.py</code>'s claim, verbatim: &ldquo;" + TP.verify.claim +
+          "Two derivations that agree are worth more than either alone: the recorded values " +
+          "could be stale and the recomputation could be wrong, but they cannot both be wrong " +
+          "in the same way by accident. <code>parallel_toy.py</code>'s claim, verbatim: &ldquo;" +
+          TP.verify.claim +
           "&rdquo; The gate in that script refuses to write <code>parallel.js</code> if the " +
           "error exceeds 1e-12, so this page cannot load with a broken proof." }));
       }
@@ -1117,12 +1174,17 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       onStep: function (i) { cur = i; render(); }
     });
 
+    const BIG = T.reference_configs.models.find(function (m) {
+      return m.name === T.reference_configs.default_model; });
+    const BIGTP = 8;
     host.appendChild(NN.callout("mem", "What this looks like at LLM scale",
-      "Replace " + PER + " units per GPU with " + NN.count(8192 / 8) + " and the picture is " +
-      "unchanged. A Llama-3-70B MLP with <span class='mono'>d_ff = " + NN.count(28672) +
-      "</span> split over 8 ranks gives each GPU a " + NN.count(28672 / 8) + "-wide slice of " +
+      "Replace " + PER + " units per GPU with " + NN.count(BIG.d_model / BIGTP) +
+      " and the picture is unchanged. A " + BIG.name + " MLP with " +
+      "<span class='mono'>d_ff = " + NN.count(BIG.d_ff) + "</span> split over " + BIGTP +
+      " ranks gives each GPU a " + NN.count(BIG.d_ff / BIGTP) + "-wide slice of " +
       "the intermediate activation instead of the whole thing — the weights <em>and</em> the " +
-      "activations both shrink by 8. That second half is the part ZeRO-3 cannot do."));
+      "activations both shrink by " + BIGTP + ". That second half is the part ZeRO-3 cannot do. " +
+      "Shapes from <code>T.reference_configs</code> (" + T.reference_configs._source + ")."));
   })();
 
   /* ==================================================================== */
@@ -1137,27 +1199,48 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       "duality shows up one level higher, in autodiff. Megatron names two operators, and they " +
       "are conjugates of each other: whatever one does in forward, the other does in backward." }));
 
+    /* The table is built from PARALLEL.strategies.tp.schedule, which records
+       an explicit op:"none" for the halves that communicate nothing — so both
+       cells of each conjugate pair come from the same array, not from prose. */
+    function schedFor(kind, backward) {
+      return TP.schedule.find(function (c) {
+        const isBwd = c.phase.indexOf("backward") === 0;
+        return isBwd === backward && c.phase.indexOf(kind + "-parallel") >= 0;
+      });
+    }
+    function opCell(entry) {
+      if (!entry) return el("td", { class: "muted" }, "—");
+      const collective = entry.op !== "none";
+      return el("td", {
+        style: collective ? { color: "var(--gradient)" } : null,
+        title: entry.why
+      }, collective ? entry.op.replace(/_/g, "-") : "identity (op \"none\")");
+    }
+    const CONJ = [
+      { name: "f", kind: "column", where: "on the INPUT of a column-parallel layer" },
+      { name: "g", kind: "row",    where: "on the OUTPUT of a row-parallel layer" }
+    ];
     const tbl = el("table", { class: "data" }, [
       el("thead", {}, el("tr", {}, [
         el("th", {}, "operator"), el("th", {}, "forward"), el("th", {}, "backward"),
         el("th", { class: "wrap" }, "sits where")
       ])),
-      el("tbody", {}, [
-        el("tr", {}, [
-          el("td", { html: "<b>f</b>" }),
-          el("td", {}, "identity"),
-          el("td", { style: { color: "var(--gradient)" } }, "all-reduce"),
-          el("td", { class: "wrap" }, "on the INPUT of a column-parallel layer")
-        ]),
-        el("tr", {}, [
-          el("td", { html: "<b>g</b>" }),
-          el("td", { style: { color: "var(--gradient)" } }, "all-reduce"),
-          el("td", {}, "identity"),
-          el("td", { class: "wrap" }, "on the OUTPUT of a row-parallel layer")
-        ])
-      ])
+      el("tbody", {}, CONJ.map(function (o) {
+        return el("tr", {}, [
+          el("td", { html: "<b>" + o.name + "</b>" }),
+          opCell(schedFor(o.kind, false)),
+          opCell(schedFor(o.kind, true)),
+          el("td", { class: "wrap" }, o.where)
+        ]);
+      }))
     ]);
     host.appendChild(el("div", { class: "scrollx" }, tbl));
+    host.appendChild(el("div", { class: "hint" },
+      "Every cell is a <code>schedule</code> entry, both halves of both pairs — hover a cell for " +
+      "the generator's own reason. The <span class='mono'>\"none\"</span> rows are recorded " +
+      "explicitly rather than left out, which is what makes the duality checkable instead of " +
+      "asserted: " + TP.schedule.filter(function (c) { return c.op === "none"; }).length +
+      " of the " + TP.schedule.length + " entries move no bytes at all."));
 
     host.appendChild(el("div", { class: "scrollx" }, el("div", { class: "fgdiag" }, [
       el("div", { class: "opnode" }, "f"),
@@ -1202,15 +1285,17 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     host.appendChild(el("p", { class: "small muted" },
       "Straight out of PARALLEL.strategies.tp.schedule. " + fwd.length + " forward entries (" +
       fwd.filter(function (c) { return c.op === "none"; }).length + " of them explicit no-ops), " +
-      bwd.length + " backward entries."));
+      bwd.length + " backward entries (" +
+      bwd.filter(function (c) { return c.op === "none"; }).length + " no-ops)."));
     TP.schedule.forEach(function (c) { host.appendChild(NN.gpu.commCard(c)); });
 
     const fwdAR = fwd.filter(function (c) { return c.op === "all_reduce"; });
+    const bwdAR = bwd.filter(function (c) { return c.op === "all_reduce"; });
     const totFwd = fwdAR.reduce(function (a, c) { return a + c.sent_per_gpu_elements; }, 0);
     const totBwd = bwd.reduce(function (a, c) { return a + c.sent_per_gpu_elements; }, 0);
     host.appendChild(NN.tiles([
       { k: "all-reduces forward", v: String(fwdAR.length), s: "one per block, from g", cls: "activation" },
-      { k: "all-reduces backward", v: String(bwd.length), s: "one per block, from f", cls: "gradient" },
+      { k: "all-reduces backward", v: String(bwdAR.length), s: "one per block, from f", cls: "gradient" },
       { k: "sent per GPU · forward", v: fmt(totFwd, 0) + " elem", s: "activations", cls: "activation" },
       { k: "sent per GPU · backward", v: fmt(totBwd, 0) + " elem", s: "activation gradients", cls: "gradient" }
     ]));
@@ -1404,7 +1489,8 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
          " elem here, per forward)"],
         ["scales with", "model size — fixed per step", "batch × sequence × hidden — grows with the workload"],
         ["how often", "once per step (bucketed)", tpFwd.length + " × per forward + " +
-         TP.schedule.filter(function (c) { return c.phase.indexOf("backward") === 0; }).length +
+         TP.schedule.filter(function (c) {
+           return c.phase.indexOf("backward") === 0 && c.op === "all_reduce"; }).length +
          " × per backward, per block"],
         ["on the critical path?", "no — overlaps with backward compute", "YES — the next layer's input is the result"],
         ["tolerable link", "inter-node fabric is fine", "wants NVLink-class, in-node"]
@@ -1544,16 +1630,20 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
         el("h4", {}, "topology"),
         slider("tp", TPS, "TP degree", function (v) { return String(v); }),
         picker("inNode", LINKS.inNode, "link inside a node"),
-        picker("xNode", LINKS.xNode, "link between nodes")
+        picker("xNode", LINKS.xNode, "link between nodes"),
+        el("div", { class: "hint" }, LINKS.why)
       ]),
       el("div", { class: "panel" }, [
         el("h4", {}, "efficiency"),
         rng("eff", 0.4, 1, 0.05, "achieved fraction of peak link",
             function (v) { return Math.round(v * 100) + "%"; }),
-        rng("tflops", 100, 900, 25, "achieved bf16 TFLOP/s per GPU",
-            function (v) { return String(v); }),
+        el("div", { class: "hint" }, COST.achieved_note),
+        rng("tflops", 50, DENSE_TF, 5, "achieved bf16 TFLOP/s per GPU",
+            function (v) { return v + "  (" + Math.round(100 * v / DENSE_TF) + "% MFU)"; }),
         el("div", { class: "hint" },
-          "H100 SXM peak dense bf16 is 989 TFLOP/s; 400 is ≈40% MFU, a realistic large-model figure")
+          GPU.name + " dense bf16 peak is " + DENSE_TF + " TFLOP/s " +
+          "(T.reference_configs.gpus — the headline figure vendors publish is the 2:4-sparsity " +
+          "one, twice this, and it does not apply to training). " + T.reference_configs.mfu_note)
       ])
     ]);
     host.appendChild(controls);
@@ -1581,7 +1671,11 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       row("activation tensor per all-reduce  b×s×h", S.b + " × " + NN.count(S.s) + " × " +
           NN.count(S.h) + " = " + NN.count(m.payload) + " elements");
       row("payload in bf16 (" + BF16 + " B/elem)", NN.bytes(m.bytes));
-      row("ring all-reduce sends 2(N−1)/N × S,  N = " + S.tp, NN.bytes(m.sent) + " per GPU");
+      row("ring all-reduce sends " + AR.ring_factor + ",  N = " + S.tp,
+          fmt(ringFactor(S.tp), 4) + " × S = " + NN.bytes(m.sent) + " per GPU");
+      row("ring factor: data vs this page's own 2(N−1)/N",
+          fmt(ringFactor(S.tp), 4) + "  vs  " + fmt(ringFactorJs(S.tp), 4) +
+          "   (|Δ| = " + (RING_DRIFT === 0 ? "0" : RING_DRIFT.toExponential(1)) + ")");
       row("effective link  " + m.link.entry.bw + " GB/s × " + Math.round(S.eff * 100) + "%",
           fmt(m.link.gbps, 1) + " GB/s per direction");
       row("→ one all-reduce", fmt(m.commPerAR * 1e3, 3) + " ms");
@@ -1589,7 +1683,9 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       t.appendChild(el("tr", {}, [el("td", { colspan: 2, style: { height: "10px", border: "none" } })]));
       row("block params  ≈ 12h²  (MHA + 4h MLP)", NN.count(12 * S.h * S.h));
       row("fwd+bwd FLOPs  = 6 × params × tokens", NN.count(m.flops) + " FLOP");
-      row("÷ TP = " + S.tp + ",  ÷ " + S.tflops + " TFLOP/s", fmt(m.compute * 1e3, 3) + " ms", "sum");
+      row("÷ TP = " + S.tp + ",  ÷ " + S.tflops + " TFLOP/s  (" +
+          Math.round(100 * S.tflops / DENSE_TF) + "% of " + GPU.name + "'s " + DENSE_TF +
+          " dense)", fmt(m.compute * 1e3, 3) + " ms", "sum");
       outHost.appendChild(el("div", { class: "scrollx" }, t));
 
       /* sweep chart */
@@ -1615,23 +1711,33 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
         " ms</b> per block. At TP = 16 the identical collective costs <b class='num'>" +
         fmt(out16.comm * 1e3, 2) + " ms</b> — a <b class='num'>" +
         fmt(out16.comm / in8.comm, 1) + "×</b> jump for one extra doubling, because the payload " +
-        "barely changed (2(N−1)/N goes from " + fmt(2 * 7 / 8, 3) + " to " + fmt(2 * 15 / 16, 3) +
+        "barely changed (" + AR.ring_factor + " goes from " +
+        fmt(ringFactor(Math.min(S.perNode, 8)), 3) + " to " + fmt(ringFactor(16), 3) +
         ") and the bandwidth fell off a cliff. Meanwhile the compute per GPU only halved. " +
         "<b>This is why tensor parallelism is kept inside one node</b>, and why TP = " +
         S.perNode + " on an " + S.perNode + "-GPU node is the near-universal default." }));
 
       outHost.appendChild(el("p", { class: "small muted", html:
-        "<b>What this model assumes.</b> Ring all-reduce (the bandwidth-optimal bound the rest " +
-        "of this site uses, from <code>parallel_toy.py</code>'s <code>ring_cost</code>); latency " +
-        "terms ignored, which flatters small payloads; an NVSwitch fabric running NVLS or a tree " +
-        "algorithm can beat the ring bound in-node, so the in-node bars are pessimistic; a ring " +
-        "that spans nodes is modelled at the slowest hop's bandwidth, which is optimistic in " +
-        "that it ignores per-hop latency and pessimistic in that hierarchical algorithms do " +
-        "better than a flat ring. Compute counts only the six projection matmuls " +
-        "(<span class='mono'>≈12h²</span> params, <span class='mono'>6·P·tokens</span> FLOPs " +
-        "forward+backward); the O(s²) attention-score FLOPs are excluded, so long-sequence " +
-        "cases understate compute and therefore overstate the communication fraction. " +
-        "Link figures: " + LINKS._source }));
+        "<b>What this model assumes.</b> <b>" + COST._status + "</b> It is " +
+        "<code>PARALLEL.cost_model</code>, the same one pages 10 and 14 price with: " +
+        "<code>" + COST.time_bytes + "</code>, at " + Math.round(S.eff * 100) +
+        "% of the nominal link rate. " + COST.achieved_note +
+        " Latency (<code>cost_model.latency_us</code>: " + COST.latency_us.intra_node +
+        " µs intra-node, " + COST.latency_us.inter_node + " µs inter-node) is not added here, " +
+        "which flatters small payloads — " + COST.latency_us.note + ". The model also ignores:" }));
+      outHost.appendChild(el("ul", { class: "small muted", style: { marginTop: "-6px" } },
+        COST.ignores.map(function (s) { return el("li", {}, s); })));
+      outHost.appendChild(el("p", { class: "small muted", html:
+        "On top of that, page-specific caveats: a ring that spans nodes is modelled at the " +
+        "slowest hop's bandwidth, which is optimistic in that it ignores per-hop latency and " +
+        "pessimistic in that hierarchical algorithms do better than a flat ring. Compute counts " +
+        "only the six projection matmuls (<span class='mono'>≈12h²</span> params, " +
+        "<span class='mono'>6·P·tokens</span> FLOPs forward+backward); the O(s²) attention-score " +
+        "FLOPs are excluded, so long-sequence cases understate compute and therefore overstate " +
+        "the communication fraction. Link figures from <code>PARALLEL.interconnects</code>: " +
+        LINKS._source + ". Compute rate from <code>T.reference_configs</code>: " +
+        GPU.name + " at " + DENSE_TF + " dense bf16 TFLOP/s. " +
+        T.reference_configs.mfu_note }));
     }
     render();
   })();
