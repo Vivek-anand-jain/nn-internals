@@ -429,22 +429,46 @@ def run_tensor_parallel(base):
             "block": blk, "col_layer": Lc, "row_layer": Lr,
             "units_per_gpu": per,
             "hidden_shard_shape": [BATCH, per],
+            "output_shape": [BATCH, DIMS[Lr + 1]],
             "allreduce_elements": BATCH * DIMS[Lr + 1],
+            # The actual numbers, so a page can READ the proof instead of
+            # recomputing it in JS. Each GPU's hidden shard after the
+            # column-parallel layer + ReLU, and its PARTIAL contribution to
+            # the row-parallel layer's output. The partials are individually
+            # meaningless -- that is the point -- and sum to `summed`.
+            "per_gpu_hidden": [partials[g] for g in range(WORLD)],
+            "per_gpu_partial_out": [partial_out[g] for g in range(WORLD)],
+            "summed_before_bias": summed,
+            "after_bias": z,
         })
         verify_notes.append(f"block {blk} all-reduce of {BATCH}x{DIMS[Lr+1]}")
 
     err = maxdiff(h_full, base["yhat"])
 
-    # backward mirrors it: an all-reduce of the INPUT gradient for each
-    # column-parallel layer (the "f" conjugate operator in Megatron).
-    for blk, Lc in enumerate([0, 2]):
+    # Backward mirrors forward, operator by operator. Both halves of the
+    # duality get an entry so a page can render the whole f/g table from
+    # data instead of deriving the silent half.
+    for blk, (Lc, Lr) in enumerate([(0, 1), (2, 3)]):
+        # g: all-reduce in forward, IDENTITY in backward.
+        step += 1
+        sched.append(comm(step, "none", 0, WORLD,
+                          "Backward through the row-parallel layer. The g "
+                          "operator all-reduced in forward, so its conjugate "
+                          "is the identity here: the incoming gradient is "
+                          "already the full tensor and every GPU simply takes "
+                          "the slice matching the shard it owns.",
+                          f"backward block {blk}: row-parallel layer {Lr}",
+                          tensor=f"dL/doutput ({BATCH}x{DIMS[Lr+1]})"))
+        # f: identity in forward, ALL-REDUCE in backward.
         step += 1
         sched.append(comm(step, "all_reduce", BATCH * DIMS[Lc], WORLD,
-                          "Backward through a column-parallel layer: every "
-                          "GPU produced a partial input-gradient, so they sum. "
-                          "Forward's no-op becomes backward's all-reduce, and "
-                          "vice versa -- the two are conjugates.",
-                          f"backward block {blk}",
+                          "Backward through the column-parallel layer. The f "
+                          "operator was the identity in forward, because the "
+                          "input was replicated -- and a replicated input "
+                          "means every GPU produced a PARTIAL gradient for "
+                          "it, so they must be summed. Forward's no-op is "
+                          "backward's all-reduce. The two are conjugates.",
+                          f"backward block {blk}: column-parallel layer {Lc}",
                           tensor=f"dL/dinput ({BATCH}x{DIMS[Lc]})"))
 
     n_params = sum(len(flat(Ws[L])) + len(bs[L]) for L in range(N_LAYERS))

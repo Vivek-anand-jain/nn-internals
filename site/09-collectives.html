@@ -538,10 +538,10 @@ table.duality td .opn { font-family: var(--mono); font-weight: 700; }
      source slot to destination slot, driven by requestAnimationFrame so
      the whole thing can be stepped, replayed and reversed.
      ====================================================================== */
-  const VBW = 920, BOXW = 200, GX = 24, BOXY = 88;
+  const VBW = 920, BOXW = 200, GX = 24, BOXY = 72;
   const HEAD = 22, PADY = 9, SLOTH = 28, SLOTG = 5, SLOTW = BOXW - 20;
   const BOXH = HEAD + PADY + N * SLOTH + (N - 1) * SLOTG + PADY;
-  const VBH  = BOXY + BOXH + 26;
+  const VBH  = BOXY + BOXH + 18;
   const bx = function (g) { return GX + g * (BOXW + GX); };
   const sxOf = function (g) { return bx(g) + 10; };
   const syOf = function (s) { return BOXY + HEAD + PADY + s * (SLOTH + SLOTG); };
@@ -650,7 +650,7 @@ table.duality td .opn { font-family: var(--mono); font-weight: 700; }
     function bez(m) {
       const x1 = ccx(m.src), y1 = ccy(m.fs), x2 = ccx(m.dst), y2 = ccy(m.ts);
       const dist = Math.abs(m.dst - m.src);
-      const peak = BOXY - 12 - 17 * (Math.min(dist, N) - 1);
+      const peak = BOXY - 10 - 15 * (Math.min(dist, N) - 1);
       const cx = (x1 + x2) / 2;
       const cy = 2 * peak - (y1 + y2) / 2;
       return { x1: x1, y1: y1, x2: x2, y2: y2, cx: cx, cy: Math.max(6, cy) };
@@ -1353,9 +1353,11 @@ table.duality td .opn { font-family: var(--mono); font-weight: 700; }
         if (i === 0) { ringSvg.step(null); ringSvg.setLabels(R(N).map(function (g) { return "G" + g; })); }
         else {
           ringSvg.step(i, spec.phaseColor(i));
-          ringSvg.setLabels(spec.moves[i].map(function (m) {
-            return L[m.fs] + "→";
-          }));
+          const lab = R(N).map(function (g) {
+            const m = spec.moves[i].filter(function (x) { return x.src === g; })[0];
+            return m ? g + ":" + L[m.fs] : "G" + g;
+          });
+          ringSvg.setLabels(lab);
         }
       }
     });
@@ -1395,17 +1397,43 @@ table.duality td .opn { font-family: var(--mono); font-weight: 700; }
     host.appendChild(el("div", { class: "smallcap" }, "PARALLEL.ring.table — the factor as N grows"));
     host.appendChild(NN.chart.bars({
       items: P.ring.table.map(function (r) {
-        return {
-          label: "N = " + r.world,
-          value: r.all_reduce,
-          color: NN.gpu.opColor("all_reduce"),
-          sub: "×S per GPU"
-        };
+        return { label: "N = " + r.world, value: r.all_reduce,
+                 color: NN.gpu.opColor("all_reduce") };
       }),
       unit: "×S",
       max: 2.2,
-      limit: { value: 2, label: "asymptote 2×S" }
+      limit: { value: 2, label: "asymptote" }
     }));
+
+    /* the bar labels round to one decimal; the point of the table is the
+       digits after that, so print them exactly. */
+    const rt = el("table", { class: "data" });
+    rt.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "world size N"),
+      el("th", {}, "all_reduce  2(N−1)/N"),
+      el("th", {}, "all_gather  (N−1)/N"),
+      el("th", {}, "sequential hops")
+    ])));
+    const rtb = el("tbody", {});
+    P.ring.table.forEach(function (r) {
+      rtb.appendChild(el("tr", { class: r.world === N ? "pairA" : "" }, [
+        el("td", {}, String(r.world)),
+        el("td", { class: "n", style: { color: NN.gpu.opColor("all_reduce") } },
+          NN.fmt(r.all_reduce, 4) + "×S"),
+        el("td", { class: "n", style: { color: NN.gpu.opColor("all_gather") } },
+          NN.fmt(r.all_gather, 4) + "×S"),
+        el("td", { class: "n" }, String(ringHops("all_reduce", r.world)))
+      ]));
+    });
+    rt.appendChild(rtb);
+    host.appendChild(el("div", { class: "scrollx" }, [rt]));
+    const lastW = P.ring.table[P.ring.table.length - 1].world;
+    host.appendChild(el("p", { class: "small muted" },
+      "Two columns, two stories. The bandwidth column flattens on 2 — that is the good news, " +
+      "and it is the whole reason data parallelism scales. The hop column does not flatten: at " +
+      "N=" + lastW + " a ring all-reduce is " + ringHops("all_reduce", lastW) +
+      " dependent hops deep, and every one of them pays the link's latency before the next can " +
+      "start."));
 
     host.appendChild(NN.callout("key", "The point of the whole algorithm",
       "<p>2(N−1)/N × S → 2S as N grows. At N=" +
@@ -1658,7 +1686,7 @@ table.duality td .opn { font-family: var(--mono); font-weight: 700; }
         max: 105,
         limit: { value: 100, label: "peak link bandwidth" }
       }));
-      barsHost.appendChild(el("div", { class: "hint" },
+      barsHost.appendChild(el("p", { class: "small muted", style: { marginTop: "10px" } },
         "The highlighted bar is 25 MB, which is PyTorch DDP's default gradient bucket size " +
         "(bucket_cap_mb). The shape of this chart is the entire argument for bucketing: a " +
         "70-billion-parameter model has tens of thousands of individual gradient tensors, most of " +
@@ -1686,13 +1714,15 @@ table.duality td .opn { font-family: var(--mono); font-weight: 700; }
     const realIB = model(gradBytes, 512, "all_reduce", ib);
 
     host.appendChild(NN.callout("mem", "The toy model, and then the real one",
-      "<p>The " + T.meta.n_params + "-parameter model this site opens with produces " +
-      T.memory.param_gradient_elements + " parameter gradients — " +
+      "<p>The " + T.param_names.length + "-parameter model this site opens with (" +
+      T.meta.architecture + ") produces " + T.memory.param_gradient_elements +
+      " parameter gradients — " +
       NN.bytes(T.memory.param_gradient_elements * T.memory.dtype_bytes.fp32) + " in fp32. The " +
       P.meta.n_params + "-parameter model in <code>parallel_toy.py</code> all-reduces " +
       P.strategies.ddp.schedule[0].elements + " elements per step, of which each GPU sends " +
-      NN.fmt(P.strategies.ddp.schedule[0].sent_per_gpu_elements, 1) + ". Both fit in a single " +
-      "packet. The collective is pure overhead at this scale.</p>" +
+      NN.fmt(P.strategies.ddp.schedule[0].sent_per_gpu_elements, 1) + " elements = " +
+      NN.bytes(P.strategies.ddp.schedule[0].sent_per_gpu_elements * T.memory.dtype_bytes.fp32) +
+      " in fp32. Both fit in a single packet. The collective is pure overhead at this scale.</p>" +
       "<p>Now " + llama.name + ": " + NN.count(llama.params) + " parameters, so a bf16 gradient " +
       "buffer of <b>" + NN.bytes(gradBytes) + "</b>. One all-reduce over 8 GPUs on " + nvl.name +
       " moves " + NN.bytes(real.sent) + " out of every GPU and takes <b>" + ms(real.t) +

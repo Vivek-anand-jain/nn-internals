@@ -254,9 +254,39 @@ table.data tr.hi { background: var(--surface-3); }
     };
   }
 
-  /* self-check: the GPipe policy must reproduce the shipped grid exactly */
-  const SIM_OK = JSON.stringify(simulate(WORLD, NMICRO, "gpipe").grid) ===
-                 JSON.stringify(pp.grid);
+  /* ---- self-check against the shipped schedules -----------------------
+     parallel.js now ships BOTH schedules, correctly labelled. The in-page
+     simulator has to reproduce both before anything derived from it is
+     believable, so check the grids cell for cell and the per-stage peak
+     activation counts value for value. */
+  const SCHED = pp.schedules;
+  const SIM = {
+    gpipe: simulate(WORLD, NMICRO, "gpipe"),
+    "1f1b": simulate(WORLD, NMICRO, "1f1b")
+  };
+  const CHECKS = ["gpipe", "1f1b"].map(function (k) {
+    const s = SIM[k], ref = SCHED[k];
+    return {
+      key: k,
+      label: k === "gpipe" ? "GPipe" : "1F1B",
+      grid: JSON.stringify(s.grid) === JSON.stringify(ref.grid),
+      slots: s.slots === ref.stats.slots,
+      peak: JSON.stringify(s.peakStage) === JSON.stringify(ref.stats.peak_live_per_stage),
+      bubble: Math.abs(s.idleFraction - ref.stats.bubble_measured) < 1e-5,
+      ref: ref
+    };
+  });
+  const ALL_OK = CHECKS.every(function (c) { return c.grid && c.slots && c.peak && c.bubble; });
+
+  function checkLine() {
+    return CHECKS.map(function (c) {
+      return c.label + ": grid " + (c.grid ? "✓" : "✗") +
+        ", slots " + (c.slots ? "✓" : "✗") +
+        ", bubble " + (c.bubble ? "✓" : "✗") +
+        ", peak-per-stage [" + c.ref.stats.peak_live_per_stage.join(",") + "] " +
+        (c.peak ? "✓" : "✗");
+    }).join("   ·   ");
+  }
 
   function bubbleFormula(P, M, chunks) {
     const v = chunks || 1;

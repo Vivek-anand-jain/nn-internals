@@ -74,6 +74,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
 .stripline .memstrip { margin: 0; }
 @media (max-width: 700px) { .stripline { grid-template-columns: 78px 1fr; }
                             .stripline .vv { grid-column: 2; text-align: left; } }
+@media (max-width: 620px) { .gpugrid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; } }
 </style>
 </head>
 <body>
@@ -210,6 +211,14 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     return hit.length ? hit[0] : T.memory.recipes[T.memory.recipes.length - 1];
   })();
 
+  /** NN.gpu.grid, pinned to one column per GPU so the four cards read as a
+      row of four devices rather than reflowing to 3 + 1 in a narrow column. */
+  function gpuRow(o) {
+    const g = NN.gpu.grid(o);
+    g.style.gridTemplateColumns = "repeat(" + (o.count || WD) + ", minmax(0, 1fr))";
+    return g;
+  }
+
   /* ======================================================================
      SHARD ROW — a labelled bar showing which quarter of a tensor a GPU owns.
      Built once with NN.gpu.shard, then mutated so the CSS transitions run
@@ -295,7 +304,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     const btns = el("div", { class: "segbtns" });
     const rows = [];
 
-    const grid = NN.gpu.grid({
+    const grid = gpuRow({
       count: WD,
       label: function (g) { return "GPU " + g; },
       render: function (g) {
@@ -391,7 +400,9 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       ]));
       arithHost.appendChild(t);
       arithHost.appendChild(el("div", { class: "hint", style: { marginTop: "9px" } },
-        "against DDP: " + NN.fmt(100 * (1 - s.total / DDP.total), 1) + "% less per GPU"));
+        i === 0 ? "the baseline — page 10's DDP, unchanged"
+                : "against DDP: " + NN.fmt(100 * (1 - s.total / DDP.total), 1) +
+                  "% less per GPU"));
 
       /* comparison strips */
       stripHost.innerHTML = "";
@@ -447,7 +458,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
      ====================================================================== */
   function buildWalk(host, spec) {
     const rows = [];
-    const grid = NN.gpu.grid({
+    const grid = gpuRow({
       count: WD,
       label: function (g) { return "GPU " + g; },
       render: function (g) {
@@ -873,7 +884,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
 
     /* ------------- the GPU grid, one shard row per layer -------------- */
     const rows = [];
-    const grid = NN.gpu.grid({
+    const grid = gpuRow({
       count: WD,
       label: function (g) { return "GPU " + g; },
       render: function (g) {
@@ -1187,7 +1198,6 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     const REF = T.reference_configs;
     const MODELS = REF.models, GPUS = REF.gpus, RECIPES = T.memory.recipes;
     const NLIST = [1, 2, 4, 8, 16, 32, 64, 128, 256];
-    const GB = 1e9;
 
     /* ------------------------------------------------------------------
        Activation accounting. The per-(token x d_model) byte coefficients

@@ -616,7 +616,8 @@ table.data tr.hi { background: var(--surface-3); }
             NN.count(D.schedule[0].elements) + "</b> elements — every gradient in the model, " +
             "concatenated into one flat buffer. A ring implementation sends <b>" +
             fmt(D.schedule[0].sent_per_gpu_elements, 1) + " elements per GPU</b>, which is " +
-            "2(N−1)/N × " + NN.count(D.schedule[0].elements) + ". Page 09 has the ring in detail." })
+            "2(N−1)/N × " + NN.count(D.schedule[0].elements) + ". " +
+            "<a href='09-collectives.html#ring'>Page 09</a> has the ring in detail." })
         ]);
         focusPanel.appendChild(el("div", { class: "ringwrap" }, [left, right]));
         setTimeout(function () {
@@ -999,7 +1000,10 @@ table.data tr.hi { background: var(--surface-3); }
         " you are back to one all-reduce after backward, which is where this page started. " +
         "The useful bucket size is the smallest one that still amortises the latency — which is " +
         "why real implementations cap buckets by <i>bytes</i> rather than by layers, and why the " +
-        "default is large enough that a small model ends up with a single bucket." }));
+        "default is large enough that a small model ends up with a single bucket. " +
+        "<a href='09-collectives.html#calc'>Page 09</a> measures that latency floor against " +
+        "message size directly, and marks where the framework default sits on the curve; this " +
+        "timeline is the same argument seen from the scheduler's side." }));
     }
     renderOv();
 
@@ -1138,7 +1142,8 @@ table.data tr.hi { background: var(--surface-3); }
       PERGPU + " × " + WORLD + " = " + BATCH + "." }));
 
     host.appendChild(el("p", { html:
-      "The communication side scales fine, and the ring table from page 09 says why: a ring " +
+      "The communication side scales fine, and the ring table from " +
+      "<a href='09-collectives.html#ring'>page 09</a> says why: a ring " +
       "all-reduce sends 2(N−1)/N × S elements per GPU, which approaches 2S and then stops. " +
       "Doubling the world size does not double what each GPU sends." }));
 
