@@ -787,30 +787,45 @@ def run_zero(base, stage):
                               f"real cost: 1.5x the communication of DDP.",
                               "backward", tensor=f"W{L} shards -> full W{L}"))
 
-    if stage >= 2:
-        step += 1
-        sched.append(comm(step, "reduce_scatter", n_params, N,
-                          "Sum the gradients AND split them in one operation. "
-                          "Each rank keeps only the shard it will actually "
-                          "apply, so no rank ever holds a full gradient "
-                          "buffer. This is why reduce-scatter replaces "
-                          "all-reduce here -- it is the same sum, minus the "
-                          "half that hands everyone a full copy.",
-                          "after backward", tensor="gradient shards"))
-    else:
-        step += 1
-        sched.append(comm(step, "all_reduce", n_params, N,
-                          "Stage 1 still needs every rank to hold the full "
-                          "gradient, because only the OPTIMIZER STATE is "
-                          "sharded so far.",
-                          "after backward", tensor="all gradients"))
+    # Stages 1 and 2 use the SAME collective here, and that is the point.
+    # A rank only ever needs its own shard of the summed gradient, because
+    # it only owns that shard of the optimizer state. So reduce-scatter is
+    # sufficient for BOTH -- and since all_reduce == reduce_scatter +
+    # all_gather, replacing one with the other costs nothing.
+    #
+    # (An earlier version of this file scheduled a full all_reduce for
+    # stage 1, which made ZeRO-1 look 1.5x more expensive than DDP. That
+    # contradicts the ZeRO paper, which reports stage 1 as communication-
+    # neutral, and the paper is right: the difference between stages 1 and 2
+    # is purely MEMORY -- whether the full gradient buffer is ever
+    # materialised -- not communication.)
+    step += 1
+    sched.append(comm(step, "reduce_scatter", n_params, N,
+                      "Sum the gradients and split them in one operation. A "
+                      "rank only owns one shard of the optimizer state, so a "
+                      "shard of the summed gradient is all it can use. "
+                      "Reduce-scatter is exactly all-reduce minus the half "
+                      "that hands everyone a full copy -- so this costs the "
+                      "same as DDP, not more."
+                      + (" At stage 1 the full gradient buffer still exists "
+                         "in memory during backward; stage 2's saving is "
+                         "that it never has to."
+                         if stage == 1 else
+                         " At stage 2 gradients are reduced bucket by bucket "
+                         "during backward and freed as they go, so the full "
+                         "buffer is never materialised."),
+                      "after backward",
+                      tensor="gradients -> gradient shards"))
 
-    if stage == 1 or stage == 2:
+    if stage in (1, 2):
         step += 1
         sched.append(comm(step, "all_gather", n_params, N,
                           "Each rank updated only its shard of the weights, "
-                          "so the updated shards are gathered back into a "
-                          "full copy for the next forward pass.",
+                          "so the updated shards are gathered back into the "
+                          "full copy every rank needs for the next forward. "
+                          "Together with the reduce-scatter above, this is "
+                          "exactly one all-reduce of communication -- the "
+                          "same volume DDP moves.",
                           "after optimizer step", tensor="updated weight shards"))
 
     mem = {
@@ -874,6 +889,19 @@ def build():
     # activation memory per GPU, single-GPU reference
     act_elems = sum(len(flat(a)) for a in base["cache"]["acts"])
 
+    # Attach a NUMERIC ring factor to every collective, evaluated at the
+    # simulated world size, so a page can read the cost instead of
+    # reimplementing ring_cost() in JS and risking drift.
+    colls = []
+    for c in COLLECTIVES:
+        d = dict(c)
+        d["ring_factor_at_world"] = {
+            str(n): round(ring_cost(c["op"], 1.0, n), 6)
+            for n in (1, 2, 4, 8, 16, 32, 64, 128, 256)
+        }
+        d["ring_factor_numeric"] = round(ring_cost(c["op"], 1.0, WORLD), 6)
+        colls.append(d)
+
     return {
         "meta": {
             "generated_by": "code/parallel_toy.py",
@@ -895,7 +923,7 @@ def build():
                   "layer_shapes": [[DIMS[L + 1], DIMS[L]] for L in range(N_LAYERS)],
                   "layer_params": [DIMS[L + 1] * DIMS[L] + DIMS[L + 1]
                                    for L in range(N_LAYERS)]},
-        "collectives": COLLECTIVES,
+        "collectives": colls,
         "strategies": strategies,
         # ------------------------------------------------------------------
         # Interconnect bandwidths. These are QUOTED vendor figures, external

@@ -636,7 +636,19 @@ window.PARALLEL = {
    "what": "One rank's buffer is copied to every rank.",
    "used_for": "Sending initial weights to every replica at startup.",
    "ring_factor": "S",
-   "inverse": "reduce"
+   "inverse": "reduce",
+   "ring_factor_at_world": {
+    "1": 0.0,
+    "2": 1.0,
+    "4": 1.0,
+    "8": 1.0,
+    "16": 1.0,
+    "32": 1.0,
+    "64": 1.0,
+    "128": 1.0,
+    "256": 1.0
+   },
+   "ring_factor_numeric": 1.0
   },
   {
    "op": "scatter",
@@ -644,7 +656,19 @@ window.PARALLEL = {
    "what": "One rank's buffer is cut into N pieces; rank i receives piece i.",
    "used_for": "Handing each data-parallel rank its slice of the batch.",
    "ring_factor": "(N-1)/N * S",
-   "inverse": "gather"
+   "inverse": "gather",
+   "ring_factor_at_world": {
+    "1": 0.0,
+    "2": 0.5,
+    "4": 0.75,
+    "8": 0.875,
+    "16": 0.9375,
+    "32": 0.96875,
+    "64": 0.984375,
+    "128": 0.992188,
+    "256": 0.996094
+   },
+   "ring_factor_numeric": 0.75
   },
   {
    "op": "gather",
@@ -652,7 +676,19 @@ window.PARALLEL = {
    "what": "Rank i's piece is collected onto one rank, concatenated.",
    "used_for": "Pulling a full tensor back for checkpointing or logging.",
    "ring_factor": "(N-1)/N * S",
-   "inverse": "scatter"
+   "inverse": "scatter",
+   "ring_factor_at_world": {
+    "1": 0.0,
+    "2": 0.5,
+    "4": 0.75,
+    "8": 0.875,
+    "16": 0.9375,
+    "32": 0.96875,
+    "64": 0.984375,
+    "128": 0.992188,
+    "256": 0.996094
+   },
+   "ring_factor_numeric": 0.75
   },
   {
    "op": "all_gather",
@@ -660,7 +696,19 @@ window.PARALLEL = {
    "what": "Every rank ends up with the concatenation of all N pieces.",
    "used_for": "FSDP/ZeRO-3 re-materialising a full layer's weights just before using them.",
    "ring_factor": "(N-1)/N * S",
-   "inverse": "reduce_scatter"
+   "inverse": "reduce_scatter",
+   "ring_factor_at_world": {
+    "1": 0.0,
+    "2": 0.5,
+    "4": 0.75,
+    "8": 0.875,
+    "16": 0.9375,
+    "32": 0.96875,
+    "64": 0.984375,
+    "128": 0.992188,
+    "256": 0.996094
+   },
+   "ring_factor_numeric": 0.75
   },
   {
    "op": "reduce",
@@ -668,7 +716,19 @@ window.PARALLEL = {
    "what": "Elementwise sum across ranks, result on one rank.",
    "used_for": "Collecting a loss value for logging.",
    "ring_factor": "S",
-   "inverse": "broadcast"
+   "inverse": "broadcast",
+   "ring_factor_at_world": {
+    "1": 0.0,
+    "2": 1.0,
+    "4": 1.0,
+    "8": 1.0,
+    "16": 1.0,
+    "32": 1.0,
+    "64": 1.0,
+    "128": 1.0,
+    "256": 1.0
+   },
+   "ring_factor_numeric": 1.0
   },
   {
    "op": "reduce_scatter",
@@ -676,7 +736,19 @@ window.PARALLEL = {
    "what": "Elementwise sum across ranks, then rank i keeps only shard i of the result.",
    "used_for": "ZeRO-2/3 reducing gradients so each rank keeps only the shard it will apply.",
    "ring_factor": "(N-1)/N * S",
-   "inverse": "all_gather"
+   "inverse": "all_gather",
+   "ring_factor_at_world": {
+    "1": 0.0,
+    "2": 0.5,
+    "4": 0.75,
+    "8": 0.875,
+    "16": 0.9375,
+    "32": 0.96875,
+    "64": 0.984375,
+    "128": 0.992188,
+    "256": 0.996094
+   },
+   "ring_factor_numeric": 0.75
   },
   {
    "op": "all_reduce",
@@ -684,7 +756,19 @@ window.PARALLEL = {
    "what": "Elementwise sum across ranks, result on every rank. Implemented as reduce_scatter followed by all_gather.",
    "used_for": "DDP averaging gradients; tensor parallelism summing partial activations.",
    "ring_factor": "2(N-1)/N * S",
-   "inverse": "itself"
+   "inverse": "itself",
+   "ring_factor_at_world": {
+    "1": 0.0,
+    "2": 1.0,
+    "4": 1.5,
+    "8": 1.75,
+    "16": 1.875,
+    "32": 1.9375,
+    "64": 1.96875,
+    "128": 1.984375,
+    "256": 1.992188
+   },
+   "ring_factor_numeric": 1.5
   },
   {
    "op": "all_to_all",
@@ -692,7 +776,19 @@ window.PARALLEL = {
    "what": "Rank i sends its j-th chunk to rank j. A distributed transpose.",
    "used_for": "Mixture-of-experts routing; sequence <-> hidden redistribution in sequence parallelism.",
    "ring_factor": "(N-1)/N * S",
-   "inverse": "itself"
+   "inverse": "itself",
+   "ring_factor_at_world": {
+    "1": 0.0,
+    "2": 0.5,
+    "4": 0.75,
+    "8": 0.875,
+    "16": 0.9375,
+    "32": 0.96875,
+    "64": 0.984375,
+    "128": 0.992188,
+    "256": 0.996094
+   },
+   "ring_factor_numeric": 0.75
   },
   {
    "op": "p2p",
@@ -700,7 +796,19 @@ window.PARALLEL = {
    "what": "A direct send/recv between two ranks.",
    "used_for": "Pipeline parallelism handing activations to the next stage and gradients back to the previous one.",
    "ring_factor": "S",
-   "inverse": "itself"
+   "inverse": "itself",
+   "ring_factor_at_world": {
+    "1": 0.0,
+    "2": 1.0,
+    "4": 1.0,
+    "8": 1.0,
+    "16": 1.0,
+    "32": 1.0,
+    "64": 1.0,
+    "128": 1.0,
+    "256": 1.0
+   },
+   "ring_factor_numeric": 1.0
   }
  ],
  "strategies": {
@@ -3101,14 +3209,14 @@ window.PARALLEL = {
    "schedule": [
     {
      "step": 1,
-     "op": "all_reduce",
-     "tensor": "all gradients",
+     "op": "reduce_scatter",
+     "tensor": "gradients -> gradient shards",
      "elements": 193,
      "bytes_bf16": 386,
      "bytes_fp32": 772,
-     "sent_per_gpu_elements": 289.5,
+     "sent_per_gpu_elements": 144.75,
      "world": 4,
-     "why": "Stage 1 still needs every rank to hold the full gradient, because only the OPTIMIZER STATE is sharded so far.",
+     "why": "Sum the gradients and split them in one operation. A rank only owns one shard of the optimizer state, so a shard of the summed gradient is all it can use. Reduce-scatter is exactly all-reduce minus the half that hands everyone a full copy -- so this costs the same as DDP, not more. At stage 1 the full gradient buffer still exists in memory during backward; stage 2's saving is that it never has to.",
      "phase": "after backward",
      "src": null,
      "dst": null
@@ -3122,7 +3230,7 @@ window.PARALLEL = {
      "bytes_fp32": 772,
      "sent_per_gpu_elements": 144.75,
      "world": 4,
-     "why": "Each rank updated only its shard of the weights, so the updated shards are gathered back into a full copy for the next forward pass.",
+     "why": "Each rank updated only its shard of the weights, so the updated shards are gathered back into the full copy every rank needs for the next forward. Together with the reduce-scatter above, this is exactly one all-reduce of communication -- the same volume DDP moves.",
      "phase": "after optimizer step",
      "src": null,
      "dst": null
@@ -3134,7 +3242,7 @@ window.PARALLEL = {
     "optimizer": 96,
     "activations_divisor": 4
    },
-   "comm_vs_ddp": 1.5,
+   "comm_vs_ddp": 1.0,
    "verify": {
     "claim": "ZeRO does not change the maths. Every rank still applies the same update to the same weights; the difference is only WHERE each number is stored and WHEN it is materialised.",
     "passed": true,
@@ -3151,13 +3259,13 @@ window.PARALLEL = {
     {
      "step": 1,
      "op": "reduce_scatter",
-     "tensor": "gradient shards",
+     "tensor": "gradients -> gradient shards",
      "elements": 193,
      "bytes_bf16": 386,
      "bytes_fp32": 772,
      "sent_per_gpu_elements": 144.75,
      "world": 4,
-     "why": "Sum the gradients AND split them in one operation. Each rank keeps only the shard it will actually apply, so no rank ever holds a full gradient buffer. This is why reduce-scatter replaces all-reduce here -- it is the same sum, minus the half that hands everyone a full copy.",
+     "why": "Sum the gradients and split them in one operation. A rank only owns one shard of the optimizer state, so a shard of the summed gradient is all it can use. Reduce-scatter is exactly all-reduce minus the half that hands everyone a full copy -- so this costs the same as DDP, not more. At stage 2 gradients are reduced bucket by bucket during backward and freed as they go, so the full buffer is never materialised.",
      "phase": "after backward",
      "src": null,
      "dst": null
@@ -3171,7 +3279,7 @@ window.PARALLEL = {
      "bytes_fp32": 772,
      "sent_per_gpu_elements": 144.75,
      "world": 4,
-     "why": "Each rank updated only its shard of the weights, so the updated shards are gathered back into a full copy for the next forward pass.",
+     "why": "Each rank updated only its shard of the weights, so the updated shards are gathered back into the full copy every rank needs for the next forward. Together with the reduce-scatter above, this is exactly one all-reduce of communication -- the same volume DDP moves.",
      "phase": "after optimizer step",
      "src": null,
      "dst": null
@@ -3312,13 +3420,13 @@ window.PARALLEL = {
     {
      "step": 9,
      "op": "reduce_scatter",
-     "tensor": "gradient shards",
+     "tensor": "gradients -> gradient shards",
      "elements": 193,
      "bytes_bf16": 386,
      "bytes_fp32": 772,
      "sent_per_gpu_elements": 144.75,
      "world": 4,
-     "why": "Sum the gradients AND split them in one operation. Each rank keeps only the shard it will actually apply, so no rank ever holds a full gradient buffer. This is why reduce-scatter replaces all-reduce here -- it is the same sum, minus the half that hands everyone a full copy.",
+     "why": "Sum the gradients and split them in one operation. A rank only owns one shard of the optimizer state, so a shard of the summed gradient is all it can use. Reduce-scatter is exactly all-reduce minus the half that hands everyone a full copy -- so this costs the same as DDP, not more. At stage 2 gradients are reduced bucket by bucket during backward and freed as they go, so the full buffer is never materialised.",
      "phase": "after backward",
      "src": null,
      "dst": null

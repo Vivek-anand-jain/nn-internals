@@ -66,7 +66,7 @@
 .ok  { color: var(--good); font-weight: 700; }
 .bad { color: var(--critical); font-weight: 700; }
 .kbdhint { font-size: .68rem; color: var(--ink-muted); font-family: var(--mono); margin-top: 6px; }
-table.data td.wrap, table.data th.wrap { white-space: normal; }
+table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; }
 .stripline { display: grid; grid-template-columns: 92px 1fr 150px; gap: 10px;
              align-items: center; margin: 7px 0; }
 .stripline .nm { font-family: var(--mono); font-size: .78rem; color: var(--ink-2); }
@@ -294,7 +294,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     const host = NN.$("#spineBody");
 
     host.appendChild(el("p", { html:
-      "The toy here is the same 4-layer network page 10 ran under DDP: " +
+      "The toy here is the same " + NL + "-layer network page 10 ran under DDP: " +
       "<span class='mono'>" + P.meta.dims.join(" " + arrow + " ") + "</span>, " +
       "<b>" + ints(NP) + " parameters</b>, split over <b>" + WD + " GPUs</b>. " +
       "Under DDP every one of those GPUs holds the same three things in full: the " +
@@ -1328,7 +1328,9 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       "parallel.js measured: " + ints(ACTE) + " " + div + " " + WD + " = " +
       ints(ACTE / WD) + " elements per GPU. Pick a real model for the activation controls.");
     pAct.appendChild(actHint);
-    const preset = el("button", { class: "btn" }, "70B on 64 GPUs →");
+    const PRESET_N = 64;
+    const preset = el("button", { class: "btn" },
+      REF.default_model + " on " + PRESET_N + " GPUs →");
     pAct.appendChild(preset);
 
     ctls.appendChild(pModel);
@@ -1529,7 +1531,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     preset.addEventListener("click", function () {
       st.model = REF.default_model;
       st.gpu = REF.default_gpu;
-      st.ni = NLIST.indexOf(64);
+      st.ni = NLIST.indexOf(PRESET_N);
       st.recipe = DEF_RECIPE;
       st.ckpt = true; st.mb = 1;
       selModel.value = st.model; selGpu.value = st.gpu;
@@ -1542,7 +1544,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     render();
 
     host.appendChild(NN.callout("why", "READ THE 70B ROW CAREFULLY",
-      "Press the preset: " + REF.default_model + " on 64 " + REF.default_gpu +
+      "Press the preset: " + REF.default_model + " on " + PRESET_N + " " + REF.default_gpu +
       "s under <span class='mono'>" + STD_RECIPE.name + "</span>. Every figure in the table " +
       "above is computed from <code>T.reference_configs</code> and " +
       "<code>T.memory.recipes</code>, so read them off it rather than off this sentence. " +

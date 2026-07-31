@@ -272,13 +272,13 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
     ["pp", "dp", "tp"], ["dp", "tp", "pp"], ["dp", "pp", "tp"]
   ];
 
-  function sizes() { return { tp: S.tp, pp: S.pp, dp: S.dp }; }
+  function sizes(c) { const q = c || S; return { tp: q.tp, pp: q.pp, dp: q.dp }; }
   function product() { return S.tp * S.pp * S.dp; }
   function valid() { return product() === S.world; }
 
   /** Mixed-radix strides for an ordering given innermost-first. */
-  function strides(order) {
-    const sz = sizes(); let s = 1; const out = {};
+  function strides(order, c) {
+    const sz = sizes(c); let s = 1; const out = {};
     (order || S.order).forEach(function (a) { out[a] = s; s *= sz[a]; });
     return out;
   }
@@ -300,8 +300,8 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
     return out;
   }
   /** Where an axis's groups sit relative to the 8-GPU node boundary. */
-  function placement(axis, order) {
-    const st = strides(order)[axis], n = sizes()[axis];
+  function placement(axis, order, c) {
+    const st = strides(order, c)[axis], n = sizes(c)[axis];
     const span = st * n;                       // aligned block the group lives in
     const inside = n === 1 || span <= HW.perNode;
     return { stride: st, size: n, span: span, inside: inside,
@@ -421,7 +421,7 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
     const bubble = c.pp > 1 ? (c.pp - 1) / (c.micro + c.pp - 1) : 0;
     const tBubble = tCompute * bubble / (1 - bubble);
 
-    const pl = { tp: placement("tp", o), pp: placement("pp", o), dp: placement("dp", o) };
+    const pl = { tp: placement("tp", o, c), pp: placement("pp", o, c), dp: placement("dp", o, c) };
     const tTP = c.tp > 1 ? v.tp / bwOf(pl.tp.link) : 0;
     const tPP = c.pp > 1 ? v.pp / bwOf(pl.pp.link) : 0;
     const tDPraw = c.dp > 1 ? v.dp / bwOf(pl.dp.link) : 0;
@@ -463,7 +463,12 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
       "communication column is <b>elements sent per GPU per step</b>, from the recorded schedule, " +
       "expressed as a multiple of the parameter count. A ring all-reduce over " + W + " ranks moves " +
       "2(N&minus;1)/N = " + NN.fmt(2 * (W - 1) / W, 2) + x + " the buffer, which is where the " +
-      NN.fmt(commPerStep(P.strategies.ddp) / NP, 2) + x + " on the DDP row comes from." }));
+      NN.fmt(commPerStep(P.strategies.ddp) / NP, 2) + x + " on the DDP row comes from. Every other " +
+      "row is that same recorded sum: ZeRO-1's " +
+      NN.fmt(commPerStep(P.strategies.zero1) / NP, 2) + x + " P is " +
+      NN.fmt(commPerStep(P.strategies.zero1) / commPerStep(P.strategies.ddp), 2) + x +
+      " DDP's traffic, which is exactly the <code>comm_vs_ddp</code> figure of " +
+      P.strategies.zero1.comm_vs_ddp + " that the simulation records independently." }));
 
     const order = ["ddp", "zero1", "zero2", "zero3", "tp", "pp"];
     const tbl = el("table", { class: "data" });
@@ -563,8 +568,13 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
     host.appendChild(NN.legend(["weight", "gradient", "activation", "optimizer"]));
     host.appendChild(el("div", { class: "hint" },
       "Optimizer is out of " + (2 * NP) + " elements because Adam keeps two states per parameter " +
-      "(m and v). The four axes that follow are DP, the ZeRO ladder inside DP, TP and PP; SP and EP " +
-      "are the two the " + P.meta.world + "-GPU toy does not model."));
+      "(m and v). The four axes are DP, the ZeRO ladder inside DP, TP and PP; SP and EP are the two " +
+      "the " + P.meta.world + "-GPU toy does not model. One caveat on the communication column: " +
+      "DDP's and ZeRO's traffic really is proportional to the parameter count, so quoting it as a " +
+      "multiple of P is meaningful at any scale. TP's and PP's traffic is proportional to " +
+      "activations — tokens " + x + " d_model — and only looks small here because this toy has " +
+      "as many parameters as it has activations. At 70B scale the ordering inverts completely, and " +
+      "section 4 shows it doing so."));
 
     /* ---- schedule inspector: the recorded collective sequence per axis ---- */
     host.appendChild(el("h3", {}, "The recorded schedule"));
@@ -1285,7 +1295,8 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
       "ZeRO-3 across all " + W + " GPUs moves <b>" + fsize(fsdpT.v.dp) + " per GPU per step</b> (" +
       fsdpT.v.dpWhat + "), every byte of it across the fabric, because a DP group of " + W +
       " cannot fit in an " + HW.perNode + "-GPU node. That is " + secs(fsdpT.tDPraw) +
-      " of wire time against " + secs(fsdpT.tCompute) + " of compute — <b>" +
+      " of wire time against " + secs(fsdpT.tCompute) + " of compute for " +
+      NN.count(fsdpT.tokens) + " tokens — <b>" +
       NN.fmt(100 * fsdpT.tDPraw / fsdpT.tCompute, 0) + "%</b> — so at this scale prefetch really does " +
       "hide it, and plain FSDP is a perfectly good answer for " + MDL.name + " on " + W + " GPUs. " +
       "The trap is what happens next: that " + fsize(fsdpT.v.dp) + " <b>does not shrink when you add " +
@@ -1386,7 +1397,8 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
         { label: "activations, no SP", value: noSp.activation / GB, color: "var(--activation)",
           sub: "TP alone leaves the norms and dropouts whole" },
         { label: "activations, no FlashAttention", value: noFlash.activation / GB, color: "var(--activation)",
-          sub: "the s² score matrix, materialised" }
+          sub: S.ckpt ? "the s² score matrix, live in the one recomputed layer"
+                      : "the s² score matrix, live in every layer" }
       ],
       unit: "GB", limit: { value: m.cap / GB, label: DEV.name + " HBM" }
     }));
