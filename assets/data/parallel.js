@@ -3243,6 +3243,7 @@ window.PARALLEL = {
     "activations_divisor": 4
    },
    "comm_vs_ddp": 1.0,
+   "peak": null,
    "verify": {
     "claim": "ZeRO does not change the maths. Every rank still applies the same update to the same weights; the difference is only WHERE each number is stored and WHEN it is materialised.",
     "passed": true,
@@ -3292,6 +3293,7 @@ window.PARALLEL = {
     "activations_divisor": 4
    },
    "comm_vs_ddp": 1.0,
+   "peak": null,
    "verify": {
     "claim": "ZeRO does not change the maths. Every rank still applies the same update to the same weights; the difference is only WHERE each number is stored and WHEN it is materialised.",
     "passed": true,
@@ -3439,6 +3441,26 @@ window.PARALLEL = {
     "activations_divisor": 4
    },
    "comm_vs_ddp": 1.5,
+   "peak": {
+    "at_rest": 48,
+    "peak_no_prefetch": 102,
+    "peak_with_prefetch": 156,
+    "largest_layer_params": 72,
+    "layer_params": [
+     40,
+     72,
+     72,
+     9
+    ],
+    "gather_extra_per_layer": [
+     30,
+     54,
+     54,
+     7
+    ],
+    "ratio_to_at_rest": 2.125,
+    "note": "at_rest is what ZeRO-3 is usually quoted as. The peak is what has to fit. A layer bigger than one GPU cannot be sharded away by ZeRO-3 -- that needs tensor parallelism."
+   },
    "verify": {
     "claim": "ZeRO does not change the maths. Every rank still applies the same update to the same weights; the difference is only WHERE each number is stored and WHEN it is materialised.",
     "passed": true,

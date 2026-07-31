@@ -845,6 +845,38 @@ def run_zero(base, stage):
     total_sent = sum(c["sent_per_gpu_elements"] for c in sched)
     ddp_sent = ring_cost("all_reduce", n_params, N)
 
+    # ---- ZeRO-3's PEAK, which is not its at-rest figure ------------------
+    # "ZeRO-3 gives you parameters/N" is the AT-REST number. A GPU cannot
+    # multiply by a quarter of a matrix: while layer L is executing, the GPU
+    # holds its shards of every other layer PLUS the whole of W_L. With
+    # prefetch (FSDP gathers layer L+1 while computing layer L, to hide the
+    # latency) it holds two whole layers.
+    #
+    # This is the number that decides whether ZeRO-3 actually fits, and it
+    # is also why a single layer too large for one GPU cannot be rescued by
+    # ZeRO-3 at all -- you need tensor parallelism for that.
+    peak_info = None
+    if stage >= 3:
+        layer_p = [DIMS[L + 1] * DIMS[L] + DIMS[L + 1] for L in range(N_LAYERS)]
+        at_rest = n_params // N
+        biggest = max(layer_p)
+        # gathering a layer costs the (N-1)/N of it you did not already hold
+        gather_extra = [p - p // N for p in layer_p]
+        big1 = max(gather_extra)
+        top2 = sorted(gather_extra, reverse=True)[:2]
+        peak_info = {
+            "at_rest": at_rest,
+            "peak_no_prefetch": at_rest + big1,
+            "peak_with_prefetch": at_rest + sum(top2),
+            "largest_layer_params": biggest,
+            "layer_params": layer_p,
+            "gather_extra_per_layer": gather_extra,
+            "ratio_to_at_rest": round((at_rest + big1) / at_rest, 3),
+            "note": "at_rest is what ZeRO-3 is usually quoted as. The peak is "
+                    "what has to fit. A layer bigger than one GPU cannot be "
+                    "sharded away by ZeRO-3 -- that needs tensor parallelism.",
+        }
+
     return {
         "name": f"ZeRO-{stage}" + (" / FSDP" if stage == 3 else ""),
         "splits": shards_what + ", and the batch",
@@ -854,6 +886,7 @@ def run_zero(base, stage):
         "schedule": sched,
         "memory_per_gpu": mem,
         "comm_vs_ddp": round(total_sent / ddp_sent, 3) if ddp_sent else 0,
+        "peak": peak_info,
         "verify": {"claim": "ZeRO does not change the maths. Every rank still "
                             "applies the same update to the same weights; the "
                             "difference is only WHERE each number is stored "

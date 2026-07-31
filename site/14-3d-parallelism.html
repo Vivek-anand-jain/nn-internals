@@ -35,14 +35,15 @@
 .nodebox { border: 1px solid var(--hairline); border-radius: 8px; background: var(--surface-2); padding: 8px 9px 9px; }
 .nodehead { font-family: var(--mono); font-size: .64rem; letter-spacing: .09em; text-transform: uppercase;
             color: var(--ink-muted); font-weight: 700; display: flex; justify-content: space-between; gap: 6px; margin-bottom: 7px; }
-.ggrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+.ggrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 3px; }
 .gcell { position: relative; border: 1px solid var(--hairline); border-radius: 5px; background: var(--surface-1);
-         padding: 5px 3px 4px; text-align: center; cursor: pointer; overflow: hidden; line-height: 1.25; }
+         padding: 5px 1px 4px; text-align: center; cursor: pointer; overflow: hidden; line-height: 1.25; }
 .gcell .tint { position: absolute; inset: 0; background: var(--accent); pointer-events: none; }
 .gcell .r  { position: relative; font-family: var(--mono); font-size: .72rem; font-weight: 700; color: var(--ink); }
-.gcell .c  { position: relative; font-family: var(--mono); font-size: .56rem; color: var(--ink-2); white-space: nowrap; }
-.gcell .tag { position: relative; display: block; font-family: var(--mono); font-size: .53rem; font-weight: 700;
-              letter-spacing: .06em; margin-top: 1px; }
+.gcell .c  { position: relative; font-family: var(--mono); font-size: .52rem; letter-spacing: -.02em;
+             color: var(--ink-2); white-space: nowrap; }
+.gcell .tag { position: relative; display: block; font-family: var(--mono); font-size: .5rem; font-weight: 700;
+              letter-spacing: .02em; margin-top: 1px; }
 .gcell.sel { border-color: var(--ink); box-shadow: 0 0 0 2px var(--ink) inset; }
 .gcell.pt  { border: 2px solid var(--activation); }
 .gcell.pt .tag { color: var(--activation); }
@@ -692,7 +693,7 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
           el("div", { class: "tint", style: { opacity: String(alpha) } }),
           el("div", { class: "r" }, String(r)),
           el("div", { class: "c" }, c ? "t" + c.tp + " p" + c.pp + " d" + c.dp : "—"),
-          tag ? el("span", { class: "tag" }, tag) : (r === sel ? el("span", { class: "tag" }, "SELECTED") : null)
+          tag ? el("span", { class: "tag" }, tag) : (r === sel ? el("span", { class: "tag" }, "selected") : null)
         ]);
         grid.appendChild(cell);
       });
@@ -803,8 +804,8 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
     orthOut.appendChild(el("div", { class: "hint" },
       "Click any device. Cells are shaded by " + AXIS[S.by].label + " group index (also printed as " +
       S.by.charAt(0) + "N in every cell, because colour never carries meaning alone here). " +
-      "Ranks are laid out with " + S.order.map(function (a) { return AXIS[a].label; }).join(" innermost, then ") +
-      " outermost — section 3 is about why that order matters."));
+      "Ranks are laid out " + S.order.map(function (a) { return AXIS[a].label; }).join(" " + arrow + " ") +
+      ", innermost first — section 3 is about why that order matters."));
 
     const c = coordsOf(S.sel, S.order);
     orthOut.appendChild(NN.tiles([
