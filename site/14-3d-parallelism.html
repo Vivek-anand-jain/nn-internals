@@ -242,10 +242,19 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
     order: ["tp", "pp", "dp"],        // innermost first
     sel: 0, by: "tp",
     zero: 1, ckpt: true, flash: true, sp: true,
-    b: 1, micro: 8
+    b: 1, gbs: 32, micro: 8           // micro is DERIVED from gbs; see microOf()
   };
   const CANON = { world: 64, tp: 8, pp: 2, dp: 4, order: ["tp", "pp", "dp"],
-                  zero: 1, ckpt: true, flash: true, sp: true, b: 1, micro: 8 };
+                  zero: 1, ckpt: true, flash: true, sp: true, b: 1, gbs: 32, micro: 8 };
+
+  /* The global batch is the fixed quantity, not the micro-batch count: two
+     configurations are only comparable if they process the same number of
+     tokens per optimizer step. micro-batches per DP rank falls out of it.
+     It cannot go below 1, so a very wide DP group forces the effective
+     global batch up; the page says so when that happens. */
+  function microOf(c) { return Math.max(1, Math.round(c.gbs / (c.dp * c.b))); }
+  function effGbs(c) { return c.dp * microOf(c) * c.b; }
+  function fixMicro(c) { c.micro = microOf(c); return c; }
 
   const AXIS = {
     tp: { label: "TP", full: "tensor parallel", cls: "pt", tagcol: "var(--activation)",
@@ -330,7 +339,7 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
   function actCoef() { return ACT_FIXED + ACT_Q + ACT_KV * C.kvRatio + ACT_MLP * C.dffRatio; }
 
   function activations(cfg) {
-    const c = cfg || S;
+    const c = fixMicro(Object.assign({}, cfg || S));
     const coefFull = actCoef();
     const repl = Math.min(ACT_LIN_REPL, coefFull);
     const linCoef = c.sp ? coefFull / c.tp : repl + (coefFull - repl) / c.tp;
@@ -357,7 +366,7 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
   }
 
   function memory(cfg) {
-    const c = cfg || S;
+    const c = fixMicro(Object.assign({}, cfg || S));
     const shards = c.tp * c.pp;
     const Plocal = C.P / shards;
     const dW = zeroDiv("param", c), dG = zeroDiv("grad", c), dO = zeroDiv("opt", c);
@@ -377,7 +386,7 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
 
   /** Per-GPU bytes moved per optimizer step, by axis. */
   function volumes(cfg) {
-    const c = cfg || S;
+    const c = fixMicro(Object.assign({}, cfg || S));
     const a = activations(c);
     const bsdB = a.bsdBytes;                                   // one (b,s,d) tensor in bf16
     const arPerLayer = c.ckpt ? 6 : 4;                         // 2 fwd + 2 bwd (+2 on recompute)
@@ -402,7 +411,7 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
 
   /** First-order step time. Every assumption is printed on the page. */
   function timing(cfg, order) {
-    const c = cfg || S;
+    const c = fixMicro(Object.assign({}, cfg || S));
     const o = order || S.order;
     const v = volumes(c);
     const tokens = c.dp * c.micro * c.b * C.s;
@@ -419,7 +428,8 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
     const window = (c.zero === 3 ? 1.0 : 0.65) * tCompute;     // FSDP overlaps the whole step
     const tDP = Math.max(0, tDPraw - OVERLAP_EFF * window);
     const total = tCompute + tBubble + tTP + tPP + tDP;
-    return { v: v, pl: pl, tokens: tokens, tCompute: tCompute, bubble: bubble, tBubble: tBubble,
+    return { v: v, pl: pl, tokens: tokens, micro: c.micro, effGbs: effGbs(c),
+             tCompute: tCompute, bubble: bubble, tBubble: tBubble,
              tTP: tTP, tPP: tPP, tDPraw: tDPraw, tDP: tDP, window: window,
              commBound: tDPraw > OVERLAP_EFF * window, total: total,
              throughput: tokens / total };
@@ -1037,9 +1047,11 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
       }, "ZeRO shards along DP only; TP and PP have already cut the model itself");
     ctl.appendChild(p1);
     const p2 = el("div", { class: "panel" }, [el("h4", {}, "Activations")]);
-    fldSelect(p2, "micro-batch per device", "b", [1, 2, 4, 8, 16], null, "sequences per forward");
-    fldSelect(p2, "micro-batches per step", "micro", [1, 2, 4, 8, 16, 32, 64, 128], null,
-      "more micro-batches shrink the pipeline bubble and lengthen the step");
+    fldSelect(p2, "micro-batch per device", "b", [1, 2, 4, 8, 16], null,
+      "sequences of " + MDL.seq + " tokens per forward");
+    fldSelect(p2, "global batch (sequences / step)", "gbs", [8, 16, 32, 64, 128, 256, 512], null,
+      "the fixed quantity — micro-batches per DP rank falls out of it as gbs " + div +
+      " (DP " + x + " micro-batch), so two configurations are compared over the same tokens");
     fldCheck(p2, "activation checkpointing", "ckpt", "store the layer input, recompute the rest");
     fldCheck(p2, "FlashAttention", "flash", "never materialise the s" + x + "s score matrix");
     fldCheck(p2, "sequence parallelism", "sp", "shard the norms and dropouts TP leaves whole");
@@ -1171,10 +1183,20 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
       { k: "sent / GPU / step", v: fsize(t.v.tp + t.v.pp + t.v.dp), s: "TP " + fsize(t.v.tp) +
             " · PP " + fsize(t.v.pp) + " · DP " + fsize(t.v.dp) },
       { k: "pipeline bubble", v: S.pp > 1 ? NN.fmt(100 * t.bubble, 1) + "%" : "none",
-        s: S.pp > 1 ? P.strategies.pp.bubble_formula + " with " + S.micro + " micro-batches" : "PP = 1" },
+        s: S.pp > 1 ? P.strategies.pp.bubble_formula + " with " + t.micro + " micro-batches" : "PP = 1" },
       { k: "estimated step", v: secs(t.total), s: NN.count(Math.round(t.throughput)) + " tokens/s over " +
             S.world + " GPUs" }
     ]));
+    recipeOut.appendChild(el("div", { class: "hint" },
+      "Global batch " + t.effGbs + " sequences " + x + " " + MDL.seq + " tokens = " +
+      NN.count(t.tokens) + " tokens per optimizer step, as " + t.micro + " micro-batch" +
+      (t.micro === 1 ? "" : "es") + " of " + S.b + " per DP rank." +
+      (t.effGbs !== S.gbs
+        ? "  Note: you asked for " + S.gbs + " sequences, but DP = " + S.dp + " at micro-batch " + S.b +
+          " cannot go below one micro-batch per rank, so the effective global batch is " + t.effGbs +
+          ". Configurations at different effective batches are not directly comparable by step time — " +
+          "compare tokens/s."
+        : "")));
 
     /* the per-configuration verdict */
     const diag = [];
@@ -1200,10 +1222,14 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
       fsize(C.P * RECIPE.bytes_per_param) + " of model state — " +
       NN.fmt(m.modelState / m.cap, 1) + x + " a " + DEV.name + ". This is the page-08 result, unchanged.");
     if (!diag.length) diag.push(
-      "<b>Nothing is pathological.</b> TP is on NVLink, PP and DP tolerate the fabric, the bubble is " +
-      NN.fmt(100 * t.bubble, 1) + "%, and " + NN.gibytes(m.cap - m.total) + " of HBM is unused — " +
-      "which is capacity you would spend on a larger micro-batch or on checkpointing fewer layers, " +
-      "not capacity you would leave idle.");
+      "<b>Nothing is pathological.</b> " +
+      (S.tp > 1 ? "TP is on NVLink, " : "There is no TP traffic, ") +
+      (S.pp > 1 ? "PP costs " + secs(t.tPP) + " on the fabric, " : "there is no pipeline, ") +
+      (S.dp > 1 ? "the " + fsize(t.v.dp) + " of data-parallel traffic hides under the compute, " : "") +
+      "the bubble is " + NN.fmt(100 * t.bubble, 1) + "%, and " + NN.gibytes(m.cap - m.total) +
+      " of HBM is unused — which is capacity you would spend on a larger micro-batch or on " +
+      "checkpointing fewer layers, not capacity you would leave idle. " +
+      NN.fmt(100 * eff, 0) + "% of the estimated step is arithmetic.");
     recipeOut.appendChild(NN.callout(m.fits && diag.length === 1 && !t.commBound ? "key" : "warn",
       "Diagnosis of this configuration", diag.join("<br><br>")));
   }
@@ -1216,9 +1242,13 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
     const W = CANON.world;
     const full = C.P * RECIPE.bytes_per_param;
     const perLayerBytes = C.perLayer * RECIPE.bytes_per_param;
-    const FS = { tp: 1, pp: 1, dp: W, zero: 3, b: 1, micro: 8, ckpt: true, flash: true, sp: true };
+    const FS = { tp: 1, pp: 1, dp: W, zero: 3, b: 1, gbs: CANON.gbs, ckpt: true, flash: true, sp: true };
     const fsdp64 = memory(FS);
     const fsdpT  = timing(FS, ["dp", "tp", "pp"]);
+    /* ZeRO-3 moves the same bytes per GPU however many GPUs there are, while
+       compute per GPU falls as 1/W at a fixed global batch. Solve for the
+       world size at which the all-gather stops hiding under the compute. */
+    const fsdpCross = Math.round(W * OVERLAP_EFF * fsdpT.tCompute / fsdpT.tDPraw);
     const canon  = memory(Object.assign({}, CANON));
     const canonT = timing(Object.assign({}, CANON), CANON.order);
 
@@ -1250,15 +1280,22 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
       "% of the bill and stage 1 costs almost nothing extra), then 2, then 3. " +
       "<a href=\"11-zero-fsdp.html\">Page 11</a> is the ladder.");
 
-    item("Is the resulting communication still affordable?",
-      "This is the question people skip. ZeRO-3 on all " + W + " GPUs moves <b>" +
-      fsize(fsdpT.v.dp) + " per GPU per step</b> (" + fsdpT.v.dpWhat + "), and every byte of it crosses " +
-      "the fabric because a DP group that large cannot fit in a node: " + secs(fsdpT.tDPraw) +
-      " of wire time against " + secs(fsdpT.tCompute) + " of compute. Prefetch hides some of it, but you " +
-      "are running the interconnect at " + NN.fmt(100 * fsdpT.tDPraw / fsdpT.tCompute, 0) +
-      "% of the compute time and you have no margin. Introducing TP = " + HW.perNode +
-      " cuts the DP traffic to " + fsize(canonT.v.dp) + " by shrinking the shard each rank owns, " +
-      "and moves the new traffic onto NVLink. That, not memory, is why 70B jobs use TP.");
+    item("Is the resulting communication still affordable — and will it stay affordable?",
+      "This is the question people skip, and it is the one that decides whether you ever need TP. " +
+      "ZeRO-3 across all " + W + " GPUs moves <b>" + fsize(fsdpT.v.dp) + " per GPU per step</b> (" +
+      fsdpT.v.dpWhat + "), every byte of it across the fabric, because a DP group of " + W +
+      " cannot fit in an " + HW.perNode + "-GPU node. That is " + secs(fsdpT.tDPraw) +
+      " of wire time against " + secs(fsdpT.tCompute) + " of compute — <b>" +
+      NN.fmt(100 * fsdpT.tDPraw / fsdpT.tCompute, 0) + "%</b> — so at this scale prefetch really does " +
+      "hide it, and plain FSDP is a perfectly good answer for " + MDL.name + " on " + W + " GPUs. " +
+      "The trap is what happens next: that " + fsize(fsdpT.v.dp) + " <b>does not shrink when you add " +
+      "GPUs</b> — every rank all-gathers every layer no matter how many ranks there are — while compute " +
+      "per GPU falls as 1/W at a fixed global batch. The ratio therefore grows linearly with the world " +
+      "size, and the same job stops hiding its parameter traffic at around <b>" + fsdpCross +
+      " GPUs</b>. TP = " + HW.perNode + " attacks both ends at once: it cuts the DP traffic to " +
+      fsize(canonT.v.dp) + " by shrinking the shard each rank owns by " + (CANON.tp * CANON.pp) +
+      x + ", and the traffic it adds in exchange lands on NVLink. That, not memory, is why 70B jobs " +
+      "reach for TP.");
 
     item("Does one LAYER fit on one GPU?",
       "If a single layer's weights, gradients and optimizer state do not fit, no amount of DP-axis " +
@@ -1485,6 +1522,7 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
      RENDER + BOOT
      ====================================================================== */
   function render() {
+    S.micro = microOf(S);
     renderOrth();
     renderTopo();
     renderRecipe();

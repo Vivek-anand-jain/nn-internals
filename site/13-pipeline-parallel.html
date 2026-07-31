@@ -17,7 +17,11 @@
 .fld > label { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
                font-family: var(--mono); font-size: .74rem; color: var(--ink-2); margin-bottom: 3px; }
 .fld .rv { color: var(--ink); font-weight: 700; font-variant-numeric: tabular-nums; }
-.fld input[type="range"] { width: 100%; }
+.fld input[type="range"], .fld select { width: 100%; }
+.fld select {
+  background: var(--surface-3); color: var(--ink); border: 1px solid var(--hairline);
+  border-radius: 6px; padding: 5px 7px; font-family: var(--mono); font-size: .8rem;
+}
 .hint { font-size: .68rem; color: var(--ink-muted); font-family: var(--mono); line-height: 1.5; }
 
 .pipelegend { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin: 12px 0; }
@@ -658,16 +662,20 @@ table.data tr.hi { background: var(--surface-3); }
       "one has to drain."));
 
     host.appendChild(p(
-      "This chart is <code>strategies.pp.grid</code>, drawn directly. It is an all-forwards-" +
-      "then-all-backwards (GPipe) schedule: look at stage " + (WORLD - 1) +
+      "This chart is <code>strategies.pp.grid</code> = <code>strategies.pp.schedules.gpipe.grid</code>, " +
+      "drawn directly. " + SCHED.gpipe.what + " Look at stage " + (WORLD - 1) +
       " — it runs F0…F" + (NMICRO - 1) + " and only then B0…B" + (NMICRO - 1) +
-      ". Section 5 rearranges exactly those cells. The page also re-derives the grid from the " +
-      "dependency rules in the browser and checks it against the shipped one: <b>" +
-      (SIM_OK ? "the simulation reproduces strategies.pp.grid cell for cell"
-              : "MISMATCH — the in-page simulator disagrees with the shipped grid") +
-      "</b>, so every other chart below, which is simulated rather than shipped, is built on the " +
-      "same rules."
+      ". Section 5 rearranges exactly those cells."
     ));
+    host.appendChild(p(
+      "Everything below this section is <em>simulated</em> in the browser rather than shipped, " +
+      "because it depends on P and M and those are sliders. So the simulator is checked against " +
+      "both shipped schedules first — grid cell for cell, slot count, measured bubble, and " +
+      "per-stage peak activation counts: <b>" +
+      (ALL_OK ? "all checks pass" : "MISMATCH — see below, and do not trust the simulated charts") +
+      "</b>."
+    ));
+    host.appendChild(el("div", { class: "hint", html: checkLine() }));
 
     host.appendChild(NN.tiles([
       { k: "stages P", v: String(WORLD), s: "one layer each" },
@@ -820,6 +828,43 @@ table.data tr.hi { background: var(--surface-3); }
       "activations are released almost as soon as they are created, so a stage holds at most " +
       "about P of them instead of M."
     ));
+
+    /* ---- the two shipped schedules, at the toy config --------------- */
+    host.appendChild(h3("The two schedules as shipped, at P=" + WORLD + " / M=" + NMICRO));
+    host.appendChild(p(
+      "<code>strategies.pp.schedules</code> carries both grids with their statistics. Same " +
+      "model, same micro-batches, same arithmetic — the only difference is the order each stage " +
+      "runs its ops in."
+    ));
+    host.appendChild(pipeLegend());
+
+    const shipped = el("div", { class: "grid2" });
+    ["gpipe", "1f1b"].forEach(function (k) {
+      const s = SCHED[k], st = s.stats;
+      const box = el("div", {});
+      box.appendChild(el("h4", { class: "hint", style: { margin: "0 0 6px" } },
+        (k === "gpipe" ? "GPipe" : "1F1B") + " — " + s.what));
+      box.appendChild(NN.gpu.pipelineGrid(s.grid, { cell: cellPx(st.slots * 2) }));
+      box.appendChild(el("div", { class: "hint", html:
+        "<b>" + st.slots + "</b> slots · " + st.busy_cells + " busy of " + st.total_cells +
+        " GPU-slots · bubble <b>" + pct(st.bubble_measured) + "</b><br>" +
+        "peak live activation sets per stage: <b>[" + st.peak_live_per_stage.join(", ") +
+        "]</b> · " + s.peak_activations }));
+      shipped.appendChild(box);
+    });
+    host.appendChild(shipped);
+
+    host.appendChild(p(
+      "At M = P the totals are identical — both peak at " + SCHED.gpipe.stats.peak_live +
+      " live sets, because with only " + NMICRO + " micro-batches there is barely a steady state " +
+      "to interleave. The tell is already in the per-stage numbers: GPipe holds [" +
+      SCHED.gpipe.stats.peak_live_per_stage.join(", ") + "] while 1F1B holds [" +
+      SCHED["1f1b"].stats.peak_live_per_stage.join(", ") + "]. Under GPipe every stage carries " +
+      "the full load; under 1F1B only stage 0 does, and the load falls off linearly down the " +
+      "pipe. Raise M past P and that difference becomes the whole story."
+    ));
+
+    host.appendChild(h3("Past M > P, where it matters"));
 
     const ctl = el("div", { class: "ctlgrid" });
     const side = el("div", { class: "grid2" });
@@ -1100,6 +1145,96 @@ table.data tr.hi { background: var(--surface-3); }
       NN.fmt(tpFwdBytes / ppFwdBytes, 0) + "× more, all of it synchronous. " +
       "That ratio is why the two are composed rather than chosen between: TP inside the node " +
       "where the link is fast, PP across nodes where it is not. Page 14 puts them together."));
+
+    /* ---- and on real links ----------------------------------------- */
+    const IC = PAR.interconnects;
+    const intra = IC.links.filter(function (l) { return l.scope === "intra-node"; });
+    const inter = IC.links.filter(function (l) { return l.scope === "inter-node"; });
+
+    host.appendChild(h3("What that costs on real links"));
+    host.appendChild(p(
+      "<code>PARALLEL.interconnects</code> (" + IC._source + "). Two things about this table " +
+      "are easy to get wrong, and both change the answer by a factor of two or eight. " +
+      "<b>NVLink is quoted bidirectionally</b> — an H100's 900 GB/s is 450 GB/s in each " +
+      "direction — and a ring all-reduce's cost model counts bytes in <em>one</em> direction, so " +
+      "the per-direction column is the one to divide by. <b>Network links are quoted in " +
+      "gigabits</b>: 400 Gb/s is 50 GB/s, before any protocol overhead. Getting either of those " +
+      "backwards makes inter-node fabric look twice or eight times better than it is."
+    ));
+
+    const ictbl = el("table", { class: "data" });
+    ictbl.innerHTML =
+      "<thead><tr><th>link</th><th>scope</th><th>bidirectional GB/s</th>" +
+      "<th>per direction GB/s</th><th class='wrap'>note</th></tr></thead><tbody>" +
+      IC.links.map(function (l) {
+        return "<tr><td>" + l.name + "</td><td>" + l.scope + "</td>" +
+          "<td class='n'>" + l.bidir_GBps + "</td><td class='n'>" + l.per_dir_GBps + "</td>" +
+          "<td class='wrap'>" + (l.note || "") + "</td></tr>";
+      }).join("") + "</tbody></table>";
+    host.appendChild(ictbl);
+
+    const pick = el("div", { class: "ctlgrid" });
+    const selIntra = el("select");
+    const selInter = el("select");
+    intra.forEach(function (l, i) {
+      selIntra.appendChild(el("option", { value: String(i) }, l.name)); });
+    inter.forEach(function (l, i) {
+      selInter.appendChild(el("option", { value: String(i) }, l.name)); });
+    selIntra.value = String(Math.max(0, intra.findIndex(function (l) {
+      return /NVLink 4/.test(l.name); })));
+    selInter.value = String(Math.max(0, inter.findIndex(function (l) {
+      return /NDR/.test(l.name); })));
+    pick.appendChild(el("div", { class: "panel" }, [
+      el("h4", {}, "intra-node link (where TP lives)"),
+      el("div", { class: "fld" }, [selIntra])
+    ]));
+    pick.appendChild(el("div", { class: "panel" }, [
+      el("h4", {}, "inter-node link (where PP lives)"),
+      el("div", { class: "fld" }, [selInter])
+    ]));
+    host.appendChild(pick);
+
+    const budget = el("table", { class: "arith" });
+    host.appendChild(budget);
+    const ms = function (bytes, gbps) { return NN.fmt(bytes / (gbps * 1e9) * 1000, 2) + " ms"; };
+
+    function redrawBudget() {
+      const a = intra[+selIntra.value], b = inter[+selInter.value];
+      budget.innerHTML =
+        "<tr><td class='term'>TP=" + TP_DEG + " all-reduce traffic, one GPU, one forward pass</td>" +
+        "<td class='r'>" + NN.bytes(tpFwdBytes) + "</td>" +
+        "<td class='r'>on " + a.name + " (" + a.per_dir_GBps + " GB/s/dir)</td>" +
+        "<td class='r'>" + ms(tpFwdBytes, a.per_dir_GBps) + "</td></tr>" +
+        "<tr><td class='term'>…the same traffic, if you tried to run TP across nodes</td>" +
+        "<td class='r'>" + NN.bytes(tpFwdBytes) + "</td>" +
+        "<td class='r'>on " + b.name + " (" + b.per_dir_GBps + " GB/s/dir)</td>" +
+        "<td class='r'>" + ms(tpFwdBytes, b.per_dir_GBps) + "</td></tr>" +
+        "<tr><td class='term'>PP=" + PP_DEG + " boundary send, one micro-batch, one hop</td>" +
+        "<td class='r'>" + NN.bytes(actBytes) + "</td>" +
+        "<td class='r'>on " + b.name + " (" + b.per_dir_GBps + " GB/s/dir)</td>" +
+        "<td class='r'>" + ms(actBytes, b.per_dir_GBps) + "</td></tr>" +
+        "<tr class='sum'><td class='term'>PP=" + PP_DEG + " traffic, whole forward, all " +
+        (PP_DEG - 1) + " boundaries</td>" +
+        "<td class='r'>" + NN.bytes(ppFwdBytes) + "</td>" +
+        "<td class='r'>on " + b.name + "</td>" +
+        "<td class='r'>" + ms(ppFwdBytes, b.per_dir_GBps) + "</td></tr>";
+    }
+    selIntra.addEventListener("change", redrawBudget);
+    selInter.addEventListener("change", redrawBudget);
+    redrawBudget();
+
+    host.appendChild(el("div", { class: "hint" },
+      "Bandwidth only: no latency term, no protocol overhead, and the ring all-reduce cost " +
+      "model 2(N−1)/N. Real numbers are worse. The ratios are the point, not the absolute times."));
+
+    host.appendChild(NN.callout("why", "WHY THE MAPPING IS NOT A CHOICE",
+      IC.why_it_matters + " Read the table above with that in mind: TP's traffic is not just " +
+      "larger, it is <em>synchronous</em> — the block cannot proceed until the all-reduce lands, " +
+      "so its time adds directly to the step. PP's boundary send is small enough to finish " +
+      "inside the slot, and while it is in flight the stage is already computing the next " +
+      "micro-batch, so on a healthy pipeline it costs approximately nothing. That is why a slow " +
+      "link is survivable for PP and disqualifying for TP, and why page 14 does not pick one — " +
+      "it maps TP onto the fast dimension and PP onto the slow one."));
   })();
 
   /* ==================================================================== */
@@ -1115,7 +1250,7 @@ table.data tr.hi { background: var(--surface-3); }
       "actually owns:"
     ));
 
-    const params = pp.stages.map(function (s) { return s.params; });
+    const params = pp.params_per_stage;
     const maxP = Math.max.apply(null, params);
     const sumP = params.reduce(function (a, b) { return a + b; }, 0);
     const meanP = sumP / params.length;
@@ -1148,8 +1283,10 @@ table.data tr.hi { background: var(--surface-3); }
       maxP + ", a factor of " + NN.fmt(maxP / Math.min.apply(null, params), 1) +
       ". A pipeline runs at the pace of its slowest stage, so the light stages simply wait " +
       "longer — that idle time is on top of the bubble, and no amount of micro-batching removes " +
-      "it. Note that <code>strategies.pp.memory_per_gpu.weights</code> reports " +
-      pp.memory_per_gpu.weights + ", the average; the average is exactly the number that hides " +
+      "it. The per-stage counts are <code>strategies.pp.params_per_stage</code> = [" +
+      params.join(", ") + "]; <code>memory_per_gpu.weights</code> reports " +
+      pp.memory_per_gpu.weights + " and ships its own warning: <em>" +
+      pp.memory_per_gpu.caveat + "</em> An average is exactly the summary statistic that hides " +
       "this problem."
     ));
     host.appendChild(p(
@@ -1177,13 +1314,25 @@ table.data tr.hi { background: var(--surface-3); }
     host.appendChild(h3("What it does not change"));
     host.appendChild(NN.callout("why", "PP IS A SCHEDULE, NOT A DIFFERENT MODEL",
       "<code>strategies.pp.verify</code>: " + pp.verify.claim +
-      " Forward maximum absolute error against the single-GPU run: <b>" +
-      NN.fmt(pp.verify.forward_max_err, 1) + "</b> — " +
-      (pp.verify.passed ? "passed" : "FAILED") + ". " +
+      " The check splits the batch into " + pp.verify.n_micro_batches +
+      " micro-batches, accumulates the gradients, and compares against the full-batch run. " +
+      "Forward maximum absolute error <b>" + NN.fmt(pp.verify.forward_max_err, 1) +
+      "</b>; gradient maximum absolute error <b>" + NN.fmt(pp.verify.grad_max_err, 1) +
+      "</b> — " + (pp.verify.passed ? "passed" : "FAILED") + ". " +
       "Unlike data parallelism, nothing is summed across ranks; unlike tensor parallelism, no " +
-      "partial result is reconciled. Layer g's arithmetic is bit-for-bit the arithmetic it " +
-      "would have done on one GPU. Every problem on this page is a problem about <em>when</em>, " +
-      "and none of them is a problem about <em>what</em>."));
+      "partial result is reconciled. Layer g's arithmetic is the arithmetic it would have done " +
+      "on one GPU. Every problem on this page is a problem about <em>when</em>, and none of them " +
+      "is a problem about <em>what</em>."));
+
+    host.appendChild(NN.callout("key", "THE SAME CHECK PROVES GRADIENT ACCUMULATION",
+      pp.verify.note + " That is worth stating on its own, because it is the same manoeuvre used " +
+      "outside pipelining entirely: running " + pp.verify.n_micro_batches +
+      " micro-batches and summing their gradients before one optimizer step is arithmetically " +
+      "the same as running the whole batch at once — to " +
+      NN.fmt(pp.verify.grad_max_err, 1) + " here, which is floating-point reassociation noise " +
+      "and nothing else. Micro-batching is not an approximation you accept for the sake of the " +
+      "pipeline. It is exact, and it is why you can decouple the batch size the optimizer sees " +
+      "from the batch size that has to fit in memory."));
 
     host.appendChild(el("div", { class: "hint" },
       "Numbers on this page come from " + PAR.meta.generated_by + " via " +

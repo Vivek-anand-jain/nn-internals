@@ -309,9 +309,18 @@ def run_data_parallel(base):
         yhat_g, cache_g = forward(Ws, bs, Xg)
         Lg, dYg, _ = loss_and_grad_out(yhat_g, Yg)
         dWg, dbg = backward(Ws, bs, cache_g, dYg)
+        # Per-GPU ReLU masks. These differ between GPUs because the samples
+        # differ, which is the concrete reason the per-GPU gradients differ
+        # -- some hidden units are dead for one sample and alive for another.
+        masks = [relu_mask(cache_g["pre"][L]) for L in range(N_LAYERS - 1)]
+        live = [int(sum(flat(m))) for m in masks]
         local.append({"gpu": g, "samples": list(range(g * per, (g + 1) * per)),
                       "loss": Lg, "yhat": yhat_g,
-                      "dWs": dWg, "dbs": dbg})
+                      "dWs": dWg, "dbs": dbg,
+                      "relu_masks": masks,
+                      "live_units_per_layer": live,
+                      "activation_elements": sum(len(flat(a))
+                                                 for a in cache_g["acts"])})
         shards.append({"gpu": g,
                        "holds": ["ALL weights (replicated)",
                                  "ALL optimizer state (replicated)",
@@ -874,6 +883,7 @@ def build():
             "dims": DIMS, "n_layers": N_LAYERS, "world": WORLD,
             "batch": BATCH, "n_params": n_params,
             "features": FEATURES,
+            "lr": 0.1,
             "note": "Every strategy divides evenly by 4 here so the "
                     "arithmetic stays legible. Real models are not this tidy.",
         },
@@ -932,6 +942,34 @@ def build():
                               "parallelism, which sends one tensor per stage "
                               "boundary, is what crosses between them.",
         },
+        # ------------------------------------------------------------------
+        # A SHARED cost model, so pages 09-14 all price communication the
+        # same way instead of each inventing one. It is deliberately simple
+        # and every assumption is stated, because the point is to show the
+        # SHAPE of the tradeoffs, not to predict a real run.
+        # ------------------------------------------------------------------
+        "cost_model": {
+            "_status": "MODEL, NOT MEASUREMENT. Every page using this must "
+                       "say so.",
+            "time_bytes": "bytes_sent_per_gpu / achieved_bandwidth",
+            "achieved_fraction": 0.8,
+            "achieved_note": "Real collectives reach roughly 70-85% of "
+                             "nominal link bandwidth. 0.8 is a round "
+                             "placeholder, not a measurement.",
+            "latency_us": {"intra_node": 3, "inter_node": 8,
+                           "note": "per collective, approximate; latency "
+                                   "dominates for small payloads, which is "
+                                   "why gradients are bucketed"},
+            "ignores": [
+                "kernel launch overhead",
+                "topology detail (rails, switches, oversubscription)",
+                "in-network reduction (NVLS / SHARP), which beats the ring "
+                "bound and would make these figures pessimistic",
+                "contention with other traffic",
+                "the difference between algorithmic and achieved bandwidth "
+                "at small message sizes",
+            ],
+        },
         "ring": {
             "explanation": "In a ring all-reduce each GPU sends to its right "
                            "neighbour and receives from its left, N-1 times "
@@ -942,7 +980,7 @@ def build():
             "table": [{"world": n,
                        "all_reduce": round(2 * (n - 1) / n, 4),
                        "all_gather": round((n - 1) / n, 4)}
-                      for n in [2, 4, 8, 16, 32, 64, 128, 256]],
+                      for n in [1, 2, 4, 8, 16, 32, 64, 128, 256]],
         },
     }
 

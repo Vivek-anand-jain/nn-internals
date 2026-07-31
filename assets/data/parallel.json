@@ -19,6 +19,7 @@
    "age",
    "distance"
   ],
+  "lr": 0.1,
   "note": "Every strategy divides evenly by 4 here so the arithmetic stays legible. Real models are not this tidy."
  },
  "model": {
@@ -1018,7 +1019,51 @@
       [
        -1.711121875
       ]
-     ]
+     ],
+     "relu_masks": [
+      [
+       [
+        1.0,
+        0.0,
+        1.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        1.0
+       ]
+      ],
+      [
+       [
+        1.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0
+       ]
+      ],
+      [
+       [
+        1.0,
+        1.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        1.0,
+        1.0
+       ]
+      ]
+     ],
+     "live_units_per_layer": [
+      5,
+      4,
+      6
+     ],
+     "activation_elements": 29
     },
     {
      "gpu": 1,
@@ -1293,7 +1338,51 @@
       [
        -1.03825
       ]
-     ]
+     ],
+     "relu_masks": [
+      [
+       [
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        1.0
+       ]
+      ],
+      [
+       [
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0
+       ]
+      ],
+      [
+       [
+        1.0,
+        1.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        1.0,
+        1.0
+       ]
+      ]
+     ],
+     "live_units_per_layer": [
+      4,
+      4,
+      6
+     ],
+     "activation_elements": 29
     },
     {
      "gpu": 2,
@@ -1568,7 +1657,51 @@
       [
        -2.87945
       ]
-     ]
+     ],
+     "relu_masks": [
+      [
+       [
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        1.0
+       ]
+      ],
+      [
+       [
+        1.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0
+       ]
+      ],
+      [
+       [
+        1.0,
+        1.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        1.0,
+        1.0
+       ]
+      ]
+     ],
+     "live_units_per_layer": [
+      3,
+      4,
+      6
+     ],
+     "activation_elements": 29
     },
     {
      "gpu": 3,
@@ -1843,7 +1976,51 @@
       [
        -1.360975
       ]
-     ]
+     ],
+     "relu_masks": [
+      [
+       [
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        1.0
+       ]
+      ],
+      [
+       [
+        1.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0
+       ]
+      ],
+      [
+       [
+        1.0,
+        1.0,
+        0.0,
+        1.0,
+        1.0,
+        0.0,
+        1.0,
+        1.0
+       ]
+      ]
+     ],
+     "live_units_per_layer": [
+      3,
+      4,
+      6
+     ],
+     "activation_elements": 29
     }
    ],
    "verify": {
@@ -3213,9 +3390,32 @@
   ],
   "why_it_matters": "Intra-node links are roughly an order of magnitude faster than inter-node ones. That single ratio is what decides the topology mapping: tensor parallelism, whose collectives sit on the critical path and cannot be overlapped, is kept inside a node; pipeline parallelism, which sends one tensor per stage boundary, is what crosses between them."
  },
+ "cost_model": {
+  "_status": "MODEL, NOT MEASUREMENT. Every page using this must say so.",
+  "time_bytes": "bytes_sent_per_gpu / achieved_bandwidth",
+  "achieved_fraction": 0.8,
+  "achieved_note": "Real collectives reach roughly 70-85% of nominal link bandwidth. 0.8 is a round placeholder, not a measurement.",
+  "latency_us": {
+   "intra_node": 3,
+   "inter_node": 8,
+   "note": "per collective, approximate; latency dominates for small payloads, which is why gradients are bucketed"
+  },
+  "ignores": [
+   "kernel launch overhead",
+   "topology detail (rails, switches, oversubscription)",
+   "in-network reduction (NVLS / SHARP), which beats the ring bound and would make these figures pessimistic",
+   "contention with other traffic",
+   "the difference between algorithmic and achieved bandwidth at small message sizes"
+  ]
+ },
  "ring": {
   "explanation": "In a ring all-reduce each GPU sends to its right neighbour and receives from its left, N-1 times to reduce and N-1 times to broadcast. Each pass moves 1/N of the buffer, so the total sent per GPU is 2(N-1)/N * S -- independent of N as N grows, which is why ring all-reduce scales.",
   "table": [
+   {
+    "world": 1,
+    "all_reduce": 0.0,
+    "all_gather": 0.0
+   },
    {
     "world": 2,
     "all_reduce": 1.0,

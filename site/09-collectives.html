@@ -639,9 +639,11 @@ table.duality td .opn { font-family: var(--mono); font-weight: 700; }
         r.setAttribute("stroke-opacity", c.ghost ? 0.25 : STROKEOP[c.letter % STROKEOP.length]);
         r.setAttribute("stroke-width", full && !c.ghost ? 2.2 : 1);
         r.setAttribute("stroke-dasharray", c.ghost ? "3 3" : "none");
+        /* the label carries the identity, so it uses plain ink rather than
+           the op hue: saturated-on-saturated is unreadable in light mode. */
         t.textContent = ctext(c);
-        t.setAttribute("fill", col);
-        t.setAttribute("opacity", c.ghost ? 0.3 : 1);
+        t.setAttribute("fill", c.ghost ? "var(--ink-muted)" : "var(--ink)");
+        t.setAttribute("opacity", c.ghost ? 0.55 : 1);
       }
     }
 
@@ -811,8 +813,14 @@ table.duality td .opn { font-family: var(--mono); font-weight: 700; }
       const cells = [];
       for (let s = 0; s < N; s++) {
         const c = state[g][s];
-        if (!c || c.ghost) {
+        if (!c) {
           cells.push(el("div", { class: "bacell void", title: "slot " + L[s] + ": empty" }, "—"));
+        } else if (c.ghost) {
+          cells.push(el("div", {
+            class: "bacell void",
+            title: "slot " + L[s] + " still physically holds " + ctext(c) +
+                   ", but that value has been handed off and no longer matters"
+          }, ctext(c)));
         } else {
           const txt = ctext(c);
           cells.push(el("div", {
@@ -1053,7 +1061,9 @@ table.duality td .opn { font-family: var(--mono); font-weight: 700; }
       "Notation: <code>" + L[0] + "2</code> is chunk-slot " + L[0] + " as it started life on GPU 2. " +
       "<code>" + L[0] + "0+" + L[0] + "1+" + L[0] + "2+" + L[0] +
       "3</code> is that slot after an elementwise sum across all " + N + " ranks. A faded, dashed " +
-      "block is data this GPU has handed off and will not use again." }));
+      "block is data this GPU has handed off: the memory still physically holds it — MPI does " +
+      "not scribble on your send buffer — but the value is stale and nothing downstream reads it " +
+      "again. An empty dashed block with a dash in it is genuinely unallocated." }));
 
     OPS.forEach(function (o) { host.appendChild(opCard(o, SPEC[o]())); });
 
