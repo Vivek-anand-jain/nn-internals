@@ -869,13 +869,32 @@ def build():
                  "n_layers": 126, "n_heads": 128, "n_kv_heads": 8,
                  "seq": 8192, "vocab": 128256, "d_ff": 53248},
             ],
+            # bf16_dense_tflops is the DENSE rate. Vendors headline the
+            # 2:4-structured-sparsity number, which is double and does not
+            # apply to ordinary training -- quoting it silently overstates
+            # throughput by 2x. hbm_bytes is exact (GiB), not the marketing
+            # round number: an "80GB" H100 holds 80 GiB = 85.9 GB.
             "gpus": [
-                {"name": "A100 40GB", "hbm_bytes": 40 * 1024**3},
-                {"name": "A100 80GB", "hbm_bytes": 80 * 1024**3},
-                {"name": "H100 80GB", "hbm_bytes": 80 * 1024**3},
-                {"name": "H200 141GB", "hbm_bytes": 141 * 1024**3},
-                {"name": "B200 192GB", "hbm_bytes": 192 * 1024**3},
+                {"name": "A100 40GB", "hbm_bytes": 40 * 1024**3,
+                 "bf16_dense_tflops": 312, "hbm_bw_bytes_per_s": 1555e9,
+                 "nvlink_gen": 3},
+                {"name": "A100 80GB", "hbm_bytes": 80 * 1024**3,
+                 "bf16_dense_tflops": 312, "hbm_bw_bytes_per_s": 2039e9,
+                 "nvlink_gen": 3},
+                {"name": "H100 80GB", "hbm_bytes": 80 * 1024**3,
+                 "bf16_dense_tflops": 495, "hbm_bw_bytes_per_s": 3350e9,
+                 "nvlink_gen": 4},
+                {"name": "H200 141GB", "hbm_bytes": 141 * 1024**3,
+                 "bf16_dense_tflops": 495, "hbm_bw_bytes_per_s": 4800e9,
+                 "nvlink_gen": 4},
+                {"name": "B200 192GB", "hbm_bytes": 192 * 1024**3,
+                 "bf16_dense_tflops": 2250, "hbm_bw_bytes_per_s": 8000e9,
+                 "nvlink_gen": 5},
             ],
+            "mfu_note": "Real training reaches roughly 35-50% of the dense "
+                        "peak (model FLOPs utilisation). Anything above ~55% "
+                        "for a large transformer should be treated as "
+                        "suspicious. Use a stated MFU rather than peak.",
             "default_model": "Llama 3 70B",
             "default_gpu": "H100 80GB",
         },

@@ -6112,25 +6112,41 @@ window.TRACE = {
   "gpus": [
    {
     "name": "A100 40GB",
-    "hbm_bytes": 42949672960
+    "hbm_bytes": 42949672960,
+    "bf16_dense_tflops": 312,
+    "hbm_bw_bytes_per_s": 1555000000000.0,
+    "nvlink_gen": 3
    },
    {
     "name": "A100 80GB",
-    "hbm_bytes": 85899345920
+    "hbm_bytes": 85899345920,
+    "bf16_dense_tflops": 312,
+    "hbm_bw_bytes_per_s": 2039000000000.0,
+    "nvlink_gen": 3
    },
    {
     "name": "H100 80GB",
-    "hbm_bytes": 85899345920
+    "hbm_bytes": 85899345920,
+    "bf16_dense_tflops": 495,
+    "hbm_bw_bytes_per_s": 3350000000000.0,
+    "nvlink_gen": 4
    },
    {
     "name": "H200 141GB",
-    "hbm_bytes": 151397597184
+    "hbm_bytes": 151397597184,
+    "bf16_dense_tflops": 495,
+    "hbm_bw_bytes_per_s": 4800000000000.0,
+    "nvlink_gen": 4
    },
    {
     "name": "B200 192GB",
-    "hbm_bytes": 206158430208
+    "hbm_bytes": 206158430208,
+    "bf16_dense_tflops": 2250,
+    "hbm_bw_bytes_per_s": 8000000000000.0,
+    "nvlink_gen": 5
    }
   ],
+  "mfu_note": "Real training reaches roughly 35-50% of the dense peak (model FLOPs utilisation). Anything above ~55% for a large transformer should be treated as suspicious. Use a stated MFU rather than peak.",
   "default_model": "Llama 3 70B",
   "default_gpu": "H100 80GB"
  }
