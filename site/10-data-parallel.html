@@ -166,9 +166,37 @@ table.data tr.hi { background: var(--surface-3); }
   const NPAR   = M.n_params;
   const NL     = M.n_layers;
   const PERGPU = BATCH / WORLD;
-  const LR     = T.meta.hyperparams.lr;
+  const LR     = M.lr;                       // PARALLEL.meta.lr — the distributed run's own lr
   const ALL_RANKS = [];
   for (let g = 0; g < WORLD; g++) ALL_RANKS.push(g);
+
+  /* ---- the shared cost model and the canonical ring factor -------------
+     PARALLEL.cost_model is the one cost model pages 10, 12 and 14 use, so
+     they price communication identically. PARALLEL.collectives carries the
+     ring factor as a number per world size; this page keeps its own
+     2(N-1)/N recomputation next to it so any drift is visible on screen. */
+  const COST    = P.cost_model;
+  const ALLRED  = P.collectives.find(function (c) { return c.op === "all_reduce"; });
+  const AR_DATA = ALLRED.ring_factor_at_world[String(WORLD)];   // canonical, from the data
+  const AR_JS   = 2 * (WORLD - 1) / WORLD;                      // this page's own arithmetic
+  const AR_DRIFT = Math.abs(AR_DATA - AR_JS);
+
+  /** The cost model's own status line, plus the list of what it ignores.
+      Rendered rather than paraphrased, wherever this page prices a wire. */
+  function costModelNote(lead) {
+    return el("div", { class: "small muted", style: { marginTop: "8px" } }, [
+      el("div", { html: (lead ? lead + " " : "") +
+        "<b>" + COST._status + "</b>" }),
+      el("div", { style: { marginTop: "4px" },
+        html: "<code>PARALLEL.cost_model</code>: time = " + COST.time_bytes + ", at " +
+          fmt(COST.achieved_fraction * 100, 0) + "% of nominal bandwidth (" +
+          COST.achieved_note + ") plus " + COST.latency_us.intra_node + " µs intra-node / " +
+          COST.latency_us.inter_node + " µs inter-node per collective — " +
+          COST.latency_us.note + ". It ignores:" }),
+      el("ul", { style: { margin: "4px 0 0", paddingLeft: "18px" } },
+        COST.ignores.map(function (s) { return el("li", {}, s); }))
+    ]);
+  }
 
   /* =====================================================================
      PARAMETER REGISTRY
@@ -200,6 +228,50 @@ table.data tr.hi { background: var(--surface-3); }
     for (let g = 0; g < WORLD; g++) s += gLocal(e, g);
     return s / WORLD;
   };
+
+  /* ---- which ReLU units survived, per rank ---------------------------
+     PARALLEL.strategies.ddp.local[g] records relu_masks and
+     live_units_per_layer, so the dead unit no longer has to be inferred
+     from zeros in the gradient — it can be read off directly. */
+  const HAS_MASKS = !!(D.local[0] && D.local[0].relu_masks);
+  /** true/false per rank: was the unit this parameter feeds alive there? */
+  function liveOf(e) {
+    if (!HAS_MASKS || e.L >= D.local[0].relu_masks.length) return null;
+    return ALL_RANKS.map(function (g) {
+      return D.local[g].relu_masks[e.L][0][e.i] !== 0;
+    });
+  }
+  /** per-rank live-unit census for the layer the focused parameter sits in */
+  function maskTable() {
+    if (!HAS_MASKS) return el("div");
+    const L = Math.min(focus.L, D.local[0].relu_masks.length - 1);
+    const width = D.local[0].relu_masks[L][0].length;
+    const t = el("table", { class: "arith" });
+    t.appendChild(el("tr", {}, [
+      el("td", { class: "term" }, "layer " + (L + 1) + " ReLU"),
+      el("td", { class: "term" }, "units 0…" + (width - 1) + "  (■ alive · □ dead)"),
+      el("td", { class: "term r" }, "live")
+    ]));
+    ALL_RANKS.forEach(function (g) {
+      const m = D.local[g].relu_masks[L][0];
+      const cells = m.map(function (v, i) {
+        return el("span", {
+          style: { color: v ? "var(--activation)" : "var(--ink-muted)",
+                   fontWeight: (focus.L === L && focus.i === i) ? "800" : "400" },
+          title: "unit " + i + (v ? " alive" : " dead") + " on GPU " + g
+        }, (v ? "■" : "□") + " ");
+      });
+      t.appendChild(el("tr", g === WORLD - 1 ? {} : {}, [
+        el("td", { class: "term" }, "GPU " + g + " · sample " + D.local[g].samples.join(",")),
+        el("td", {}, cells),
+        el("td", { class: "r" }, String(D.local[g].live_units_per_layer[L]) + " / " + width)
+      ]));
+    });
+    return el("div", {}, [t, el("div", { class: "small muted", style: { marginTop: "6px" },
+      html: "From <code>relu_masks</code> and <code>live_units_per_layer</code>. Each rank sees " +
+        "one sample, so each rank kills a different set of units — the mask is a property of the " +
+        "data, not of the weights, and the weights are identical everywhere." })]);
+  }
 
   /* ---- run the proof over EVERY parameter, here, in the browser ------- */
   let maxErr = 0, worstKey = null, nSparse = 0, nDiffer = 0;
@@ -586,6 +658,7 @@ table.data tr.hi { background: var(--surface-3); }
           "</code> on all " + WORLD + " ranks at once:" }));
         focusPanel.appendChild(gbars(vals, mean, { mean: false }));
         const spread = Math.max.apply(null, vals) - Math.min.apply(null, vals);
+        const live = liveOf(focus);
         focusPanel.appendChild(el("p", { class: "small", html:
           "Spread across ranks: <b>" + fmt(spread, 6) + "</b>" +
           (vals.some(function (v) { return v === 0; })
@@ -597,6 +670,25 @@ table.data tr.hi { background: var(--surface-3); }
           "</b> parameters get a different gradient on at least two ranks, and <b>" +
           NN.count(nSparse) + "</b> have at least one rank reporting a hard zero for a " +
           "parameter whose full-batch gradient is nonzero." }));
+
+        /* which units actually died, per rank — read, not inferred */
+        if (live) {
+          const deadRanks = ALL_RANKS.filter(function (g) { return !live[g]; });
+          focusPanel.appendChild(el("p", { class: "small", html:
+            "The zeros are not a coincidence and you do not have to infer them from the " +
+            "gradient: <code>PARALLEL.strategies.ddp.local[g].relu_masks</code> records which " +
+            "units survived the ReLU on each rank. Hidden unit <b>" + focus.i +
+            "</b> of layer " + (focus.L + 1) + " is <b>" +
+            (deadRanks.length ? "dead on " + deadRanks.length + " of " + WORLD + " ranks (" +
+              deadRanks.map(function (g) { return "GPU " + g; }).join(", ") + ")"
+              : "alive on all " + WORLD + " ranks") + "</b>" +
+            (deadRanks.length
+              ? " — and those are exactly the ranks reporting 0 above. A dead unit contributes " +
+                "nothing to ∂L/∂" + focus.key + " on the rank where it died, so that rank's " +
+                "gradient row is structurally zero rather than numerically small."
+              : ", so every rank has something to say about it.") }));
+        }
+        focusPanel.appendChild(maskTable());
         focusPanel.appendChild(NN.callout("warn", "IF YOU STOPPED HERE, THE REPLICAS WOULD DIVERGE",
           "Four different gradients applied to four identical weight copies gives four different " +
           "weight copies. One step later they are computing different forward passes, and the " +
@@ -814,7 +906,9 @@ table.data tr.hi { background: var(--surface-3); }
     /* reversed layer order: backward produces the last layer's gradients first */
     const revL = [];
     for (let L = NL - 1; L >= 0; L--) revL.push(L);
-    const arFactor = 2 * (WORLD - 1) / WORLD;     // ring all-reduce, elements sent per GPU
+    /* elements sent per GPU by a ring all-reduce, taken from the data
+       (PARALLEL.collectives), not recomputed here — see the cross-check below */
+    const arFactor = AR_DATA;
 
     host.appendChild(el("p", { html:
       "Everything above treated the all-reduce as one blocking event after backward. Real DDP does " +
@@ -971,10 +1065,17 @@ table.data tr.hi { background: var(--surface-3); }
       tlHost.appendChild(el("div", { class: "small muted", html:
         "Cost model, stated so you can argue with it: backward costs 1 time unit per parameter " +
         "whose gradient it produces (a stand-in for the layer's FLOPs); a bucket's all-reduce " +
-        "sends 2(N−1)/N × size = " + fmt(arFactor, 2) + " × size elements per GPU at " +
-        fmt(state.link, 1) + " elems/unit, plus " + fmt(state.lat, 0) +
-        " units of fixed latency per message; the comm stream is serialised. Real runs have " +
-        "several streams, kernel launch overhead and a non-linear bandwidth curve." }));
+        "sends <code>" + ALLRED.ring_factor + "</code> = " + fmt(arFactor, 2) +
+        " × size elements per GPU at " + fmt(state.link, 1) + " elems/unit, plus " +
+        fmt(state.lat, 0) + " units of fixed latency per message; the comm stream is serialised. " +
+        "The ring factor is <code>PARALLEL.collectives[all_reduce].ring_factor_at_world[" + WORLD +
+        "]</code> = " + fmt(AR_DATA, 4) + "; this page's own 2(N−1)/N gives " + fmt(AR_JS, 4) +
+        " — the two agree to " + (AR_DRIFT === 0 ? "the bit" : AR_DRIFT.toExponential(1)) +
+        ". The link speed and latency here are in abstract time units, not GB/s: the shape of " +
+        "the tradeoff is the point, and the real bandwidths live on " +
+        "<a href='12-tensor-parallel.html#cost'>page 12</a> and " +
+        "<a href='14-3d-parallelism.html#topo'>page 14</a>." }));
+      tlHost.appendChild(costModelNote("The shared model those pages price with:"));
 
       /* the tradeoff narrative, derived from the current sim */
       const nb = cur.buckets.length;
@@ -1037,7 +1138,11 @@ table.data tr.hi { background: var(--surface-3); }
     const host = NN.$("#memBody");
     const mem  = D.memory_per_gpu;
     const actsOne = P.model.activation_elements;
-    const actsDdp = actsOne / mem.activations_divisor;
+    /* Not divided by hand: each rank records the activation elements it
+       actually holds. They sum back to the single-GPU figure. */
+    const actsDdp = D.local[0].activation_elements;
+    const actsSum = ALL_RANKS.reduce(function (a, g) {
+      return a + D.local[g].activation_elements; }, 0);
 
     const oneTotal = mem.weights + mem.gradients + mem.optimizer + actsOne;
     const ddpTotal = mem.weights + mem.gradients + mem.optimizer + actsDdp;
@@ -1050,7 +1155,11 @@ table.data tr.hi { background: var(--surface-3); }
 
     host.appendChild(el("p", { html:
       "Counted in elements, per GPU, for this model. The only term that moves is activations, " +
-      "because each GPU forwards " + PERGPU + " sample instead of " + BATCH + ":" }));
+      "because each GPU forwards " + PERGPU + " sample instead of " + BATCH + ". The per-rank " +
+      "figure is read from <code>strategies.ddp.local[g].activation_elements</code> rather than " +
+      "divided by hand — " + NN.count(actsDdp) + " on each rank, " + NN.count(actsSum) +
+      " summed across all " + WORLD + ", which is exactly the single-GPU " +
+      NN.count(actsOne) + ":" }));
 
     const items = function (acts, label) {
       return [
@@ -1154,7 +1263,7 @@ table.data tr.hi { background: var(--surface-3); }
       el("th", {}, "all-reduce sent per GPU"),
       el("th", {}, "vs world " + WORLD)
     ])));
-    const base = 2 * (WORLD - 1) / WORLD;
+    const base = AR_DATA;
     const tb = el("tbody");
     P.ring.table.forEach(function (r) {
       const isNow = r.world === WORLD;
@@ -1171,7 +1280,10 @@ table.data tr.hi { background: var(--surface-3); }
     host.appendChild(el("p", { class: "small muted", html:
       "World sizes and all-reduce factors from <code>PARALLEL.ring.table</code>; the batch and " +
       "step columns are that table's world sizes applied to this model's per-GPU batch of " +
-      PERGPU + ". The highlighted row is the configuration on this page." }));
+      PERGPU + ". The highlighted row is the configuration on this page. The first row is the " +
+      "single-GPU baseline: at world 1 there is no ring and no wire, " +
+      fmt(P.ring.table[0].all_reduce, 1) + " × S sent, which is the thing every other row is " +
+      "an overhead against." }));
 
     host.appendChild(el("p", { html:
       "The third column is the problem. An epoch is a fixed number of samples, so doubling the " +

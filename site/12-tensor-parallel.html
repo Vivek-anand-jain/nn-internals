@@ -1415,33 +1415,66 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     ]);
     host.appendChild(el("div", { class: "scrollx" }, cmp));
 
-    /* ---- external link figures ---------------------------------------- */
+    /* ---- external link figures ----------------------------------------
+       All of these now come from PARALLEL.interconnects. A ring all-reduce
+       is limited by ONE direction, so per_dir_GBps is the figure used and
+       the bidirectional aggregate vendors headline is shown beside it. */
     const LINKS = {
-      _source: "vendor-published per-GPU link figures; external to this model, quoted not derived. " +
-               "Where a vendor quotes a bidirectional aggregate, the per-direction figure is " +
-               "half of it, and that is what a ring all-reduce is limited by.",
-      inNode: [
-        { id: "nvl5", name: "NVLink 5 (Blackwell)", bw: 900, note: "quoted as 1.8 TB/s bidirectional" },
-        { id: "nvl4", name: "NVLink 4 (Hopper)",    bw: 450, note: "18 links × 25 GB/s per direction; quoted as 900 GB/s bidirectional" },
-        { id: "nvl3", name: "NVLink 3 (Ampere)",    bw: 300, note: "quoted as 600 GB/s bidirectional" },
-        { id: "pcie5", name: "PCIe Gen5 x16 only",  bw: 64,  note: "no NVLink between GPUs; ~63 GB/s per direction after 128b/130b" }
-      ],
-      xNode: [
-        { id: "ndr",  name: "InfiniBand NDR, 400 Gb/s per GPU", bw: 50,   note: "one 400 Gb/s port per GPU → 50 GB/s per direction" },
-        { id: "hdr",  name: "InfiniBand HDR, 200 Gb/s per GPU", bw: 25,   note: "200 Gb/s → 25 GB/s per direction" },
-        { id: "e200", name: "200 GbE RoCE per GPU",             bw: 25,   note: "same wire rate as HDR" },
-        { id: "e100", name: "100 GbE, shared 1 NIC per node",   bw: 1.56, note: "12.5 GB/s split 8 ways across the node's GPUs" }
-      ]
+      _source: P.interconnects._source,
+      why: P.interconnects.why_it_matters,
+      inNode: P.interconnects.links.filter(function (l) { return l.scope === "intra-node"; })
+              .map(function (l) {
+                return { id: l.name, name: l.name, bw: l.per_dir_GBps,
+                         note: "vendors quote " + l.bidir_GBps + " GB/s, both directions summed" +
+                               (l.note ? "; " + l.note : "") };
+              }),
+      xNode: P.interconnects.links.filter(function (l) { return l.scope === "inter-node"; })
+              .map(function (l) {
+                return { id: l.name, name: l.name, bw: l.per_dir_GBps,
+                         note: "vendors quote " + l.bidir_GBps + " GB/s, both directions summed" +
+                               (l.note ? "; " + l.note : "") };
+              })
     };
 
-    const S = { h: 8192, b: 2, s: 4096, tp: 8, inNode: "nvl4", xNode: "ndr",
-                eff: 0.75, tflops: 400, perNode: 8 };
+    /* Compute rate: the DENSE bf16 peak of the reference GPU, times a stated
+       MFU. The headline number vendors publish is the 2:4-sparsity figure,
+       which is twice this and does not apply to training. */
+    const GPU      = T.reference_configs.gpus.find(function (g) {
+      return g.name === T.reference_configs.default_gpu; });
+    const DENSE_TF = GPU.bf16_dense_tflops;
+    const MFU      = 0.45;                       // stated, per T.reference_configs.mfu_note
+    const COST     = P.cost_model;
+
+    const S = { h: 8192, b: 2, s: 4096, tp: 8,
+                inNode: (LINKS.inNode.find(function (e) { return /NVLink 4/.test(e.name); }) ||
+                         LINKS.inNode[0]).id,
+                xNode:  (LINKS.xNode.find(function (e) { return /NDR/.test(e.name); }) ||
+                         LINKS.xNode[0]).id,
+                eff: COST.achieved_fraction,
+                tflops: Math.round(DENSE_TF * MFU / 5) * 5, perNode: 8 };
 
     const HS = [1024, 2048, 4096, 5120, 8192, 12288, 16384];
     const SQ  = [512, 1024, 2048, 4096, 8192, 16384, 32768];
     const TPS = [1, 2, 4, 8, 16, 32];
 
-    function ringSend(bytes, N) { return N <= 1 ? 0 : 2 * (N - 1) / N * bytes; }
+    /* Ring cost: read from PARALLEL.collectives, with this page's own
+       2(N−1)/N kept alongside as a cross-check. Both are rendered below so
+       any drift between the data and the page is visible rather than silent. */
+    const AR = P.collectives.find(function (c) { return c.op === "all_reduce"; });
+    function ringFactorJs(N)   { return N <= 1 ? 0 : 2 * (N - 1) / N; }
+    function ringFactorData(N) {
+      const v = AR.ring_factor_at_world[String(N)];
+      return v === undefined ? null : v;
+    }
+    function ringFactor(N) {
+      const d = ringFactorData(N);
+      return d === null ? ringFactorJs(N) : d;
+    }
+    const RING_DRIFT = TPS.reduce(function (a, n) {
+      const d = ringFactorData(n);
+      return d === null ? a : Math.max(a, Math.abs(d - ringFactorJs(n)));
+    }, 0);
+    function ringSend(bytes, N) { return ringFactor(N) * bytes; }
     function bwFor(N) {
       const set = N > S.perNode ? LINKS.xNode : LINKS.inNode;
       const id  = N > S.perNode ? S.xNode : S.inNode;

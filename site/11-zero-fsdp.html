@@ -340,12 +340,14 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
       "Adam's <b>m</b> and <b>v</b> are the biggest single block and the least shared: " +
       "GPU <i>i</i> only ever needs the slice of <b>m</b> and <b>v</b> belonging to the " +
       "parameters it is going to update. Give each rank one quarter and delete the rest. " +
-      "Weights and gradients stay whole.",
+      "Because a rank now needs only its own shard of the summed gradient, DDP's all-reduce " +
+      "becomes a reduce-scatter and the wire cost does not move. Weights and the gradient " +
+      "buffer stay whole.",
 
-      "The gradient buffer goes next. Once a rank only updates its own quarter of the " +
-      "weights, it only needs its own quarter of the averaged gradient — so the " +
-      "all-reduce becomes a reduce-scatter and the other three quarters are never " +
-      "materialised. This one is free; section 3 shows why.",
+      "The gradient buffer goes next — and the collectives do not change at all. Stage 1 " +
+      "already reduce-scatters; stage 2 just fires it bucket by bucket as backward produces " +
+      "gradients, so the full buffer is never allocated. Same traffic, " +
+      ints(Z1.total - Z2.total) + " fewer elements resident. Section 3 works it through.",
 
       "Finally the weights. No GPU holds a full layer at rest — each keeps a quarter of " +
       "every layer and gathers a layer back into existence only for the instant it is " +
@@ -532,7 +534,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
   (function () {
     const host = NN.$("#z1Body");
     const st = S.zero1, m = st.memory_per_gpu;
-    const ar = st.schedule[0], ag = st.schedule[1];
+    const rs = st.schedule[0], ag = st.schedule[1];
 
     host.appendChild(el("p", { html:
       "Adam keeps two fp32 buffers per parameter — <b>m</b> and <b>v</b> — so the optimizer " +
@@ -577,29 +579,34 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
                 "the rank, which is the one saving data parallelism already gave you. " +
                 "No communication." },
 
-        { label: "Backward", w: "full", g: "full", o: "shard", a: "shard",
+        { label: "Backward — the full gradient buffer appears", w: "full", g: "full",
+          o: "shard", a: "shard",
           line: function () { return "∇ " + ints(m.gradients) + " (local, unreduced)"; },
           body: "The backward pass materialises a full gradient buffer of " +
                 ints(m.gradients) + " elements on every rank, holding that rank's local " +
-                "gradient. ZeRO-1 does not change this — gradients are still replicated, " +
-                "which is stage 1's remaining drawback: <i>" + st.drawback + "</i>" },
+                "gradient. <b>This is the one thing stage 1 does not fix</b>, and it is the " +
+                "whole of its remaining drawback: <i>" + st.drawback + "</i> Remember this " +
+                "step — it is the only place stage 2 will differ." },
 
-        { label: "all-reduce the gradients", w: "full", g: "full", o: "shard", a: "none",
-          comm: ar,
-          line: function () { return "∇ " + ints(m.gradients) + " (averaged)"; },
-          body: "Exactly the DDP collective, unchanged. Every rank ends up with the same " +
-                "averaged gradient over all " + ints(NP) + " parameters. " +
-                "<b>This is where stage 1 leaves communication on the table:</b> each rank " +
-                "is about to use only a quarter of what it just received. Section 5 comes " +
-                "back to that." },
+        { label: "reduce-scatter the gradients", w: "full", g: "shard", o: "shard", a: "none",
+          comm: rs,
+          line: function (g) { return "∇[shard " + g + "] averaged"; },
+          body: "Rank <i>g</i> owns one quarter of the optimizer state, so a quarter of the " +
+                "summed gradient is all it can possibly use — which means the all-gather half " +
+                "of an all-reduce would be wasted. Drop it and you have a reduce-scatter. " +
+                "Same sum, same answer, and because " +
+                "<span class='mono'>all-reduce = reduce-scatter + all-gather</span>, adding " +
+                "the weight all-gather back at the end brings the total to exactly what DDP " +
+                "already paid. Section 3 works the arithmetic through." },
 
-        { label: "Optimizer step on my shard only", w: "ghost", g: "ghost", o: "shard", a: "none",
+        { label: "Optimizer step on my shard only", w: "ghost", g: "shard", o: "shard", a: "none",
           line: function (g) { return "updates W[shard " + g + "] only"; },
           body: "Rank <i>g</i> applies Adam to its own quarter of the parameters, using the " +
-                ints(m.optimizer) + " elements of <b>m</b> and <b>v</b> it kept. The other " +
-                "three quarters of the averaged gradient it is holding are now dead weight — " +
-                "faded above. " + WD + " ranks, " + WD + " disjoint slices, and between them " +
-                "the whole update gets applied exactly once." },
+                ints(m.optimizer) + " elements of <b>m</b> and <b>v</b> it kept and the " +
+                "gradient shard it just received. " + WD + " ranks, " + WD + " disjoint " +
+                "slices, and between them the whole update gets applied exactly once. The " +
+                "faded weight segments are the three quarters this rank is not responsible " +
+                "for updating — still resident, because stage 1 does not shard them." },
 
         { label: "all-gather the updated weights", w: "full", g: "none", o: "shard", a: "none",
           comm: ag,
@@ -619,8 +626,9 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
       STD_RECIPE.bytes_per_param + " bytes</b> (" +
       NN.fmt(100 * STD_RECIPE.components.optimizer / STD_RECIPE.bytes_per_param, 0) +
       "%), because it carries the fp32 master copy as well as m and v. " +
-      "Sharding it and nothing else already removes most of the model-state bill, and " +
-      "it costs one extra all-gather. For plain SGD, which keeps no state at all, ZeRO-1 " +
+      "Sharding it and nothing else already removes most of the model-state bill, and — as " +
+      "section 5 shows on the wire — it costs <b>nothing</b>: reduce-scatter plus all-gather " +
+      "is exactly one all-reduce. For plain SGD, which keeps no state at all, ZeRO-1 " +
       "does precisely nothing."));
   })();
 
@@ -636,9 +644,17 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
     P.collectives.forEach(function (c) { coll[c.op] = c; });
 
     host.appendChild(el("p", { html:
-      "Stage 1 left an obvious hole. Every rank all-reduced a full gradient and then used a " +
-      "quarter of it. Stage 2 closes that hole, and the way it closes it is the most elegant " +
-      "idea in the whole paper." }));
+      "Here is the surprising part. Compare the two schedules in the data and they are the " +
+      "<b>same two collectives in the same order</b> — <span class='mono'>" +
+      S.zero1.schedule.map(function (c) { return c.op; }).join(" " + arrow + " ") +
+      "</span> for stage 1, <span class='mono'>" +
+      S.zero2.schedule.map(function (c) { return c.op; }).join(" " + arrow + " ") +
+      "</span> for stage 2, both at <span class='mono'>" +
+      NN.fmt(S.zero1.comm_vs_ddp, 2) + x + "</span> DDP. Stage 2 sends not one byte more " +
+      "than stage 1. The only difference between them is whether the full gradient buffer is " +
+      "ever <em>materialised</em> — and that difference is worth " +
+      ints(Z1.total - Z2.total) + " elements per GPU. The step from 1 to 2 is free memory, " +
+      "and understanding why is the most elegant idea in the paper." }));
 
     host.appendChild(el("h3", {}, "all-reduce is already two collectives"));
     host.appendChild(el("p", { html:
@@ -672,7 +688,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
       ]));
       tb.appendChild(el("tr", {}, [
         el("td", {}, el("b", {}, "= all-reduce")),
-        el("td", { class: "wrap" }, "what DDP does, and what ZeRO-1 still does"),
+        el("td", { class: "wrap" }, "what DDP does, once, at the end of backward"),
         el("td", { class: "n" }, coll.all_reduce.ring_factor),
         el("td", { class: "n" }, NN.fmt(arDDP.sent_per_gpu_elements, 2))
       ]));
@@ -681,19 +697,23 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
     })();
 
     host.appendChild(NN.callout("key", "THE GRADIENT SHARDING IS FREE",
-      "If a rank only ever applies its own quarter of the gradient, it does not need the " +
-      "all-gather half. Delete it. What remains is a plain reduce-scatter — same sum, same " +
-      "answer, half the traffic of an all-reduce — and each rank keeps only the " +
-      ints(m.gradients) + " elements it will actually use instead of " + ints(NP) + ". " +
-      "Add back the all-gather of updated weights that ZeRO already owed you and the " +
-      "total is <span class='mono'>" + NN.fmt(rs.sent_per_gpu_elements, 2) + " + " +
-      NN.fmt(ag.sent_per_gpu_elements, 2) + " = " +
-      NN.fmt(rs.sent_per_gpu_elements + ag.sent_per_gpu_elements, 2) + "</span> elements " +
-      "per GPU, against DDP's <span class='mono'>" +
-      NN.fmt(arDDP.sent_per_gpu_elements, 2) + "</span>. " +
-      "<b>Identical. " + NN.fmt(st.comm_vs_ddp, 2) + x + " DDP.</b> " +
-      "Stage 2 removes " + ints(NP - m.gradients) + " elements of gradient memory per GPU " +
-      "and pays nothing for it. That is as close to a free lunch as distributed training gets."));
+      "Once a rank only ever <em>applies</em> its own quarter of the gradient, it does not " +
+      "need the all-gather half of the all-reduce. Delete it. What remains is a plain " +
+      "reduce-scatter — same sum, same answer, half the traffic — and add back the " +
+      "all-gather of updated weights that ZeRO already owed you: <span class='mono'>" +
+      NN.fmt(rs.sent_per_gpu_elements, 2) + " + " + NN.fmt(ag.sent_per_gpu_elements, 2) +
+      " = " + NN.fmt(rs.sent_per_gpu_elements + ag.sent_per_gpu_elements, 2) +
+      "</span> elements per GPU, against DDP's <span class='mono'>" +
+      NN.fmt(arDDP.sent_per_gpu_elements, 2) + "</span>. <b>Identical. " +
+      NN.fmt(st.comm_vs_ddp, 2) + x + " DDP.</b> " +
+      "<br><br>Stage 1 already pays that bill. So the <em>additional</em> cost of stage 2 is " +
+      "zero — it is the same wire traffic, and the entire saving comes from noticing that if " +
+      "you reduce-scatter the gradients bucket by bucket <em>as the backward pass produces " +
+      "them</em>, the full " + ints(NP) + "-element buffer never has to exist. Each rank " +
+      "keeps the " + ints(m.gradients) + " elements it will use and nothing else: <b>" +
+      ints(NP - m.gradients) + " elements of memory per GPU for free</b>. That is as close " +
+      "to a free lunch as distributed training gets, and it is why nobody runs stage 1 " +
+      "when stage 2 is available."));
 
     host.appendChild(NN.tiles([
       { k: "shards", v: "optimizer + gradients", s: st.replicates + " still replicated" },
@@ -701,7 +721,8 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
         s: "elements, ZeRO-1 was " + ints(Z1.total), cls: "gradient" },
       { k: "gradients per GPU", v: ints(m.gradients),
         s: ints(NP) + " " + div + " " + WD, cls: "gradient" },
-      { k: "comm vs DDP", v: NN.fmt(st.comm_vs_ddp, 2) + x, s: "same bytes on the wire" }
+      { k: "comm vs DDP", v: NN.fmt(st.comm_vs_ddp, 2) + x,
+        s: "same wire cost as DDP and as ZeRO-1" }
     ]));
 
     buildWalk(host, {
@@ -779,7 +800,8 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
       const t = el("table", { class: "data" });
       t.appendChild(el("thead", {}, el("tr", {}, [
         el("th", {}, "layer"), el("th", {}, "shape"), el("th", {}, "params"),
-        el("th", {}, "shard per GPU"), el("th", {}, "gathered to")
+        el("th", {}, "shard per GPU"), el("th", {}, "gathered to"),
+        el("th", {}, "extra while whole")
       ])));
       const tb = el("tbody", {});
       LP.forEach(function (p, L) {
@@ -788,24 +810,28 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
           el("td", { class: "n" }, "(" + LS[L].join(x) + ") + b"),
           el("td", { class: "n" }, ints(p)),
           el("td", { class: "n" }, ints(SH[L])),
-          el("td", { class: "n" }, ints(p))
+          el("td", { class: "n" }, ints(p)),
+          el("td", { class: "n" }, "+" + ints(st.peak.gather_extra_per_layer[L]))
         ]));
       });
       tb.appendChild(el("tr", {}, [
         el("td", {}, el("b", {}, "total")),
         el("td", {}, ""),
         el("td", { class: "n" }, el("b", {}, ints(NP))),
-        el("td", { class: "n" }, el("b", {}, ints(REST))),
-        el("td", { class: "n" }, "")
+        el("td", { class: "n" }, el("b", {}, ints(st.peak.at_rest))),
+        el("td", { class: "n" }, ""),
+        el("td", { class: "n" }, "max +" +
+          ints(Math.max.apply(null, st.peak.gather_extra_per_layer)))
       ]));
       t.appendChild(tb);
       host.appendChild(t);
       host.appendChild(el("p", { class: "small muted", html:
-        "The per-GPU weight shards sum to " + ints(REST) + " elements, which is what " +
-        "<code>strategies.zero3.memory_per_gpu.weights</code> reports (" +
-        ints(m.weights) + ") " +
-        (REST === m.weights ? "<span class='ok'>" + tick + "</span>" :
-                              "<span class='bad'>" + cross + "</span>") +
+        "The per-GPU weight shards sum to " + ints(REST) + " elements, which is what both " +
+        "<code>memory_per_gpu.weights</code> (" + ints(m.weights) + ") and " +
+        "<code>peak.at_rest</code> (" + ints(st.peak.at_rest) + ") report " +
+        (REST === m.weights && REST === st.peak.at_rest
+           ? "<span class='ok'>" + tick + "</span>"
+           : "<span class='bad'>" + cross + "</span>") +
         ". That is the <b>at rest</b> figure. It is not the figure that has to fit — " +
         "keep reading." }));
     })();
@@ -856,6 +882,25 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
       return mx;
     }
 
+    /* ------------------------------------------------------------------
+       The trace now publishes these directly as strategies.zero3.peak.
+       Everything below reads PK, and the walkthrough's own timeline is kept
+       as an independent cross-check: two derivations of the same three
+       numbers, asserted against each other on the page.
+       ------------------------------------------------------------------ */
+    const PK = st.peak;
+    const CHECK = {
+      at_rest:  { mine: REST,          theirs: PK.at_rest },
+      no_pf:    { mine: peakOf(false), theirs: PK.peak_no_prefetch },
+      with_pf:  { mine: peakOf(true),  theirs: PK.peak_with_prefetch }
+    };
+    const CHECK_OK = Object.keys(CHECK).every(function (k) {
+      return CHECK[k].mine === CHECK[k].theirs;
+    });
+    function peakFor(prefetch) {
+      return prefetch ? PK.peak_with_prefetch : PK.peak_no_prefetch;
+    }
+
     /* ------------- controls + tiles ---------------------------------- */
     const pfWrap = el("label", { style: { cursor: "pointer", display: "inline-flex",
                                           alignItems: "center", gap: "7px" } });
@@ -870,18 +915,28 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
       const pf = pfBox.checked;
       tileHost.innerHTML = "";
       tileHost.appendChild(NN.tiles([
-        { k: "at rest", v: ints(m.weights), s: "weight elements per GPU", cls: "weight" },
-        { k: "peak while computing", v: ints(peakOf(pf)),
+        { k: "at rest", v: ints(PK.at_rest), s: "weight elements per GPU", cls: "weight" },
+        { k: "peak while computing", v: ints(peakFor(pf)),
           s: pf ? "one layer + the prefetched next" : "at rest + the largest layer",
           cls: "weight" },
-        { k: "DDP holds", v: ints(NP), s: "all the time" },
-        { k: "collectives per step", v: String(sched.length),
-          s: fwd.length + " forward + " + bwd.length + " backward + 1 reduce-scatter" }
+        { k: "peak " + div + " at rest", v: NN.fmt(peakFor(pf) / PK.at_rest, 3) + x,
+          s: pf ? "with prefetch" : "trace: " + NN.fmt(PK.ratio_to_at_rest, 3) + x },
+        { k: "DDP holds", v: ints(NP), s: "all the time, every rank" }
       ]));
     }
 
     host.appendChild(el("h3", {}, "Gather, use, free — " + NL + " layers, twice"));
     host.appendChild(tileHost);
+    host.appendChild(el("p", { class: "small muted", html:
+      sched.length + " collectives per step: " + fwd.length + " forward all-gathers, " +
+      bwd.length + " backward all-gathers, one reduce-scatter. The three residency figures " +
+      "come from <code>strategies.zero3.peak</code>; the walkthrough below derives them " +
+      "again from its own " + EV.length + "-state timeline and the two agree — " +
+      "at rest " + ints(CHECK.at_rest.mine) + "/" + ints(CHECK.at_rest.theirs) +
+      ", peak " + ints(CHECK.no_pf.mine) + "/" + ints(CHECK.no_pf.theirs) +
+      ", prefetching peak " + ints(CHECK.with_pf.mine) + "/" + ints(CHECK.with_pf.theirs) +
+      " " + (CHECK_OK ? "<span class='ok'>" + tick + "</span>"
+                      : "<span class='bad'>" + cross + " MISMATCH</span>") + "." }));
 
     /* ------------- the GPU grid, one shard row per layer -------------- */
     const rows = [];
@@ -933,7 +988,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
 
       /* reference lines */
       [{ v: NP, t: "DDP holds " + ints(NP), c: "var(--critical)" },
-       { v: REST, t: "at rest " + ints(REST), c: "var(--accent)" }].forEach(function (r) {
+       { v: PK.at_rest, t: "at rest " + ints(PK.at_rest), c: "var(--accent)" }].forEach(function (r) {
         root.appendChild(NN.svg("line", {
           x1: padL, x2: W - padR, y1: Y(r.v), y2: Y(r.v),
           stroke: r.c, "stroke-width": 1, "stroke-dasharray": "4 3", opacity: .8
@@ -983,7 +1038,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
           b.setAttribute("opacity", k === i ? 1 : (k < i ? .45 : .22));
         });
         cap.textContent = "step " + (i + 1) + ": " + elems(vals[i]) +
-          " whole  ·  peak " + elems(peakOf(pf));
+          " whole  ·  peak " + elems(peakFor(pf));
       };
     }
 
@@ -1070,21 +1125,90 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
     });
     paintTiles(); drawStrip(); paint(0);
 
-    PEAK_NOPF = peakOf(false);
-    PEAK_PF   = peakOf(true);
+    PEAK_NOPF = PK.peak_no_prefetch;
+    PEAK_PF   = PK.peak_with_prefetch;
 
-    host.appendChild(NN.callout("mem", "THE NUMBER THAT HAS TO FIT IS NOT " + ints(m.weights),
-      "<code>memory_per_gpu.weights</code> says " + ints(m.weights) + " and that is true " +
+    host.appendChild(NN.callout("mem", "THE NUMBER THAT HAS TO FIT IS NOT " + ints(PK.at_rest),
+      "<code>memory_per_gpu.weights</code> says " + ints(PK.at_rest) + " and that is true " +
       "at rest. But a GPU cannot compute with a quarter of a matrix, so during layer " +
-      "<i>L</i> it is holding its " + ints(REST) + " shards <em>plus</em> the whole of W" +
-      "<i>L</i> minus the shard it already had. The peak is <b>" + ints(PEAK_NOPF) +
-      "</b> elements — <span class='mono'>" + ints(REST) + " + (" + ints(LP[BIGL]) + " − " +
-      ints(SH[BIGL]) + ")</span> for the largest layer, W" + BIGL +
-      ". Turn prefetch on and it becomes <b>" + ints(PEAK_PF) +
-      "</b>, because two layers overlap. Against DDP's flat " + ints(NP) + " that is still " +
-      "a large win, but it is " + NN.fmt(PEAK_PF / m.weights, 2) + x + " the at-rest " +
-      "figure. This gap is exactly what FSDP's wrapping policy controls, and it is why " +
-      "ZeRO-3 cannot save you when a <em>single layer</em> is too big — section 8."));
+      "<i>L</i> it is holding its " + ints(PK.at_rest) + " shards <em>plus</em> the whole of " +
+      "W<i>L</i> minus the shard it already had. The peak is <b>" + ints(PK.peak_no_prefetch) +
+      "</b> elements — <span class='mono'>" + ints(PK.at_rest) + " + " +
+      ints(PK.gather_extra_per_layer[BIGL]) + "</span> for the largest layer, W" + BIGL +
+      " (" + ints(PK.largest_layer_params) + " params, of which " + ints(SH[BIGL]) +
+      " were already here). Turn prefetch on and it becomes <b>" +
+      ints(PK.peak_with_prefetch) + "</b>, because two layers overlap. " +
+      "<code>strategies.zero3.peak.ratio_to_at_rest</code> is <b>" +
+      NN.fmt(PK.ratio_to_at_rest, 3) + x + "</b>. " + PK.note));
+
+    /* ---- why the toy overstates the peak: ZeRO-3 rewards depth ------- */
+    host.appendChild(el("h3", {}, "The toy overstates this: ZeRO-3 rewards depth"));
+    host.appendChild(el("p", { html:
+      "With only " + NL + " layers, one layer is a large fraction of the whole model — W" +
+      BIGL + " alone is " + NN.fmt(100 * PK.largest_layer_params / NP, 0) + "% of the " +
+      ints(NP) + " parameters. That makes the gathered layer huge relative to the shards, " +
+      "and it is why the toy's prefetching peak (" + ints(PK.peak_with_prefetch) +
+      ") sits only just under DDP's " + ints(NP) + ". Real models are not shaped like this. " +
+      "For a stack of <i>L</i> equal layers the peak is <span class='mono'>P" + div +
+      "N + (P" + div + "L)(1 − 1" + div + "N)</span>, so as a fraction of the full weight " +
+      "tensor DDP would hold:" }));
+
+    (function () {
+      const DEEP = T.reference_configs.models.filter(function (mm) {
+        return mm.name === T.reference_configs.default_model; })[0];
+      const rows = [
+        { what: "this toy, measured", L: NL, N: WD,
+          frac: PK.peak_no_prefetch / NP, fracPf: PK.peak_with_prefetch / NP },
+        { what: "toy shape, equal layers", L: NL, N: WD },
+        { what: DEEP.name + " shape", L: DEEP.n_layers, N: WD },
+        { what: DEEP.name + " shape, N = 64", L: DEEP.n_layers, N: 64 }
+      ];
+      const t = el("table", { class: "data" });
+      t.appendChild(el("thead", {}, el("tr", {}, [
+        el("th", {}, "case"), el("th", {}, "layers L"), el("th", {}, "world N"),
+        el("th", {}, "at rest " + div + " DDP"), el("th", {}, "peak " + div + " DDP"),
+        el("th", {}, "prefetching peak " + div + " DDP")
+      ])));
+      const tb = el("tbody", {});
+      rows.forEach(function (r) {
+        const rest = 1 / r.N;
+        const one = (1 / r.L) * (1 - 1 / r.N);
+        const pk  = r.frac   !== undefined ? r.frac   : rest + one;
+        const pkp = r.fracPf !== undefined ? r.fracPf : rest + 2 * one;
+        tb.appendChild(el("tr", {}, [
+          el("td", { class: "wrap" }, r.what),
+          el("td", { class: "n" }, String(r.L)),
+          el("td", { class: "n" }, String(r.N)),
+          el("td", { class: "n" }, NN.fmt(100 * rest, 1) + "%"),
+          el("td", { class: "n" }, NN.fmt(100 * pk, 1) + "%"),
+          el("td", { class: "n" }, NN.fmt(100 * pkp, 1) + "%")
+        ]));
+      });
+      t.appendChild(tb);
+      host.appendChild(t);
+      host.appendChild(el("p", { class: "small muted", html:
+        "The first row is the measured toy; the rest apply the equal-layer formula. The toy " +
+        "reads worse than the formula because its layers are uneven — W" + BIGL + " is " +
+        ints(PK.largest_layer_params) + " against an average of " +
+        NN.fmt(NP / NL, 0) + "." }));
+    })();
+
+    host.appendChild(NN.callout("key", "DEPTH IS WHAT MAKES ZeRO-3 WORK",
+      "Divide the two equal-layer terms and the whole thing collapses to one ratio: " +
+      "<span class='mono'>peak " + div + " at-rest = 1 + (N−1)" + div + "L</span>. " +
+      "<b>What matters is layers against world size, not either alone.</b> At " + NL +
+      " layers and N = " + WD + " that is " + NN.fmt(1 + (WD - 1) / NL, 2) + x + " and the " +
+      "peak nearly touches DDP; at " + T.reference_configs.models.filter(
+        function (mm) { return mm.name === T.reference_configs.default_model; })[0].n_layers +
+      " layers and the same N it is " + NN.fmt(1 + (WD - 1) /
+        T.reference_configs.models.filter(function (mm) {
+          return mm.name === T.reference_configs.default_model; })[0].n_layers, 3) + x +
+      " — the gathered layer has become a rounding error. So long as <span class='mono'>L " +
+      "≫ N</span> the peak is barely above at-rest, and every extra GPU past that point " +
+      "shrinks at-rest without moving the peak much. <b>Deep and narrow is ZeRO-3's best " +
+      "case; shallow and wide is its worst</b>, and in the limit — one layer that does not " +
+      "fit on one device — it fails outright no matter how large N gets. That limit is " +
+      "section 8, and the answer to it is page 12."));
   })();
 
   /* ======================================================================
@@ -1143,11 +1267,19 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
       unit: "elems/GPU"
     }));
 
-    host.appendChild(el("h3", {}, "Where the 1.5" + x + " comes from"));
+    host.appendChild(el("h3", {}, "Stages 1 and 2 are free; stage 3 is not"));
     host.appendChild(el("p", { html:
-      "<b>ZeRO-2 is exactly DDP.</b> <span class='mono'>" +
+      "<b>ZeRO-1 and ZeRO-2 are exactly DDP.</b> Both at <span class='mono'>" +
+      NN.fmt(sent(S.zero1) / base, 3) + x + "</span> and <span class='mono'>" +
       NN.fmt(sent(S.zero2) / base, 3) + x + "</span>: the reduce-scatter and the weight " +
-      "all-gather together cost precisely what one all-reduce costs. " +
+      "all-gather together cost precisely what one all-reduce costs. Read the two schedules " +
+      "side by side and they are the same collectives on the same buffers — " +
+      "<b>the entire journey from DDP to ZeRO-2 is free</b>, and it removes " +
+      ints(DDP.total - Z2.total) + " of the " + ints(DDP.total) +
+      " elements each GPU was holding. The stages differ only in what they let you stop " +
+      "storing: stage 1 the optimizer state, stage 2 the gradient buffer as well, because " +
+      "reduce-scattering each bucket as backward produces it means the full buffer is never " +
+      "needed. " +
       "<b>ZeRO-3 is <span class='mono'>" + NN.fmt(S.zero3.comm_vs_ddp, 2) + x +
       "</span></b>, and the reason is visible in its schedule — " + S.zero3.schedule.filter(
         function (c) { return c.op === "all_gather"; }).length + " parameter all-gathers, " +
@@ -1159,21 +1291,19 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
       "an all-reduce is. <span class='mono'>3 " + div + " 2 = " +
       NN.fmt(S.zero3.comm_vs_ddp, 2) + "</span>." }));
 
-    host.appendChild(NN.callout("warn", "THE TOY'S ZeRO-1 SCHEDULE IS THE NAÏVE ONE",
-      "<code>strategies.zero1.comm_vs_ddp</code> reads <b>" +
-      NN.fmt(S.zero1.comm_vs_ddp, 2) + x + "</b>, not 1.0" + x + ", because " +
-      "<code>parallel_toy.py</code> schedules stage 1 literally: a full " +
-      "<span class='mono'>all_reduce</span> of the gradients (" +
-      NN.fmt(S.zero1.schedule[0].sent_per_gpu_elements, 2) + ") followed by the weight " +
-      "<span class='mono'>all_gather</span> (" +
-      NN.fmt(S.zero1.schedule[1].sent_per_gpu_elements, 2) + "). " +
-      "A real ZeRO-1 does not do that. Since each rank only applies its own shard, the " +
-      "all-reduce can be a <b>reduce-scatter</b> just as in stage 2 — the full gradient " +
-      "buffer still sits in memory (that is what “gradients replicated” means: it " +
-      "is a memory statement, not a wire statement), but nobody needs the all-gather half " +
-      "of it. DeepSpeed's ZeRO-1 therefore also lands at 1.0" + x + " DDP. Read the toy's " +
-      "1.5" + x + " as the cost of the schedule as written, and stage 2's " +
-      "<b>free</b> gradient sharding as the reason nobody ships the naïve version."));
+    host.appendChild(NN.callout("key", "“GRADIENTS REPLICATED” IS A MEMORY STATEMENT",
+      "It is worth being precise about what separates stage 1 from stage 2, because the " +
+      "schedules do not: <span class='mono'>" +
+      S.zero1.schedule.map(function (c) { return c.op; }).join(" + ") + "</span> for both, " +
+      NN.fmt(S.zero1.comm_vs_ddp, 2) + x + " DDP for both. Stage 1 is described as " +
+      "replicating the gradients, and that is true of the <b>buffer</b> — every rank " +
+      "computes and holds all " + ints(S.zero1.memory_per_gpu.gradients) + " local gradient " +
+      "elements before the reduction — but it was never true of the <b>wire</b>. A rank owns " +
+      "one shard of the optimizer state, so one shard of the summed gradient is all it can " +
+      "use, and reduce-scatter delivers exactly that. Stage 2's saving is not a cheaper " +
+      "collective; it is noticing that if you fire the reduce-scatter bucket by bucket as " +
+      "the backward pass produces gradients, the full buffer never has to be allocated " +
+      "at all."));
 
     host.appendChild(NN.callout("key", "WHY ZeRO-3 WANTS FAST INTERCONNECT, AND PREFETCH",
       "DDP's single all-reduce sits at the end of the backward pass and can be overlapped " +
@@ -1182,10 +1312,10 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
       "defence is to issue layer <i>L+1</i>'s all-gather before layer <i>L</i>'s compute " +
       "begins, so the transfer hides under the matmul. That is what FSDP's " +
       "<span class='mono'>backward_prefetch</span> and forward prefetching do, and it is " +
-      "the checkbox in section 4 — it buys latency with peak memory: the toy's peak whole-" +
-      "weight residency goes from <b>" + ints(PEAK_NOPF) + "</b> elements to <b>" +
-      ints(PEAK_PF) + "</b> when one layer is prefetched, against " + ints(REST) +
-      " at rest. If the interconnect is slow enough that the gather cannot hide under the " +
+      "the checkbox in section 4 — it buys latency with peak memory: " +
+      "<code>peak.peak_no_prefetch</code> <b>" + ints(PEAK_NOPF) + "</b> becomes " +
+      "<code>peak.peak_with_prefetch</code> <b>" + ints(PEAK_PF) + "</b>, against " +
+      ints(REST) + " at rest. If the interconnect is slow enough that the gather cannot hide under the " +
       "compute, ZeRO-3 becomes bandwidth-bound and the GPUs idle waiting for weights. " +
       "This is the whole reason FSDP is usually deployed with fast intra-node links, or " +
       "with a hybrid sharding group that keeps the all-gathers inside a node."));
@@ -1563,6 +1693,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
      ====================================================================== */
   (function () {
     const host = NN.$("#fsdpBody");
+    const PK = S.zero3.peak;
 
     host.appendChild(el("p", { html:
       "ZeRO is the algorithm, published by the DeepSpeed team; FSDP — Fully Sharded Data " +
@@ -1614,10 +1745,13 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
     host.appendChild(t);
 
     host.appendChild(NN.callout("key", "THE WRAPPING GRANULARITY IS A REAL KNOB",
-      "Section 4 measured it. In the toy, the peak whole-weight residency is set by the " +
-      "largest thing you gather at once: gather per layer and the peak is the biggest " +
-      "layer; gather two layers at once (prefetch) and it is the biggest adjacent pair. " +
-      "Scale that up. <b>Wrap too coarsely</b> — say the whole model as one unit — and the " +
+      "<code>strategies.zero3.peak</code> measures it. The peak whole-weight residency is " +
+      "set by the largest thing you gather at once: gather per layer and it is " +
+      ints(PK.at_rest) + " + " +
+      ints(Math.max.apply(null, PK.gather_extra_per_layer)) + " = <b>" +
+      ints(PK.peak_no_prefetch) + "</b>; gather two at a time and it is <b>" +
+      ints(PK.peak_with_prefetch) + "</b>, the biggest adjacent pair. The unit <em>is</em> " +
+      "the granule. Scale that up. <b>Wrap too coarsely</b> — the whole model as one unit — and the " +
       "all-gather materialises every parameter on every GPU and you are back to DDP's " +
       "memory at ZeRO-3's communication cost. <b>Wrap too finely</b> — every " +
       "<span class='mono'>Linear</span> its own unit — and you issue thousands of tiny " +
@@ -1633,7 +1767,8 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
   (function () {
     const host = NN.$("#limitsBody");
     const z3 = S.zero3, ddp = S.ddp;
-    const biggest = Math.max.apply(null, LP);
+    const PK = z3.peak;
+    const biggest = PK.largest_layer_params;
     const biggestL = LP.indexOf(biggest);
 
     host.appendChild(el("p", { html:
@@ -1664,13 +1799,20 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
 
     host.appendChild(el("h3", {}, "It does not help if one layer does not fit"));
     host.appendChild(el("p", { html:
-      "This is the hard stop, and section 4's peak measurement is the proof. ZeRO-3 shards " +
-      "W" + biggestL + " into " + WD + " pieces of " + ints(SH[biggestL]) + " elements, but " +
-      "to compute with it, it must <b>reassemble all " + ints(biggest) + " on every GPU</b>. " +
-      "A layer is the granule. Raise N to a thousand and each shard becomes tiny, but the " +
-      "gathered layer is exactly as large as it always was. If a single weight matrix — a " +
-      "large vocabulary embedding, an MLP in a very wide model — exceeds what one device " +
-      "can hold alongside its activations, no value of N in ZeRO-3 saves you." }));
+      "This is the hard stop, and <code>strategies.zero3.peak</code> is the proof. ZeRO-3 " +
+      "shards W" + biggestL + " into " + WD + " pieces of " + ints(SH[biggestL]) +
+      " elements, but to compute with it, it must <b>reassemble all " + ints(biggest) +
+      " on every GPU</b> — the <code>gather_extra_per_layer</code> term of +" +
+      ints(PK.gather_extra_per_layer[biggestL]) + " that takes " + ints(PK.at_rest) +
+      " at rest up to a peak of " + ints(PK.peak_no_prefetch) + ". " +
+      "<b>A layer is the granule, and N does not divide it.</b> Raise N to a thousand and " +
+      "each shard becomes tiny while the gathered layer stays exactly as large as it always " +
+      "was: <span class='mono'>P" + div + "N " + arrow + " 0</span>, but the " +
+      "<span class='mono'>P" + div + "L</span> term does not move. This is the flip side of " +
+      "section 4's depth argument — depth is what makes ZeRO-3 work, so a model with no " +
+      "depth to exploit is where it stops working. If a single weight matrix — a large " +
+      "vocabulary embedding, an MLP in a very wide model — exceeds what one device can hold " +
+      "alongside its activations, no value of N in ZeRO-3 saves you. " + PK.note }));
 
     host.appendChild(NN.callout("warn", "WHICH IS WHY THE NEXT PAGE EXISTS",
       "To get under the single-layer floor you have to stop reassembling the layer at all: " +
@@ -1726,7 +1868,9 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
       arrow + " " + ints(Z2.total) + ") and costs nothing extra on the wire, stage 3 moves " +
       "the parameters (" + arrow + " " + ints(Z3.total) + ") and costs " +
       NN.fmt(S.zero3.comm_vs_ddp, 2) + x + " the bandwidth plus a per-layer gather on the " +
-      "critical path. Underneath, the same " + ints(NP) + " parameters take the same step."));
+      "critical path. Stages 1 and 2 are both " + NN.fmt(S.zero1.comm_vs_ddp, 2) + x +
+      " DDP, so everything down to " + ints(Z2.total) + " elements per GPU is free. " +
+      "Underneath, the same " + ints(NP) + " parameters take the same step."));
   })();
 
   NN.page("zero");
