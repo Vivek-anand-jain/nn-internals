@@ -98,9 +98,32 @@
     <div id="classTable"></div>
   </section>
 
-  <h2>The walkthrough</h2>
-  <p class="muted">Eight pages, in order. Each one is interactive.</p>
-  <div class="cards" id="cards"></div>
+  <h2>Part I — One GPU</h2>
+  <p class="muted">
+    What a parameter is, what happens to it, and what that costs in memory.
+    Everything here is traced on the 13-parameter model above.
+  </p>
+  <div class="cards" id="cards1"></div>
+
+  <h2>Part II — Many GPUs</h2>
+  <p class="muted">
+    Part I ends with a model that does not fit. These pages are the answers,
+    each one simulated on a second toy model — a 193-parameter network on four
+    GPUs — and <em>proven</em> to compute exactly what a single GPU would.
+  </p>
+  <div class="cards" id="cards2"></div>
+
+  <section class="block">
+    <h2 style="margin-top:0">Every strategy, verified</h2>
+    <p>
+      It is easy to describe distributed training and be subtly wrong. So
+      <code>code/parallel_toy.py</code> simulates four GPUs running one real
+      training step under each strategy and checks the result against the
+      single-GPU answer. Nothing on those pages is asserted where it could be
+      demonstrated.
+    </p>
+    <div id="parallelProof"></div>
+  </section>
 
   <h2>Also here</h2>
   <div class="sidelinks">
@@ -149,6 +172,7 @@
 </noscript>
 
 <script src="assets/data/trace.js"></script>
+<script src="assets/data/parallel.js"></script>
 <script src="assets/js/ui.js"></script>
 <script>
 (function () {
@@ -217,14 +241,53 @@
   NN.$("#classTable").appendChild(tbl);
 
   /* --------------------------------------------------------- the cards */
-  const cards = NN.$("#cards");
+  /* Pages 01-08 are the single-GPU arc; 09-14 are the distributed arc. */
+  const c1 = NN.$("#cards1"), c2 = NN.$("#cards2");
   NN.PAGES.forEach(function (p) {
-    cards.appendChild(NN.el("a", { class: "card", href: "site/" + p.file }, [
+    const card = NN.el("a", { class: "card", href: "site/" + p.file }, [
       NN.el("div", { class: "n" }, "PART " + p.n),
       NN.el("div", { class: "t" }, p.title),
       NN.el("div", { class: "b" }, p.blurb)
-    ]));
+    ]);
+    (Number(p.n) <= 8 ? c1 : c2).appendChild(card);
   });
+
+  /* ------------------------------------------- the equivalence proofs */
+  if (window.PARALLEL) {
+    const P = window.PARALLEL;
+    const order = ["ddp", "tp", "pp", "zero1", "zero2", "zero3"];
+    const rows = order.map(function (k) {
+      const s = P.strategies[k];
+      const v = s.verify;
+      const err = v.grad_max_err !== undefined ? v.grad_max_err
+                                               : v.forward_max_err;
+      const mem = s.memory_per_gpu;
+      return NN.el("tr", {}, [
+        NN.el("td", {}, s.name),
+        NN.el("td", { style: { textAlign: "left" } }, s.splits),
+        NN.el("td", { class: "n" },
+          NN.count(mem.weights + mem.gradients + mem.optimizer)),
+        NN.el("td", { class: "n" }, err === 0 ? "exact" : NN.fmt(err, 2)),
+        NN.el("td", {}, NN.el("span", {
+          style: { color: v.passed ? "var(--good)" : "var(--critical)",
+                   fontFamily: "var(--mono)", fontWeight: "700" }
+        }, v.passed ? "✓ PASS" : "✗ FAIL"))
+      ]);
+    });
+    NN.$("#parallelProof").appendChild(NN.el("table", { class: "data" }, [
+      NN.el("thead", {}, NN.el("tr", {}, [
+        NN.el("th", {}, "Strategy"), NN.el("th", {}, "Shards"),
+        NN.el("th", {}, "Per-GPU state"), NN.el("th", {}, "max |Δ|"),
+        NN.el("th", {}, "vs 1 GPU")
+      ])),
+      NN.el("tbody", {}, rows)
+    ]));
+    NN.$("#parallelProof").appendChild(NN.el("p", {
+      class: "small muted", style: { marginTop: "12px" }
+    }, "Per-GPU state is in elements, for a " + P.meta.n_params +
+       "-parameter model on " + P.meta.world + " GPUs. The ladder from " +
+       "replicate-everything to shard-everything is visible in that column."));
+  }
 
   /* ------------------------------------------------------- gradcheck */
   const gc = T.gradcheck;
