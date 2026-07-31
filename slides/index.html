@@ -2375,9 +2375,8 @@ S({
           frag(NN.callout("key", "ε is load-bearing",
             "A token whose channels are all equal has variance exactly zero. " +
             "Without <span class='mono'>ε = " + r.eps + "</span> that is a " +
-            "division by zero, and every parameter downstream of it becomes " +
-            "not-a-number on the next optimizer step. This is a real failure " +
-            "mode, not a hypothetical one."), "f-right")
+            "division by zero and the whole step becomes NaN. This is a real " +
+            "failure mode, not a hypothetical one."), "f-right")
         ])
       ])
     ];
@@ -3406,6 +3405,27 @@ function ringFactor(op, N) {
   }
 })();
 
+/* --------------------------------------------------------- the wires */
+/* PARALLEL.interconnects quotes vendor bandwidths (NVLink figures are
+   BIDIRECTIONAL in marketing, so always read per_dir_GBps), and
+   PARALLEL.cost_model is a labelled MODEL, not a measurement. Every slide
+   that turns bytes into seconds says so on the slide itself. */
+const ICON = PA.interconnects;
+const CM   = PA.cost_model;
+const linkNamed = function (frag) {
+  return ICON.links.filter(function (l) { return l.name.indexOf(frag) >= 0; })[0];
+};
+const NVL = linkNamed("NVLink " + GPUD.nvlink_gen) || linkNamed("NVLink");
+const IBL = linkNamed("InfiniBand NDR") || linkNamed("InfiniBand");
+/** seconds to move `bytes` per GPU over a link, at the model's achieved fraction */
+function wireSeconds(bytes, l) {
+  return bytes / (l.per_dir_GBps * 1e9 * CM.achieved_fraction);
+}
+const MODEL_CAVEAT =
+  "<b>" + CM._status + "</b> Bandwidth is taken at " +
+  f(CM.achieved_fraction * 100, 0) + "% of nominal (" + CM.achieved_note +
+  ") and the model ignores " + CM.ignores.slice(0, 3).join(", ") + ".";
+
 /**
  * A shard bar that can own SEVERAL slices, which NN.gpu.shard cannot express.
  * Same markup and the same CSS classes, so a replicated tensor and a sharded
@@ -4405,88 +4425,108 @@ S({
           { k: "per-GPU state", v: memTot(DDP) + " → " + memTot(Z1),
             s: "elements", cls: "optimizer" },
           { k: "communication", v: Z1.comm_vs_ddp + "× DDP",
-            s: Z1.schedule.length + " collectives", cls: "gradient" }
+            s: Z1.schedule.length + " collectives, same bytes", cls: "gradient" }
         ]),
         NN.callout("warn", "What is still replicated",
-          Z1.drawback + " Every rank still all-reduces and stores a complete " +
-          m.gradients + "-element gradient buffer, and still holds every weight.")
+          Z1.drawback + " Backward still materialises a complete " +
+          m.gradients + "-element gradient buffer on every rank before the " +
+          "reduce-scatter consumes it, and every rank still holds every weight. " +
+          "Those are the next two rungs.")
       ]), "f-fade")
     ];
   }
 });
 
 S({
-  chapter: "ZeRO · the insight", plain: "The insight: you are already doing half of ZeRO-2",
+  chapter: "ZeRO · the insight", plain: "The insight: change what the second half carries",
   notes: "This is the slide the whole ZeRO section is built around, so slow " +
-    "down. Stage 1 ends its backward pass with an all-reduce of the gradients. " +
-    "We established twenty slides ago that an all-reduce is a reduce-scatter " +
-    "followed by an all-gather. So stage 1 is already doing a reduce-scatter — " +
-    "after which rank i is holding the completely-finished gradient shard i — " +
-    "and then paying for an all-gather to hand everybody a copy of everybody " +
-    "else's shard. But under stage 1, rank i only updates parameters in shard " +
-    "i. It never reads the other shards. The all-gather is transferring data " +
-    "that the receiver will not use. Delete it. That is stage 2: you get " +
-    "gradient sharding, and you get it by doing strictly less work.",
+    "down. DDP ends its backward pass with an all-reduce of the gradients, and " +
+    "we established ten slides ago that an all-reduce IS a reduce-scatter " +
+    "followed by an all-gather. Look at what each half is for. The " +
+    "reduce-scatter does the actual summing and leaves rank i holding the " +
+    "finished gradient shard i. The all-gather exists only so that every rank " +
+    "can then run the optimizer over every parameter. But it does not have to. " +
+    "Let rank i run the optimizer over shard i alone — which is all it has " +
+    "state for — and then all-gather the UPDATED WEIGHTS instead of the " +
+    "gradients. Same two collectives, same payload size, " +
+    f(ringFactor("reduce_scatter", WORLD), 3) + "S + " +
+    f(ringFactor("all_gather", WORLD), 3) + "S = " +
+    f(ringFactor("all_reduce", WORLD), 3) + "S either way. And now no rank " +
+    "needs full optimizer state, and no rank needs a full gradient buffer. " +
+    "That is stages 1 and 2, and the wire does not notice.",
   build: function () {
     const rsF = ringFactor("reduce_scatter", WORLD);
     const agF = ringFactor("all_gather", WORLD);
     const arF = ringFactor("all_reduce", WORLD);
     return [
       kicker("Distributed · ZeRO · the insight"),
-      title("Stop halfway through the all-reduce"),
-      frag(d("arrowline", [
-        d("panel g tight", [ph("what stage 1 does"), h("small", "all_reduce"),
-          h("small muted", f(arF, 3) + " × S sent per GPU")]),
-        h("ar", "="),
-        d("panel g tight", [ph("① reduce_scatter"),
-          h("small", "rank i now owns finished shard i"),
-          h("small muted", f(rsF, 3) + " × S")]),
-        h("ar", "+"),
-        d("panel w tight", [ph("② all_gather"),
-          h("small", "everyone gets a copy of every shard"),
-          h("small muted", f(agF, 3) + " × S")])
-      ]), "f-fade"),
-      frag(d("panel crit", [ph("but under ZeRO-1, rank i only updates shard i"),
-        h("say", "So step ② delivers " + (WORLD - 1) + " shards that this rank " +
-          "will never read, at a cost of " + f(agF / arF * 100, 0) +
-          "% of the gradient traffic. Delete it.")]), "f-pop"),
+      title("Same two halves. Different cargo in the second one."),
+      frag(d("panel g", [ph("DDP · all_reduce the gradients · " + f(arF, 3) + "S"),
+        d("arrowline", [
+          d("pill", "① reduce_scatter · " + f(rsF, 3) + "S"),
+          h("ar", "→"),
+          d("pill", "rank i owns finished gradient shard i"),
+          h("ar", "→"),
+          d("pill", "② all_gather the GRADIENTS · " + f(agF, 3) + "S"),
+          h("ar", "→"),
+          d("pill", "every rank runs the optimizer over everything")
+        ])]), "f-fade"),
+      frag(d("panel o", [ph("ZeRO · same two halves · " +
+        f(rsF + agF, 3) + "S — identical"),
+        d("arrowline", [
+          d("pill", "① reduce_scatter · " + f(rsF, 3) + "S"),
+          h("ar", "→"),
+          d("pill hot", "rank i runs the optimizer on shard i only"),
+          h("ar", "→"),
+          d("pill", "② all_gather the UPDATED WEIGHTS · " + f(agF, 3) + "S"),
+          h("ar", "→"),
+          d("pill", "every rank has whole weights for the next forward")
+        ])]), "f-pop"),
       frag(d("cols", [
-        NN.callout("key", "Gradient sharding is free",
-          "Removing the all-gather does two things at once: the per-GPU " +
-          "gradient buffer collapses from " + DDPMEM.gradients + " elements to " +
-          Z2.memory_per_gpu.gradients + ", and the traffic drops from " +
-          f(arF, 3) + "S to " + f(rsF, 3) + "S. A memory saving that also " +
-          "reduces communication is not a trade-off, it is a bug fix."),
-        NN.callout("why", "Why stage 1 exists at all, then",
-          "Because some optimizers and some gradient-clipping schemes want a " +
-          "complete gradient vector on every rank — global gradient norm, for " +
-          "instance, is a reduction over all of it. Stage 2 needs that computed " +
-          "as a separate small reduction instead. Stage 1 is the version that " +
-          "requires no thought.")
+        NN.callout("key", "The wire does not notice",
+          "<span class='mono'>" + f(rsF, 3) + "S + " + f(agF, 3) + "S = " +
+          f(arF, 3) + "S</span> — exactly DDP's all-reduce. That is why " +
+          Z1.name + " and " + Z2.name + " both cost " + Z1.comm_vs_ddp +
+          "× DDP. Going from DDP to " + Z2.name + " removes " +
+          (memTot(DDP) - memTot(Z2)) + " of " + memTot(DDP) +
+          " elements per GPU for no extra traffic at all."),
+        NN.callout("why", "Then what separates stage 1 from stage 2?",
+          "Only <em>when the gradient buffer is freed</em>. Under stage 1 " +
+          "backward builds the whole " + DDPMEM.gradients + "-element buffer " +
+          "and reduce-scatters it at the end. Under stage 2 each bucket is " +
+          "reduce-scattered and freed as soon as it is complete, so the full " +
+          "buffer never exists: " + Z2.memory_per_gpu.gradients +
+          " elements resident instead of " + DDPMEM.gradients + ".")
       ]), "f-fade")
     ];
   }
 });
 
 S({
-  chapter: "ZeRO · stage 2", plain: "ZeRO-2: gradients sharded, and communication goes DOWN",
+  chapter: "ZeRO · stage 2", plain: "ZeRO-2: free each gradient bucket the moment it is reduced",
   notes: Z2.name + " shards " + Z2.splits + " and replicates " + Z2.replicates +
-    " only. Per-GPU state: " + memTot(Z1) + " → " + memTot(Z2) + " elements. " +
-    "Read the schedule: the all-reduce has been replaced by a reduce-scatter, " +
-    "exactly as the previous slide argued, and the ratio to DDP is " +
-    Z2.comm_vs_ddp + "× — the same total traffic as plain DDP, for a " +
-    "substantially smaller memory footprint. Note the arithmetic wart and do " +
-    "not hide it: " + NPAR + " parameters do not divide by " + WORLD +
-    ". The generator uses integer division and each rank holds " +
-    Z2.memory_per_gpu.gradients + " elements; real frameworks pad the last " +
-    "shard. Every sharding scheme has this problem and every one of them " +
-    "solves it with padding.",
+    " only. Per-GPU state: " + memTot(Z1) + " → " + memTot(Z2) + " elements, " +
+    "and the schedule is character-for-character the same as stage 1's — same " +
+    "two collectives, same payloads, " + Z2.comm_vs_ddp + "× DDP. The only " +
+    "difference is a scheduling one: a bucket of gradients is reduce-scattered " +
+    "and freed as soon as backward has finished producing it, so the full " +
+    DDPMEM.gradients + "-element buffer never exists on any rank. " +
+    Z2.memory_per_gpu.gradients + " elements resident instead. Then spend a " +
+    "minute on the padding, because it is a real lesson and not a footnote: " +
+    NPAR + " parameters do not divide by " + WORLD + ". Frameworks do not " +
+    "truncate, they pad — FSDP flattens a wrapped unit's parameters into one " +
+    "buffer and pads it to " + Z2.sharding.padded_total + " so every rank owns " +
+    "exactly " + Z2.sharding.shard_size + ". Those " +
+    Z2.sharding.padding_elements + " padding elements are wasted memory, and " +
+    "that is precisely why FSDP wrapping granularity is a tuning knob: wrap " +
+    "every small module separately and you pay the rounding on every one of " +
+    "them.",
   build: function () {
     const m = Z2.memory_per_gpu;
+    const sh = Z2.sharding;
     return [
       kicker("Distributed · ZeRO stage 2"),
-      title("<span class='mono'>reduce_scatter</span> replaces " +
-            "<span class='mono'>all_reduce</span>", true),
+      title("Same collectives as stage 1. The gradient buffer never exists.", true),
       frag(NN.gpu.grid({ count: WORLD, render: function (g) {
         return [
           shardBar({ name: "W", parts: WORLD, own: "all", color: "var(--weight)" }),
@@ -4497,21 +4537,31 @@ S({
             memTot(Z2))
         ];
       } }), "f-pop"),
-      frag(d("stack", Z2.schedule.map(function (c) { return NN.gpu.commCard(c); })), "f-fade"),
       frag(d("cols3", [
         NN.tiles([{ k: "per-GPU state", v: memTot(Z1) + " → " + memTot(Z2),
                     s: "elements", cls: "optimizer" }]),
         NN.tiles([{ k: "communication vs DDP", v: Z2.comm_vs_ddp + "×",
-                    s: "no worse than plain DDP", cls: "gradient" }]),
+                    s: "identical to stage 1", cls: "gradient" }]),
         NN.tiles([{ k: "still replicated", v: m.weights + " elems",
                     s: Z2.replicates, cls: "weight" }])
       ]), "f-fade"),
-      frag(NN.callout("warn", "The honest wart: " + NPAR + " does not divide by " + WORLD,
-        "Integer division gives " + m.gradients + " elements a rank, which is " +
-        (m.gradients * WORLD) + " of " + NPAR + ". Real implementations pad the " +
-        "flattened parameter buffer up to a multiple of the world size and " +
-        "shard the padded thing. It is a detail, but it is the kind of detail " +
-        "that produces a shape error at 3am."), "f-fade")
+      frag(d("cols wide-l", [
+        d("panel g", [ph("how a shard is actually cut · " + sh.n_params +
+          " parameters over " + sh.world + " ranks"),
+          /* the pad is deliberately NOT one of the four tensor colours — it is
+             not a tensor, it is unused space, so it renders as free */
+          NN.memstrip([
+            { cls: "gradient", bytes: sh.n_params, label: "real parameters " + sh.n_params }
+          ], sh.padded_total),
+          h("small muted", sh.n_params + " ÷ " + sh.world + " = " +
+            f(sh.n_params / sh.world, 2) + ", which is not an integer. Pad to " +
+            sh.padded_total + " and every rank owns exactly " + sh.shard_size +
+            " — at the cost of " + sh.padding_elements + " elements (" +
+            f(sh.padding_elements / sh.padded_total * 100, 1) +
+            "%) that hold nothing at all.")]),
+        NN.callout("key", "Padding, not truncation — and it is a tuning knob",
+          sh.note)
+      ]), "f-fade")
     ];
   }
 });
@@ -4597,12 +4647,14 @@ S({
       ]),
       d("rowflex", beats),
       frag(NN.callout("mem", "Peak is one layer, not one model",
-        "Persistent per-GPU state is " + memTot(Z3) + " elements. On top of it " +
-        "sits exactly one materialised layer — the largest here is " +
-        Math.max.apply(null, PMOD.layer_params) + " elements. For " + MODEL.name +
-        " that is " + BY(P_LAYER * R_W) + " of transient full-layer weight " +
-        "against " + BY(CFG.stateB) + " of model state spread over the " +
-        "cluster."), "f-fade"),
+        "The weight shard at rest is " + Z3.peak.at_rest + " elements. On top " +
+        "of it sits a materialised layer — the largest here is " +
+        Z3.peak.largest_layer_params + " — so the peak is " +
+        Z3.peak.peak_no_prefetch + ", and " + Z3.peak.peak_with_prefetch +
+        " once the next layer is being prefetched alongside. The next slide is " +
+        "entirely about that gap. For " + MODEL.name + " one materialised block " +
+        "is " + BY(P_LAYER * R_W) + " against " + BY(CFG.stateB) +
+        " of model state spread over the cluster."), "f-fade"),
       frag(NN.callout("warn", "And it is why prefetch is not optional",
         "Two all-gathers and one reduce-scatter per layer per step. Frameworks " +
         "gather layer i+1 while layer i computes; if the fabric cannot keep up, " +
@@ -4629,6 +4681,73 @@ S({
       live >= 0 ? "layer " + live + " is WHOLE here — " +
         PMOD.layer_params[live] + " elements, freed the moment it is used"
                 : "GPU 0 holds shard 0 of every layer — " + memTot(Z3) + " elements"));
+  }
+});
+
+S({
+  chapter: "ZeRO · at rest vs at peak", plain: "“params / N” is the at-rest figure. The peak is what has to fit.",
+  notes: "The most commonly repeated claim about ZeRO-3 is that per-GPU memory " +
+    "becomes the model divided by the world size. That is true, and it is the " +
+    "at-rest figure: " + Z3.peak.at_rest + " elements here. But a GPU cannot " +
+    "multiply by a quarter of a matrix. The instant a layer is needed it is " +
+    "materialised in full, and if the framework is prefetching the next layer " +
+    "while computing this one — which it must, or the GPUs stall — then two " +
+    "whole layers are resident at once. The data gives all three: at rest " +
+    Z3.peak.at_rest + ", peak without prefetch " + Z3.peak.peak_no_prefetch +
+    ", peak with prefetch " + Z3.peak.peak_with_prefetch + ". That last one is " +
+    f(Z3.peak.ratio_to_at_rest, 3) + "× the number people quote, and it is the " +
+    "number that has to fit. The structure is peak/at_rest = 1 + (N−1)/L: " +
+    "the deeper the model, the smaller the gather overhead relative to the " +
+    "shard, so ZeRO-3 rewards depth and punishes a model that is a few very " +
+    "wide layers. And the hard limit: " + Z3.peak.note.split("--")[1],
+  build: function (ctx) {
+    const pk = Z3.peak;
+    const Lm = pk.layer_params.length;
+    const pts = [];
+    for (let L = 2; L <= 96; L++) pts.push([L, 1 + (WORLD - 1) / L]);
+    return [
+      kicker("Distributed · ZeRO-3 · the number that actually has to fit"),
+      title("At rest " + pk.at_rest + " elements. At peak " +
+            pk.peak_with_prefetch + ".", true),
+      d("cols wide-l", [
+        frag(d("panel o", [ph("elements resident on one GPU"),
+          NN.chart.bars({ items: [
+            { label: "at rest · the quoted figure", value: pk.at_rest,
+              color: "var(--optimizer)", sub: "· params ÷ " + WORLD },
+            { label: "+ one materialised layer", value: pk.peak_no_prefetch,
+              color: "var(--weight)",
+              sub: "· largest layer is " + pk.largest_layer_params },
+            { label: "+ prefetching the next one", value: pk.peak_with_prefetch,
+              color: "var(--critical)",
+              sub: "· " + f(pk.ratio_to_at_rest, 3) + "× the quoted figure" }
+          ], unit: "elems" })]), "f-left"),
+        d("stack", [
+          frag(NN.formula({ rule: "peak / at_rest", sub: "1 + (N − 1) / L",
+            result: f(pk.ratio_to_at_rest, 3) + " at N = " + WORLD + ", L = " + Lm,
+            cls: "optimizer" }), "f-right"),
+          frag(d("panel acc tight", [ph("gathered on top of the shard, per layer"),
+            d("rowflex", pk.gather_extra_per_layer.map(function (g, L) {
+              return d("pill", "W" + L + " · +" + g);
+            }))]), "f-right"),
+          frag(d("panel acc tight", [ph("peak ÷ at-rest as the model gets deeper"),
+            NN.chart.line({ series: [{ name: "1 + (N−1)/L", color: "var(--optimizer)",
+              points: pts, dots: false }], width: 520, height: 176,
+              xlabel: "layers L", ylabel: "× at-rest", yMin: 1, yMax: 2.6,
+              margin: { t: 12, r: 16, b: 32, l: 54 } })]), "f-right")
+        ])
+      ]),
+      frag(d("cols", [
+        NN.callout("key", "ZeRO-3 rewards depth",
+          "The gather overhead is one layer; the shard is the whole model over " +
+          "N. A deep, narrow model amortises the gather over many layers and " +
+          "the ratio approaches 1; a shallow, very wide one pays almost a whole " +
+          "layer on top of its shard. " + MODEL.name + " has " + CFG.layers +
+          " layers, which puts the ratio at " +
+          f(1 + (WORLD - 1) / CFG.layers, 3) + " at world " + WORLD + "."),
+        NN.callout("warn", "And there is a floor ZeRO-3 cannot cross",
+          pk.note)
+      ]), "f-fade")
+    ];
   }
 });
 
@@ -4702,30 +4821,32 @@ S({
 
 S({
   chapter: "ZeRO · the price", plain: "What each rung costs on the wire",
-  notes: "Memory is never free and the data says exactly what it costs. Stage " +
-    "1 sends " + Z1.comm_vs_ddp + "× DDP, because it adds an all-gather of the " +
-    "updated weights on top of the gradient all-reduce. Stage 2 sends " +
-    Z2.comm_vs_ddp + "× — the same as plain DDP — because the reduce-scatter " +
-    "it substitutes is cheaper than the all-reduce it replaces. Stage 3 sends " +
-    Z3.comm_vs_ddp + "×, because the weights are gathered twice per step. So " +
-    "the guidance is not 'always use stage 3'. It is: use the highest stage " +
-    "your interconnect can hide. On NVLink inside a node, stage 3 is usually " +
-    "free. Over commodity Ethernet between nodes, stage 1 may already be too " +
-    "much and the answer is a different axis entirely — which is where the " +
-    "next two sections go.",
+  notes: "And here is the number that reframes the whole section. Stages 1 and " +
+    "2 send " + Z1.comm_vs_ddp + "× DDP. Not 1.5, not 1.2 — exactly one, " +
+    "because reduce-scatter plus all-gather is arithmetically the same volume " +
+    "as the all-reduce it replaces. So going from DDP to " + Z2.name +
+    " removes " + (memTot(DDP) - memTot(Z2)) + " of " + memTot(DDP) +
+    " elements per GPU and costs nothing on the wire. If you are running DDP " +
+    "today with no ZeRO at all, you are paying full memory for no bandwidth " +
+    "saving whatsoever. Stage 3 is the only rung that actually costs: " +
+    Z3.comm_vs_ddp + "×, because the weights have to be gathered twice per " +
+    "step. So the guidance is: turn stage 2 on always, and take stage 3 when " +
+    "your interconnect can hide it. Inside a node on NVLink it usually can; " +
+    "across commodity networking it often cannot, and the answer is a " +
+    "different axis entirely.",
   build: function () {
     const items = [
       { label: "DDP", value: 1.0, color: "var(--accent)", sub: "· one all_reduce" },
-      { label: Z1.name, value: Z1.comm_vs_ddp, color: "var(--accent)",
-        sub: "· all_reduce + all_gather" },
+      { label: Z1.name, value: Z1.comm_vs_ddp, color: "var(--good)",
+        sub: "· reduce_scatter + all_gather · free" },
       { label: Z2.name, value: Z2.comm_vs_ddp, color: "var(--good)",
-        sub: "· reduce_scatter + all_gather" },
+        sub: "· identical schedule to stage 1 · free" },
       { label: Z3.name, value: Z3.comm_vs_ddp, color: "var(--critical)",
         sub: "· gather every layer, twice" }
     ];
     return [
       kicker("Distributed · ZeRO · the price"),
-      title("Memory down, bytes on the wire up — except at stage 2"),
+      title("Stages 1 and 2 are free. Only stage 3 costs anything."),
       frag(d("panel g", [ph("communication volume, relative to DDP"),
         NN.chart.bars({ items: items, unit: "× DDP", max: 1.75 })]), "f-fade"),
       frag(d("cols3", [
@@ -4736,13 +4857,14 @@ S({
         panel("crit tight", [ph(Z3.name + " · " + Z3.comm_vs_ddp + "×"),
           h("small", Z3.drawback)])
       ]), "f-fade"),
-      frag(NN.callout("key", "The rule of thumb",
-        "Use the highest stage your interconnect can hide behind compute. " +
-        "Inside a node on NVLink that is usually stage 3. Across nodes on " +
-        "commodity networking it may be stage 1, or none at all — at which " +
-        "point the answer is not a better data-parallel scheme but a different " +
-        "axis of parallelism entirely."), "f-fade"),
-      frag(h("small muted", Z3.verify.claim))
+      frag(NN.callout("key", "So plain DDP is rarely the right default",
+        "DDP and " + Z2.name + " move the same bytes — " + Z2.comm_vs_ddp +
+        "× — and " + Z2.name + " holds " + (memTot(DDP) - memTot(Z2)) +
+        " fewer elements per GPU, " + f(memTot(DDP) / memTot(Z2), 2) +
+        "× less state. There is no bandwidth argument for staying at DDP; " +
+        "there is only an argument about implementation complexity and about " +
+        "operations, like a global gradient norm, that want the whole vector " +
+        "in one place."), "f-fade")
     ];
   }
 });
@@ -4752,9 +4874,12 @@ S({
 /* ======================================================================== */
 const TP = STRAT.tp;
 
-/* Re-run the Megatron-style forward here so the slides can show the actual
-   per-GPU partial products, which the generator does not store. The result
-   is checked against PARALLEL.model.yhat and warns if it disagrees. */
+/* The generator now ships the per-GPU partials on every block
+   (per_gpu_hidden, per_gpu_partial_out, summed_before_bias, after_bias) and
+   the slides RENDER those. We still re-run the Megatron forward here and
+   compare, because two independent implementations agreeing is a stronger
+   statement than either one alone — and a silent divergence between the
+   generator and the deck is exactly the failure this project exists to avoid. */
 const tpCalc = (function () {
   const Ws = PMOD.Ws, bs = PMOD.bs, X = PMOD.X;
   function mm(A, B) {           /* A (m x k) · B (k x n) */
@@ -4821,10 +4946,39 @@ const tpCalc = (function () {
     console.warn("nn-internals slides: TP recomputation disagrees with PARALLEL.model.yhat " +
                  "by " + err);
   }
-  return { blocks: blocks, yhat: hFull, err: err };
+  /* cross-check every stored partial against the local re-run */
+  let xerr = 0;
+  TP.blocks.forEach(function (blk, bi) {
+    const mine = blocks[bi];
+    (blk.per_gpu_partial_out || []).forEach(function (p, g) {
+      p.forEach(function (row, i) {
+        row.forEach(function (v, j) {
+          xerr = Math.max(xerr, Math.abs(v - mine.partials[g][i][j]));
+        });
+      });
+    });
+    (blk.summed_before_bias || []).forEach(function (row, i) {
+      row.forEach(function (v, j) {
+        xerr = Math.max(xerr, Math.abs(v - mine.summed[i][j]));
+      });
+    });
+  });
+  if (xerr > 1e-12) {
+    console.warn("nn-internals slides: stored TP partials disagree with the " +
+                 "local re-run by " + xerr);
+  }
+  return { blocks: blocks, yhat: hFull, err: err, crosscheck: xerr };
 })();
 
-const TPB = tpCalc.blocks[tpCalc.blocks.length - 1];   /* the block ending in ŷ */
+/* the block ending in yhat — rendered from the SHIPPED partials */
+const TPBLK = TP.blocks[TP.blocks.length - 1];
+const TPB = {
+  blk:      TPBLK,
+  partials: TPBLK.per_gpu_partial_out,
+  summed:   TPBLK.summed_before_bias,
+  out:      TPBLK.after_bias,
+  hidden:   TPBLK.per_gpu_hidden
+};
 
 S({
   chapter: "Tensor parallel · the cut", plain: "A different cut: split the weight matrix itself",
@@ -5065,7 +5219,12 @@ S({
     f(PMOD.bs[PM.n_layers - 1][0], 3) + " gives " + f(PMOD.yhat[0][0], 5) +
     ". So tensor parallelism, like data parallelism and like ZeRO, does not " +
     "change what is computed. All three change only where the numbers live and " +
-    "when they move.",
+    "when they move. One thing worth saying about how this slide is built: the " +
+    "partials on screen are the ones the generator shipped, and the deck also " +
+    "re-runs the whole Megatron forward independently in JavaScript and " +
+    "compares every element. The two implementations agree to " +
+    f(tpCalc.crosscheck, 1) + ". Two independent programs landing on the same " +
+    "numbers is a stronger statement than either one on its own.",
   build: function () {
     const bLast = PMOD.bs[PM.n_layers - 1][0];
     return [
@@ -5087,6 +5246,8 @@ S({
       frag(NN.tiles([
         { k: "max |Δ| vs the single-GPU forward", v: f(TP.verify.forward_max_err, 1),
           s: TP.verify.passed ? "PASS" : "FAIL", cls: "activation" },
+        { k: "shipped partials vs this page's re-run", v: f(tpCalc.crosscheck, 1),
+          s: "two independent implementations", cls: "activation" },
         { k: "all-reduce payload", v: TP.blocks[0].allreduce_elements + " elems",
           s: "per block, on the critical path", cls: "gradient" },
         { k: "collectives per step", v: String(TP.schedule.filter(function (c) {
@@ -5228,12 +5389,28 @@ S({
     "them per block forward, two backward, across " + CFG.layers + " blocks. " +
     "That is " + BY(4 * CFG.layers * CFG.batch * CFG.seq * CFG.d * BF16B) +
     " of traffic per step per GPU, none of it overlappable, all of it on the " +
-    "critical path. On NVLink that is fine. On an inter-node network it is " +
-    "catastrophic — which is why the rule is: TP degree never exceeds the " +
-    "number of GPUs inside one NVLink domain.",
+    "critical path. Now put a time on it, with the caveat that the cost model " +
+    "is a model and says so. Sending that much per GPU over " + NVL.name +
+    " at " + NVL.per_dir_GBps + " GB/s per direction and " +
+    f(CM.achieved_fraction * 100, 0) + "% achieved takes about " +
+    f(wireSeconds(4 * CFG.layers * CFG.batch * CFG.seq * CFG.d * BF16B *
+                  ringFactor("all_reduce", 8), NVL) * 1000, 0) +
+    " ms. Over " + IBL.name + " it is about " +
+    f(wireSeconds(4 * CFG.layers * CFG.batch * CFG.seq * CFG.d * BF16B *
+                  ringFactor("all_reduce", 8), IBL) * 1000, 0) +
+    " ms — and the GPUs are idle for all of it, because the next matmul needs " +
+    "the result. That single comparison is the whole rule: TP degree never " +
+    "exceeds the number of GPUs inside one NVLink domain.",
   build: function () {
+    const TPDEG = 8;                       /* scenario: one node of 8 */
     const perAR = CFG.batch * CFG.seq * CFG.d * BF16B;
     const perStep = 4 * CFG.layers * perAR;
+    const sent = perStep * ringFactor("all_reduce", TPDEG);   /* ring, per GPU */
+    const tNV = wireSeconds(sent, NVL), tIB = wireSeconds(sent, IBL);
+    /* the standard 6·N·D estimate: 2 FLOPs/param forward, 4 backward,
+       divided by the TP degree because the matmuls are sharded too */
+    const flops = 6 * (CFG.batch * CFG.seq) * (CFG.layers * P_LAYER) / TPDEG;
+    const tCompute = flops / (GPUD.bf16_dense_tflops * 1e12);
     return [
       kicker("Distributed · tensor parallel · the constraint"),
       title("The payload is an activation, and activations are big"),
@@ -5242,25 +5419,44 @@ S({
           h("small muted", "batch × seq × d, bf16")]),
         panel("a", [ph("per block"), h("midnum v-activation", BY(4 * perAR)),
           h("small muted", "2 forward + 2 backward")]),
-        panel("g", [ph("per step, " + CFG.layers + " blocks"),
-          h("midnum v-gradient", BY(perStep)),
-          h("small muted", "per GPU, per step")]),
+        panel("g", [ph("sent per GPU per step · ring, TP=" + TPDEG),
+          h("midnum v-gradient", BY(sent)),
+          h("small muted", CFG.layers + " blocks × " +
+            f(ringFactor("all_reduce", TPDEG), 3) + "S")]),
         panel("crit", [ph("overlappable?"), h("midnum", "no"),
           h("small muted", "the next matmul needs the result")])
       ]), "f-pop"),
+      frag(d("panel crit", [ph("time on the wire, per GPU per step · " +
+        "TP = " + TPDEG + " · " + MODEL.name + " at " + CFG.seq + " tokens"),
+        NN.chart.bars({ items: [
+          { label: "compute · 6·N·D on " + GPUD.name,
+            value: tCompute * 1000, color: "var(--accent)",
+            sub: "· " + GPUD.bf16_dense_tflops + " dense bf16 TFLOP/s" },
+          { label: "wire · " + NVL.name + " · " + NVL.per_dir_GBps + " GB/s per dir",
+            value: tNV * 1000, color: "var(--activation)",
+            sub: "· +" + f(tNV / tCompute * 100, 0) + "% on top of compute" },
+          { label: "wire · " + IBL.name + " · " + IBL.per_dir_GBps + " GB/s per dir",
+            value: tIB * 1000, color: "var(--critical)",
+            sub: "· +" + f(tIB / tCompute * 100, 0) + "% — more time waiting than working" }
+        ], unit: "ms" })]), "f-fade"),
       frag(d("cols", [
         NN.callout("warn", "Compare with DDP's gradient all-reduce",
           "DDP moves " + BY(CFG.params * R_G) + " once per step and hides " +
           "almost all of it behind the backward pass. Tensor parallelism moves " +
-          BY(perStep) + " per step and can hide none of it, because every " +
+          BY(sent) + " per GPU per step and can hide none of it, because every " +
           "collective sits between two matmuls that depend on it."),
         NN.callout("key", "Hence the rule",
-          "TP degree ≤ the number of GPUs in one NVLink domain — 8 on a typical " +
-          "node. Beyond that you are running a latency-bound collective over a " +
-          "network on the critical path of every layer, and the GPUs will be " +
-          "idle waiting for it.")
+          "TP degree ≤ the number of GPUs in one NVLink domain — " + TPDEG +
+          " on a typical node. Inside it the collectives add " +
+          f(tNV / tCompute * 100, 0) + "% to the step; outside it they add " +
+          f(tIB / tCompute * 100, 0) + "%, and none of it can be overlapped, " +
+          "because every collective sits between two matmuls that depend on it.")
       ]), "f-fade"),
-      frag(h("small muted", "<b>" + TP.name + " · drawback</b> — " + TP.drawback))
+      frag(h("small muted", MODEL_CAVEAT + " Compute uses the standard " +
+        "<span class='mono'>6·N·D</span> estimate and " + GPUD.name + "'s " +
+        "<b>dense</b> bf16 throughput, " + GPUD.bf16_dense_tflops +
+        " TFLOP/s — not the 2:4-sparsity headline figure, which is double and " +
+        "does not apply to dense training."))
     ];
   }
 });
@@ -5269,7 +5465,9 @@ S({
 /*  PART G · PIPELINE PARALLEL                                              */
 /* ======================================================================== */
 const PP = STRAT.pp;
-const PGRID = PP.grid;
+const SCHED_G = PP.schedules.gpipe;      /* all forwards, then all backwards */
+const SCHED_1 = PP.schedules["1f1b"];    /* warm up, alternate, drain        */
+const PGRID = SCHED_G.grid;
 const PSLOTS = PGRID[0].length;
 
 /* Rebuild the generator's occupancy grid here so a naive (M = 1) schedule
@@ -5290,16 +5488,25 @@ function pipeGrid(P, M) {
   }
   return g;
 }
-(function () {
-  const mine = pipeGrid(WORLD, PP.n_micro);
-  const same = JSON.stringify(mine) === JSON.stringify(PGRID);
-  if (!same) console.warn("nn-internals slides: local pipeline grid disagrees with PARALLEL");
-})();
 function bubbleOf(grid) {
   let idle = 0, tot = 0;
   grid.forEach(function (r) { r.forEach(function (v) { tot++; if (!v) idle++; }); });
   return idle / tot;
 }
+(function () {
+  const mine = pipeGrid(WORLD, PP.n_micro);
+  if (JSON.stringify(mine) !== JSON.stringify(SCHED_G.grid)) {
+    console.warn("nn-internals slides: local GPipe grid disagrees with PARALLEL");
+  }
+  [SCHED_G, SCHED_1].forEach(function (sc) {
+    if (Math.abs(bubbleOf(sc.grid) - sc.stats.bubble_measured) > 1e-5) {
+      console.warn("nn-internals slides: counted bubble disagrees with stats for " +
+                   sc.what);
+    }
+  });
+})();
+/* The M = 1 case is a slider-style derivation, not shipped data: the same
+   rule the generator uses, run with one micro-batch. */
 const NAIVE = pipeGrid(WORLD, 1);
 
 S({
@@ -5441,10 +5648,14 @@ S({
     "run full, and drain. Slots 0 to " + (WORLD - 2) + " are the fill: stage 0 " +
     "is working and the others are waiting for their first activations. Then " +
     "there is a stretch where every stage has work. Then the drain, mirrored. " +
-    "The grid comes straight from PARALLEL.strategies.pp.grid — " + WORLD +
-    " stages by " + PSLOTS + " slots, " + PP.n_micro + " micro-batches — and " +
-    "the idle count on it is " + f(PP.bubble_fraction * 100, 1) + "%, which is " +
-    "exactly what the formula on the next slide predicts. Point at the " +
+    "The grid is the simulated GPipe schedule from " +
+    "PARALLEL.strategies.pp.schedules.gpipe — " + WORLD + " stages by " +
+    SCHED_G.stats.slots + " slots, " + PP.n_micro + " micro-batches — and its " +
+    "idle cells are counted, not asserted: " + SCHED_G.stats.busy_cells +
+    " busy of " + SCHED_G.stats.total_cells + ", so " +
+    f(SCHED_G.stats.bubble_measured * 100, 1) + "% idle, which is exactly what " +
+    "the formula on the next slide predicts. Two slides on we draw the 1F1B " +
+    "schedule beside this one. Point at the "  +
     "diagonal: it is the activation of one micro-batch travelling forward " +
     "through the stages, then the gradient travelling back.",
   build: function (ctx) {
@@ -5457,8 +5668,10 @@ S({
     return [
       kicker("Distributed · pipeline parallel · occupancy"),
       title(WORLD + " stages × " + PP.n_micro + " micro-batches · " +
-            f(PP.bubble_fraction * 100, 0) + "% idle", true),
-      frag(d("panel a", [ph("F = forward, B = backward, hatched = bubble"), ctx.g]), "f-fade"),
+            f(SCHED_G.stats.bubble_measured * 100, 0) + "% idle", true),
+      frag(d("panel a", [ph("GPipe schedule · F = forward, B = backward, " +
+        "hatched = bubble · " + SCHED_G.stats.busy_cells + " busy of " +
+        SCHED_G.stats.total_cells + " cells"), ctx.g]), "f-fade"),
       ctx.lab,
       d("rowflex", beats),
       frag(NN.legend(["activation", "gradient"]), "f-fade")
@@ -5531,54 +5744,63 @@ S({
 
 S({
   chapter: "Pipeline parallel · GPipe vs 1F1B", plain: "GPipe vs 1F1B: same bubble, very different memory",
-  notes: "Two schedules with identical bubble fractions and completely " +
-    "different memory profiles. GPipe — which is what the grid in PARALLEL " +
-    "draws — runs all M forwards, then all M backwards. That means at the " +
-    "turnaround every one of the M micro-batches is holding its activations " +
-    "simultaneously: activation memory proportional to M. 1F1B interleaves " +
-    "instead: once the pipe is full, each stage alternates one forward and one " +
-    "backward, so a micro-batch's activations are released as soon as possible " +
-    "and a stage holds at most P of them, not M. Since the practical rule is " +
-    "M ≥ 4P, that is a four-fold-plus reduction in activation memory for " +
-    "exactly the same throughput. This is why every modern framework " +
-    "implements 1F1B and why GPipe is mostly of historical interest.",
+  notes: "Both grids on this slide are simulated schedules, not drawings. " +
+    "GPipe: " + SCHED_G.what + " 1F1B: " + SCHED_1.what + " Read the two " +
+    "occupancy charts against each other. The slot counts are identical — " +
+    SCHED_G.stats.slots + " each — and the measured bubble is identical, " +
+    f(SCHED_G.stats.bubble_measured * 100, 1) + "% both times, counted from " +
+    "the idle cells rather than asserted. So they finish at exactly the same " +
+    "moment. What differs is where the backwards sit. Under GPipe a stage runs " +
+    "all " + PP.n_micro + " forwards before any backward, so at the turnaround " +
+    "all " + PP.n_micro + " micro-batches are holding their activations at " +
+    "once: peak_live_per_stage is [" + SCHED_G.stats.peak_live_per_stage.join(", ") +
+    "]. Under 1F1B a stage starts backwards as soon as the pipe is warm, so a " +
+    "micro-batch's activations are freed early and the profile is staircased: " +
+    "[" + SCHED_1.stats.peak_live_per_stage.join(", ") + "] — the LAST stage " +
+    "holds only one. Deep stages are the ones under pressure, and 1F1B relieves " +
+    "all but the first. Since the practical rule is M ≥ 4P, the saving grows " +
+    "with M: GPipe's peak is O(M), 1F1B's is O(P). That decoupling is why every " +
+    "modern framework implements 1F1B.",
   build: function () {
-    const gpipePeak = PP.n_micro, onefonebPeak = WORLD;
+    const gs = SCHED_G.stats, os = SCHED_1.stats;
+    const bar = function (st, col) {
+      return d("rowflex", st.peak_live_per_stage.map(function (v, i) {
+        return d("pill" + (v === Math.max.apply(null, st.peak_live_per_stage) ? " hot" : ""),
+          "stage " + i + " · " + v + " live");
+      }));
+    };
     return [
       kicker("Distributed · pipeline parallel · scheduling"),
-      title("Identical bubble. Activation memory differs by M / P."),
+      title("Identical bubble, identical finish time, different memory", true),
       frag(d("cols", [
-        panel("crit", [ph("GPipe · all forwards, then all backwards"),
-          h("say", "Every one of the " + PP.n_micro + " micro-batches is live " +
-            "at the turnaround."),
-          NN.memstrip([{ cls: "activation", bytes: gpipePeak,
-            label: "peak = M = " + gpipePeak + " micro-batches live" }], gpipePeak),
-          h("small muted", "bubble " + f(PP.bubble_fraction * 100, 1) + "%")]),
-        panel("a", [ph("1F1B · interleave as soon as the pipe is full"),
-          h("say", "A stage holds at most P = " + WORLD + " micro-batches, " +
-            "whatever M is."),
-          NN.memstrip([{ cls: "activation", bytes: onefonebPeak,
-            label: "peak = P = " + onefonebPeak }], gpipePeak),
-          h("small muted", "bubble " + f(PP.bubble_fraction * 100, 1) +
-            "% — identical")])
+        d("panel crit", [ph("GPipe · " + SCHED_G.what + " · bubble " +
+          f(gs.bubble_measured * 100, 1) + "%"),
+          NN.gpu.pipelineGrid(SCHED_G.grid, { cell: 30 }),
+          h("small muted", "peak live per stage — " + SCHED_G.peak_activations)]),
+        d("panel a", [ph("1F1B · " + SCHED_1.what + " · bubble " +
+          f(os.bubble_measured * 100, 1) + "%"),
+          NN.gpu.pipelineGrid(SCHED_1.grid, { cell: 30 }),
+          h("small muted", "peak live per stage — " + SCHED_1.peak_activations)])
       ]), "f-pop"),
       frag(d("cols", [
-        NN.tiles([
-          { k: "GPipe peak", v: "M = " + PP.n_micro, s: "micro-batches live", cls: "activation" },
-          { k: "1F1B peak", v: "P = " + WORLD, s: "micro-batches live", cls: "activation" },
-          { k: "at the M ≥ 4P rule", v: "4× less", s: "same throughput" }
-        ]),
-        NN.callout("key", "Why you would ever choose more micro-batches",
-          "Under GPipe, raising M shrinks the bubble and raises activation " +
-          "memory in lockstep, so you are stuck. Under 1F1B the memory ceiling " +
-          "is P and does not move, so M is free to be as large as the batch " +
-          "allows. That decoupling is the whole contribution.")
+        d("panel crit tight", [ph("GPipe · micro-batches live per stage"),
+          bar(gs)]),
+        d("panel a tight", [ph("1F1B · micro-batches live per stage"),
+          bar(os)])
       ]), "f-fade"),
-      frag(h("small muted",
-        "The occupancy grid in <span class='mono'>PARALLEL.strategies.pp.grid</span> " +
-        "is the GPipe ordering — all " + PP.n_micro + " forwards on a stage " +
-        "before any backward. The bubble fraction it records, " +
-        f(PP.bubble_fraction, 4) + ", is the same for both schedules."))
+      frag(d("cols wide-l", [
+        NN.callout("key", "Same throughput, and the last stage breathes",
+          "Both schedules occupy " + gs.busy_cells + " of " + gs.total_cells +
+          " cells and finish in " + gs.slots + " slots. GPipe holds [" +
+          gs.peak_live_per_stage.join(", ") + "] micro-batches; 1F1B holds [" +
+          os.peak_live_per_stage.join(", ") + "]. Raising M raises the first " +
+          "list and leaves the second alone — that is the whole contribution, " +
+          "and it is why M can be chosen for throughput instead of for memory."),
+        NN.tiles([
+          { k: "GPipe peak", v: "O(M)", s: "M = " + PP.n_micro + " here", cls: "activation" },
+          { k: "1F1B peak", v: "O(P)", s: "P = " + WORLD + " here", cls: "activation" }
+        ])
+      ]), "f-fade")
     ];
   }
 });
@@ -5696,6 +5918,64 @@ S({
           "batch index. Nothing overlaps, so the memory savings multiply " +
           "rather than compete.")
       ]), "f-fade")
+    ];
+  }
+});
+
+S({
+  chapter: "3D · the wires", plain: "One ratio decides the whole mapping: inside the box vs between boxes",
+  notes: "Before choosing where each axis goes, look at what you are choosing " +
+    "between. These are vendor numbers, quoted not measured, and note the " +
+    "trap in the first column: NVLink is always marketed as a bidirectional " +
+    "figure — " + NVL.bidir_GBps + " GB/s for " + NVL.name + " — and a " +
+    "collective cares about one direction, so the number that matters is " +
+    NVL.per_dir_GBps + ". Against that, the fastest inter-node link here is " +
+    IBL.name + " at " + IBL.per_dir_GBps + " GB/s per direction. That is a " +
+    f(NVL.per_dir_GBps / IBL.per_dir_GBps, 1) + "× gap, and it does not close " +
+    "— every hardware generation raises both. " + ICON.why_it_matters,
+  build: function () {
+    const rows = ICON.links.map(function (l) {
+      const intra = l.scope === "intra-node";
+      return el("tr", {}, [
+        /* intra/inter is NOT a tensor class, so it does not take a tensor hue;
+           accent + critical are the reserved non-tensor colours, and the scope
+           column states it in words as well */
+        el("td", { html: "<span class='mono' style='color:" +
+          (intra ? "var(--accent)" : "var(--critical)") + "'>" + l.name +
+          "</span>" }),
+        el("td", { class: "mono muted" }, l.scope),
+        el("td", { class: "n" }, String(l.bidir_GBps)),
+        el("td", { class: "n mono", html: "<b>" + l.per_dir_GBps + "</b>" }),
+        el("td", { style: { textAlign: "left" }, class: "muted" }, l.note || "")
+      ]);
+    });
+    return [
+      kicker("Distributed · the wires"),
+      title("Intra-node is <b>" +
+            f(NVL.per_dir_GBps / IBL.per_dir_GBps, 0) +
+            "×</b> inter-node. Everything else follows from that.", true),
+      d("cols wide-l", [
+        frag(d("panel acc", [ph("GB/s · vendor figures, quoted not measured"),
+          el("table", { class: "data" }, [
+            el("thead", {}, el("tr", {}, [
+              el("th", {}, "link"), el("th", {}, "scope"),
+              el("th", {}, "bidir"), el("th", {}, "per direction"),
+              el("th", { style: { textAlign: "left" } }, "note")])),
+            el("tbody", {}, rows)
+          ])]), "f-left"),
+        d("stack", [
+          frag(NN.callout("warn", "Read the per-direction column, not the headline",
+            NVL.name + " is quoted as <span class='mono'>" + NVL.bidir_GBps +
+            " GB/s</span> because that is the sum of both directions. A ring " +
+            "all-reduce sends in one direction, so the number that governs it " +
+            "is <span class='mono'>" + NVL.per_dir_GBps +
+            "</span>. Halving a bandwidth by accident is the easiest way to be " +
+            "wrong by 2× in a capacity plan."), "f-right"),
+          frag(NN.callout("key", "Why this single ratio sets the topology",
+            ICON.why_it_matters), "f-right"),
+          frag(h("small muted", ICON._source + "."), "f-right")
+        ])
+      ])
     ];
   }
 });
