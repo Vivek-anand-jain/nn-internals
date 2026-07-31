@@ -430,3 +430,106 @@ footer.site {
   * { transition-duration: .01ms !important; animation-duration: .01ms !important; }
   html { scroll-behavior: auto; }
 }
+
+/* ==========================================================================
+   DISTRIBUTED TRAINING  (pages 09-14)
+   Shared so every parallelism diagram on the site reads the same way.
+   Collectives reuse the tensor grammar: orange = gradients moving,
+   blue = weights moving, green = activations moving.
+   ========================================================================== */
+
+.gpugrid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px; margin: 16px 0;
+}
+.gpu-card {
+  background: var(--surface-2); border: 1px solid var(--hairline);
+  border-radius: 8px; overflow: hidden;
+  transition: border-color .3s, box-shadow .3s, opacity .3s, transform .3s;
+}
+.gpu-card.hot {
+  border-color: var(--gradient);
+  box-shadow: 0 0 0 3px var(--gradient-w);
+  transform: translateY(-2px);
+}
+.gpu-card.dim { opacity: .4; }
+.gpu-head {
+  font-family: var(--mono); font-size: .74rem; font-weight: 700;
+  padding: 6px 10px; background: var(--surface-3); color: var(--ink-2);
+  letter-spacing: .06em; text-transform: uppercase;
+  border-bottom: 1px solid var(--hairline);
+}
+.gpu-body { padding: 9px 10px; }
+.gpu-line {
+  font-family: var(--mono); font-size: .72rem; color: var(--ink-2);
+  padding: 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* which slice of a tensor this GPU owns */
+.shardrow { display: flex; align-items: center; gap: 7px; margin: 4px 0; }
+.shardname {
+  font-family: var(--mono); font-size: .68rem; color: var(--ink-muted);
+  min-width: 30px;
+}
+.shardbar { display: flex; gap: 2px; flex: 1; }
+.shardseg {
+  height: 12px; flex: 1; border-radius: 2px; opacity: .32;
+  transition: opacity .3s, background .3s;
+}
+.shardseg.mine { opacity: 1; }
+
+/* one step of a collective schedule */
+.commcard {
+  background: var(--surface-2); border: 1px solid var(--hairline);
+  border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0;
+  padding: 11px 14px; margin: 9px 0;
+}
+.commcard.noop { opacity: .8; border-left-style: dashed; }
+.commhead {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 5px;
+}
+.commop {
+  font-family: var(--mono); font-weight: 700; font-size: .84rem;
+}
+.commtensor { font-family: var(--mono); font-size: .74rem; color: var(--ink-2); }
+.commbytes {
+  font-family: var(--mono); font-size: .72rem; color: var(--ink-muted);
+  margin-left: auto; white-space: nowrap;
+}
+.commwhy { font-size: .88rem; color: var(--ink-2); line-height: 1.55; }
+.commphase {
+  font-family: var(--mono); font-size: .68rem; color: var(--ink-muted);
+  margin-top: 5px; text-transform: uppercase; letter-spacing: .07em;
+}
+
+.ringviz { display: block; margin: 0 auto; }
+.ringviz path { transition: stroke .3s, opacity .3s, stroke-width .3s; }
+
+/* pipeline occupancy / bubble chart */
+.pipegrid { display: grid; gap: 2px; font-family: var(--mono); }
+.pipehdr {
+  font-size: .6rem; color: var(--ink-muted); text-align: center;
+  padding-bottom: 3px;
+}
+.pipestage {
+  font-size: .68rem; color: var(--ink-2); display: flex;
+  align-items: center; padding-right: 8px; white-space: nowrap;
+}
+.pipecell {
+  display: flex; align-items: center; justify-content: center;
+  font-size: .58rem; font-weight: 700; border-radius: 3px;
+  color: #fff; transition: outline-color .2s;
+  outline: 2px solid transparent;
+}
+.pipecell.f { background: var(--activation); }
+.pipecell.b { background: var(--gradient); }
+.pipecell.idle {
+  background: repeating-linear-gradient(45deg,
+    var(--surface-3), var(--surface-3) 4px,
+    var(--surface-2) 4px, var(--surface-2) 8px);
+}
+.pipecell.now { outline-color: var(--ink); }
+
+/* a strategy-comparison table gets its winner column tinted */
+td.best, th.best { background: color-mix(in srgb, var(--good) 12%, transparent); }
