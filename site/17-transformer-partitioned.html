@@ -266,6 +266,7 @@ details.more > div:last-child { padding-bottom: 12px; }
   const PART  = F.partitioning;
   const PAR   = F.params;
   const FWD   = F.forward;
+  const FS    = F.flat_sharding;   /* the real ZeRO-3 model: layout + per-world shards */
 
   const W    = M.world;          /* 2 */
   const NL   = M.n_layers;       /* 2 */
@@ -292,10 +293,27 @@ details.more > div:last-child { padding-bottom: 12px; }
   function pct(a, b) { return NN.fmt(a / b * 100, 1) + "%"; }
   function entryOf(key) { return PART.filter(function (e) { return e.key === key; })[0]; }
 
-  /* flat offsets: the ZeRO-3 parameter buffer, in PART order */
+  /* Flat offsets come from TF2.flat_sharding.layout — the shipped model of the
+     ZeRO-3 parameter buffer. We keep the naive derivation (concatenate in
+     declaration order) only to assert the two agree; LAYOUT_AGREES is rendered
+     on the page rather than hidden in a console.assert. */
   const OFF = {};
-  (function () { let a = 0; PART.forEach(function (e) { OFF[e.key] = a; a += e.elements; }); })();
+  const LAYOUT = {};
+  FS.layout.forEach(function (l) { OFF[l.key] = l.start; LAYOUT[l.key] = l; });
+  const LAYOUT_CHECK = (function () {
+    let a = 0, bad = [];
+    PART.forEach(function (e) {
+      const l = LAYOUT[e.key];
+      if (!l || l.start !== a || l.end !== a + e.elements) bad.push(e.key);
+      a += e.elements;
+    });
+    return { agrees: bad.length === 0 && a === FS.total_elements, bad: bad, derivedTotal: a };
+  })();
   function flatIdx(e, r, c) { return OFF[e.key] + r * ncOf(e) + c; }
+
+  /* shard-count options, straight from the data */
+  const WORLDS = Object.keys(FS.by_world).map(Number).sort(function (a, b) { return a - b; });
+  function shardsFor(n) { return FS.by_world[String(n)]; }
 
   const GROUPS = ["attention", "mlp", "layernorm"];
   const GROUP_LABEL = { attention: "attention", mlp: "MLP", layernorm: "LayerNorm" };
@@ -339,8 +357,9 @@ details.more > div:last-child { padding-bottom: 12px; }
                       desc: "not held", kind: "none" };
 
   function z3Slot(e, g, N) {
-    const size = Math.ceil(TOTAL / N);
-    const lo = g * size, hi = Math.min(TOTAL, lo + size);
+    const bw = shardsFor(N);
+    const sh = bw.shards[g];
+    const lo = sh.range[0], hi = sh.range[1];
     const nr = nrOf(e), nc = ncOf(e);
     let cnt = 0;
     for (let r = 0; r < nr; r++) for (let c = 0; c < nc; c++) {
@@ -480,23 +499,23 @@ details.more > div:last-child { padding-bottom: 12px; }
                         el("span", { class: "n" }, " " + shp(e.tp.per_gpu_shape))]),
           el("td", { class: "n" }, String(e.tp.per_gpu_elements)),
           el("td", { class: "n" }, "stage " + e.pp.stage),
-          el("td", { class: "n" }, String(e.zero3.per_gpu_elements))
+          el("td", { class: "n" }, "[" + LAYOUT[e.key].start + ", " + LAYOUT[e.key].end + ")")
         ]));
       });
       const sum = rows.reduce(function (a, e) { return a + e.elements; }, 0);
       const tpSum = rows.reduce(function (a, e) { return a + e.tp.per_gpu_elements; }, 0);
-      const z3Sum = rows.reduce(function (a, e) { return a + e.zero3.per_gpu_elements; }, 0);
       tb.appendChild(el("tr", { class: "tot" }, [
         el("td", {}, rows.length + " tensors"), el("td", {}, ""), el("td", {}, ""), el("td", {}, ""),
         el("td", {}, ""), el("td", { class: "n" }, String(sum)), el("td", {}, ""),
-        el("td", { class: "n" }, String(tpSum)), el("td", {}, ""), el("td", { class: "n" }, String(z3Sum))
+        el("td", { class: "n" }, String(tpSum)), el("td", {}, ""),
+        el("td", { class: "n" }, FS.total_elements + " total")
       ]));
       tblHost.appendChild(el("table", { class: "data" }, [
         el("thead", {}, el("tr", {}, [
           el("th", {}, "key"), el("th", {}, "tensor"), el("th", { class: "n" }, "layer"),
           el("th", {}, "group"), el("th", { class: "n" }, "shape"), el("th", { class: "n" }, "elements"),
           el("th", {}, "TP split"), el("th", { class: "n" }, "TP / GPU"),
-          el("th", { class: "n" }, "PP"), el("th", { class: "n" }, "ZeRO-3 / GPU")
+          el("th", { class: "n" }, "PP"), el("th", { class: "n" }, "flat buffer [start, end)")
         ])),
         tb
       ]));
@@ -1112,10 +1131,7 @@ details.more > div:last-child { padding-bottom: 12px; }
           el("span", { class: "kk" }, "per GPU " + shp(e.tp.per_gpu_shape) + " = " +
             e.tp.per_gpu_elements + " (" + pct(e.tp.per_gpu_elements, e.elements) + ")")
         ]),
-        el("div", { class: "cw" }, e.tp.why
-          ? "tp.why — " + e.tp.why
-          : "tp.why is empty for this entry in tf2.json. The reason is the one given for LayerNorm 1: " +
-            entryOf("L" + e.layer + ".ln1.g").tp.why + "."),
+        el("div", { class: "cw" }, "tp.why — " + e.tp.why),
         cm,
         el("div", { class: "cutbar" }, [btn]),
         extra || null
@@ -1546,17 +1562,28 @@ details.more > div:last-child { padding-bottom: 12px; }
     const host = NN.$("#z3Body");
     host.appendChild(el("p", { html:
       "ZeRO-3 does not look at the matrices at all. Every parameter tensor is flattened, row-major, and " +
-      "concatenated into one buffer of " + TOTAL + " numbers. That buffer is cut into N equal shards. " +
-      "A shard boundary lands wherever the arithmetic puts it — in the middle of a matrix, in the " +
-      "middle of a row, between two unrelated tensors." }));
+      "concatenated into one buffer of " + FS.total_elements + " numbers — that is " +
+      "<code>TF2.flat_sharding.layout</code>, drawn below. The buffer is cut into N equal shards, and a " +
+      "shard boundary lands wherever the arithmetic puts it: in the middle of a matrix, in the middle " +
+      "of a row, or between two tensors that have nothing to do with each other." }));
 
-    const NOPTS = [2, 3, 4, 6, 8];
+    /* the layout is shipped; the page also derives it and asserts they agree */
+    host.appendChild(el("div", { class: "verdict2 " + (LAYOUT_CHECK.agrees ? "ok" : "no"),
+      style: { margin: "0 0 12px" } },
+      LAYOUT_CHECK.agrees
+        ? "✓ layout check: concatenating the " + PART.length + " tensors in declaration order reproduces " +
+          "every [start, end) in flat_sharding.layout, and totals " + LAYOUT_CHECK.derivedTotal +
+          " = flat_sharding.total_elements"
+        : "✗ layout check FAILED for: " + LAYOUT_CHECK.bad.join(", ")));
+
     const sel = el("div", { class: "seg" });
     const out = el("div");
     let n3 = W;
 
-    NOPTS.forEach(function (n) {
-      const b = el("button", { class: "segbtn", "aria-pressed": n === n3 ? "true" : "false" },
+    WORLDS.forEach(function (n) {
+      const bw = shardsFor(n);
+      const b = el("button", { class: "segbtn", "aria-pressed": n === n3 ? "true" : "false",
+        title: bw.boundaries_cutting_a_matrix + " of " + bw.boundaries + " boundaries cut a matrix" },
         n + " shard" + (n > 1 ? "s" : ""));
       b.addEventListener("click", function () {
         n3 = n;
@@ -1567,11 +1594,11 @@ details.more > div:last-child { padding-bottom: 12px; }
     });
 
     function locate(idx) {
-      for (let i = 0; i < PART.length; i++) {
-        const e = PART[i], o = OFF[e.key];
-        if (idx >= o && idx < o + e.elements) {
-          const k = idx - o, nc = ncOf(e);
-          return { entry: e, off: k, r: Math.floor(k / nc), c: k % nc };
+      for (let i = 0; i < FS.layout.length; i++) {
+        const l = FS.layout[i];
+        if (idx >= l.start && idx < l.end) {
+          const e = entryOf(l.key), k = idx - l.start, nc = ncOf(e);
+          return { entry: e, lay: l, off: k, r: Math.floor(k / nc), c: k % nc };
         }
       }
       return null;
@@ -1579,135 +1606,147 @@ details.more > div:last-child { padding-bottom: 12px; }
 
     function drawFlat() {
       out.innerHTML = "";
-      const size = Math.ceil(TOTAL / n3);
+      const bw = shardsFor(n3);
+      const size = bw.shard_size;
 
-      /* tensor segment bar */
+      /* tensor segment bar, straight off flat_sharding.layout */
       const tbar = el("div", { class: "flatbar" });
-      PART.forEach(function (e, i) {
+      FS.layout.forEach(function (l, i) {
         tbar.appendChild(el("div", {
-          class: "flatseg", style: { flexGrow: String(e.elements),
+          class: "flatseg", style: { flexGrow: String(l.elements),
             background: i % 2 ? "var(--surface-3)" : "var(--weight-w)" },
-          title: e.key + " · " + e.elements + " elements · flat [" + OFF[e.key] + ", " +
-                 (OFF[e.key] + e.elements) + ")"
-        }, e.elements >= 16 ? e.key : ""));
+          title: l.key + " · " + l.display + " · " + l.elements + " elements · flat [" +
+                 l.start + ", " + l.end + ")"
+        }, l.elements >= 16 ? l.key : ""));
       });
 
       /* shard bar */
       const sbar = el("div", { class: "flatbar" });
-      for (let g = 0; g < n3; g++) {
-        const lo = g * size, hi = Math.min(TOTAL, lo + size);
+      bw.shards.forEach(function (s) {
         sbar.appendChild(el("div", {
-          class: "flatseg", style: { flexGrow: String(hi - lo),
-            background: g % 2 ? "repeating-linear-gradient(135deg, var(--weight-w) 0 4px, transparent 4px 8px)"
-                              : "var(--weight-w)" },
-          title: "shard " + g + " · flat [" + lo + ", " + hi + ") · " + (hi - lo) + " elements"
-        }, "shard " + g));
-      }
+          class: "flatseg", style: { flexGrow: String(s.elements),
+            background: s.gpu % 2 ? "repeating-linear-gradient(135deg, var(--weight-w) 0 4px, transparent 4px 8px)"
+                                  : "var(--weight-w)" },
+          title: "shard " + s.gpu + " · flat [" + s.range[0] + ", " + s.range[1] + ") · " +
+                 s.elements + " elements · spans " + s.n_tensors_spanned + " tensors" +
+                 (s.cut_through.length ? " · cuts " + s.cut_through.join(", ") : "")
+        }, "shard " + s.gpu));
+      });
 
-      /* boundary ticks aligned to both bars */
+      /* boundary ticks */
       const ticks = el("div", { class: "flatticks" });
-      for (let g = 1; g < n3; g++) {
-        const i = g * size;
-        if (i >= TOTAL) break;
-        const p = i / TOTAL * 100;
+      bw.shards.slice(1).forEach(function (s) {
+        const i = s.range[0];
+        const p = i / FS.total_elements * 100;
         ticks.appendChild(el("i", { style: { left: p + "%" } }));
         ticks.appendChild(el("span", { style: { left: p + "%" } }, String(i)));
-      }
+      });
 
       out.appendChild(el("div", { class: "flatwrap" }, [
-        el("div", { class: "flatlbl" }, "the " + PART.length + " tensors, laid end to end (" + TOTAL + " elements)"),
+        el("div", { class: "flatlbl" }, "flat_sharding.layout — the " + FS.layout.length +
+          " tensors laid end to end (" + FS.total_elements + " elements)"),
         tbar,
         ticks,
-        el("div", { class: "flatlbl" }, n3 + " equal shards of " + size + " — the boundaries above"),
+        el("div", { class: "flatlbl" }, "flat_sharding.by_world[" + n3 + "] — " + n3 +
+          " shards of " + size + (bw.padding ? " (buffer padded by " + bw.padding + " to " +
+          bw.padded_total + ")" : " (no padding needed: " + n3 + " divides " + FS.total_elements + ")")),
         sbar
       ]));
 
       /* where each boundary lands */
-      const rows = [];
-      let straddles = 0;
-      for (let g = 1; g < n3; g++) {
-        const i = g * size;
-        if (i >= TOTAL) break;
+      const rows = bw.shards.slice(1).map(function (s) {
+        const i = s.range[0];
         const loc = locate(i);
         const atStart = loc && loc.off === 0;
-        if (!atStart) straddles++;
-        rows.push(el("tr", {}, [
-          el("td", {}, "shard " + (g - 1) + " " + arrow + " " + g),
-          el("td", { class: "r" }, "flat " + i),
-          el("td", {}, loc ? loc.entry.key : "past the end"),
-          el("td", { class: "r" }, loc ? (loc.entry.shape.length > 1
+        return el("tr", {}, [
+          el("td", {}, "shard " + (s.gpu - 1) + " " + arrow + " " + s.gpu),
+          el("td", { class: "n" }, "flat " + i),
+          el("td", {}, loc ? loc.lay.key : "past the end"),
+          el("td", { class: "n" }, loc ? (loc.entry.shape.length > 1
             ? "[" + loc.r + "][" + loc.c + "]" : "[" + loc.c + "]") : "—"),
-          el("td", {}, atStart ? "lands exactly on a tensor boundary"
-                               : "cuts " + loc.entry.key + " in half (" + loc.off + " of " +
-                                 loc.entry.elements + " before the line)")
-        ]));
-      }
+          el("td", { class: "wrap" }, atStart ? "lands exactly on a tensor boundary"
+                               : "cuts " + loc.lay.display + " in half (" + loc.off + " of " +
+                                 loc.lay.elements + " before the line)")
+        ]);
+      });
+
       out.appendChild(el("div", { class: "panel" }, [
-        el("h4", {}, "where the " + rows.length + " shard boundar" + (rows.length === 1 ? "y lands" : "ies land")),
+        el("h4", {}, "where the " + bw.boundaries + " shard boundar" +
+          (bw.boundaries === 1 ? "y lands" : "ies land")),
         el("div", { class: "scrollx" }, el("table", { class: "data" }, [
           el("thead", {}, el("tr", {}, [el("th", {}, "boundary"), el("th", { class: "n" }, "flat index"),
-            el("th", {}, "falls inside"), el("th", { class: "n" }, "at element"), el("th", { class: "wrap" }, "verdict")])),
+            el("th", {}, "falls inside"), el("th", { class: "n" }, "at element"),
+            el("th", { class: "wrap" }, "verdict")])),
           el("tbody", {}, rows)
         ])),
-        el("div", { class: "verdict2 " + (straddles ? "no" : "ok"), style: { marginTop: "9px" } },
-          straddles
-            ? straddles + " of " + rows.length + " boundar" + (rows.length === 1 ? "y falls" : "ies fall") +
-              " inside a matrix — the shard does not respect what the numbers mean"
-            : "the " + (rows.length === 1 ? "single boundary happens" : rows.length + " boundaries happen") +
-              " to land on tensor boundaries at this shard count — a coincidence of " + TOTAL + " ÷ " + n3 +
-              " against this tensor order, not a property of ZeRO-3. Try 3, 6 or 8 shards.")
+        el("div", { class: "verdict2 " + (bw.clean_seam ? "ok" : "no"), style: { marginTop: "9px" } },
+          bw.clean_seam
+            ? "flat_sharding.by_world[" + n3 + "].clean_seam = true — " +
+              bw.boundaries_cutting_a_matrix + " of " + bw.boundaries + " boundar" +
+              (bw.boundaries === 1 ? "y cuts" : "ies cut") + " a matrix. Nothing straddles here, and " +
+              "that is a coincidence of " + FS.total_elements + " ÷ " + n3 + " against this tensor " +
+              "order, not a property of ZeRO-3. Try " +
+              WORLDS.filter(function (w) { return !shardsFor(w).clean_seam; }).join(", ") + "."
+            : bw.boundaries_cutting_a_matrix + " of " + bw.boundaries + " boundaries fall inside a " +
+              "matrix — the shard does not respect what the numbers mean")
       ]));
 
-      /* what each shard actually spans */
-      const spanRows = [];
-      for (let g = 0; g < n3; g++) {
-        const lo = g * size, hi = Math.min(TOTAL, lo + size);
-        if (lo >= TOTAL) break;
-        const touched = PART.filter(function (e) {
-          return OFF[e.key] < hi && OFF[e.key] + e.elements > lo;
-        }).map(function (e) {
-          const a = Math.max(lo, OFF[e.key]), b = Math.min(hi, OFF[e.key] + e.elements);
-          const n = b - a;
-          return n === e.elements ? e.key : e.key + " (" + n + " of " + e.elements + ")";
-        });
-        spanRows.push(el("tr", {}, [
-          el("td", {}, "shard " + g),
-          el("td", { class: "n" }, "[" + lo + ", " + hi + ")"),
-          el("td", { class: "n" }, String(touched.length)),
-          el("td", { class: "wrap" }, touched.join(" · "))
-        ]));
-      }
+      /* what each shard actually contains */
+      const spanRows = bw.shards.map(function (s) {
+        return el("tr", {}, [
+          el("td", {}, "shard " + s.gpu),
+          el("td", { class: "n" }, "[" + s.range[0] + ", " + s.range[1] + ")"),
+          el("td", { class: "n" }, String(s.n_tensors_spanned)),
+          el("td", { class: "wrap" }, s.spans_tensors.join(" · ")),
+          el("td", { class: "wrap" }, s.cut_through.length
+            ? s.cut_through.join(" · ")
+            : "none — whole tensors only")
+        ]);
+      });
+      const worstShard = bw.shards.slice().sort(function (a, b) {
+        return b.cut_through.length - a.cut_through.length || b.n_tensors_spanned - a.n_tensors_spanned;
+      })[0];
+
       out.appendChild(el("div", { class: "panel" }, [
         el("h4", {}, "what each shard actually contains"),
         el("div", { class: "scrollx" }, el("table", { class: "data" }, [
           el("thead", {}, el("tr", {}, [el("th", {}, "shard"), el("th", { class: "n" }, "flat range"),
-            el("th", { class: "n" }, "tensors touched"), el("th", { class: "wrap" }, "which ones")])),
+            el("th", { class: "n" }, "tensors spanned"), el("th", { class: "wrap" }, "which ones"),
+            el("th", { class: "wrap" }, "cut mid-matrix")])),
           el("tbody", {}, spanRows)
         ])),
-        el("p", { class: "hint", html:
-          "Read a row with more than one entry and the point is made: one shard holds the tail of a " +
-          "LayerNorm bias, all of W_q, and the first rows of W_k. Those numbers have nothing to do with " +
-          "each other. They are neighbours only because they were adjacent in a flattened buffer. " +
-          "Tensor parallelism's shards, by contrast, are always a rectangle of a single matrix chosen " +
-          "so the local GEMM is still a GEMM." })
+        el("p", { class: "hint", html: worstShard.cut_through.length
+          ? "Read shard " + worstShard.gpu + ": it holds pieces of " + worstShard.n_tensors_spanned +
+            " different tensors and slices <b>" + worstShard.cut_through.join("</b> and <b>") +
+            "</b> straight through the middle. Those numbers have nothing to do with each other. They " +
+            "are neighbours only because they were adjacent in a flattened buffer. Tensor " +
+            "parallelism's shards, by contrast, are always a rectangle of a single matrix, chosen so " +
+            "the local GEMM is still a GEMM."
+          : "At this shard count every shard happens to be a run of whole tensors, so " +
+            "<code>cut_through</code> is empty everywhere. Change the shard count and it stops being " +
+            "true — which is the point: ZeRO-3 never promised otherwise." })
       ]));
 
       /* the cell-level strip */
       const strip = el("div", { class: "cellstrip" });
-      for (let i = 0; i < TOTAL; i++) {
-        const g = Math.min(n3 - 1, Math.floor(i / size));
+      const shardOf = [];
+      bw.shards.forEach(function (s) {
+        for (let i = s.range[0]; i < s.range[1]; i++) shardOf[i] = s.gpu;
+      });
+      for (let i = 0; i < FS.total_elements; i++) {
+        const g = shardOf[i];
         const loc = locate(i);
         const isTensorStart = loc && loc.off === 0;
-        const isShardStart = i % size === 0 && i > 0;
+        const isShardStart = i > 0 && shardOf[i] !== shardOf[i - 1];
         strip.appendChild(el("div", {
           class: "cs" + (g % 2 ? " alt" : "") + (isShardStart ? " sb" : isTensorStart ? " tb" : ""),
-          title: "flat " + i + " · shard " + g + " · " + loc.entry.key +
+          title: "flat " + i + " · shard " + g + " · " + loc.lay.key +
                  (loc.entry.shape.length > 1 ? "[" + loc.r + "][" + loc.c + "]" : "[" + loc.c + "]") +
-                 " = " + rowsOf(loc.entry.key)[loc.r][loc.c]
+                 " = " + rowsOf(loc.lay.key)[loc.r][loc.c]
         }));
       }
       out.appendChild(el("div", { class: "panel" }, [
-        el("h4", {}, "all " + TOTAL + " elements, one cell each"),
+        el("h4", {}, "all " + FS.total_elements + " elements, one cell each"),
         el("div", { class: "scrollx" }, strip),
         el("p", { class: "hint", html:
           "Thin grey rule = a new tensor starts. Thick red rule = a new shard starts. Solid vs hatched " +
@@ -1718,11 +1757,9 @@ details.more > div:last-child { padding-bottom: 12px; }
       /* the consequence */
       const biggest = Math.max.apply(null, PART.map(function (e) { return e.elements; }));
       const layerParams = TOTAL / NL;
-      const z3Steady = TOTAL / n3;
+      const z3Steady = size;
       const z3Peak = z3Steady + layerParams - layerParams / n3;
       const tpResident = PART.reduce(function (a, e) { return a + e.tp.per_gpu_elements; }, 0);
-      const tpLayer = PART.filter(function (e) { return e.layer === 0; })
-                          .reduce(function (a, e) { return a + e.tp.per_gpu_elements; }, 0);
 
       out.appendChild(el("div", { class: "panel" }, [
         el("h4", {}, "the consequence: ZeRO-3 never shrinks a single layer"),
@@ -1750,8 +1787,7 @@ details.more > div:last-child { padding-bottom: 12px; }
           "instant one layer is whole in memory, and the peak scales with the largest layer, not with " +
           "the smallest shard. TP's saving is <em>structural</em>: the shard is what the kernel reads, " +
           "so d_model-sized weights and d_model-sized activations both shrink and there is no moment " +
-          "at which the full matrix exists anywhere. That is why they compose: TP shrinks the layer, " +
-          "then ZeRO-3 shards what is left across the data-parallel replicas. They are not alternatives." })
+          "at which the full matrix exists anywhere." })
       ]));
     }
 
@@ -1759,16 +1795,22 @@ details.more > div:last-child { padding-bottom: 12px; }
     host.appendChild(out);
     drawFlat();
 
-    const z3Sum = PART.reduce(function (a, e) { return a + e.zero3.per_gpu_elements; }, 0);
+    /* the sentence that makes the two read as complementary */
+    host.appendChild(NN.callout("key", "WHY TP AND ZERO-3 ARE COMPLEMENTARY, NOT RIVALS",
+      "<code>TF2.flat_sharding.note</code>: <em>" + FS.note + "</em>"));
+
+    const ptc = PART.reduce(function (a, e) { return a + e.zero3.per_tensor_ceil; }, 0);
     host.appendChild(NN.callout("mem", "A NOTE ON THE DATA",
-      "<code>partitioning[i].zero3.per_gpu_elements</code> is <code>ceil(elements / world)</code> " +
-      "computed <em>per tensor</em> — it answers &ldquo;if this one tensor were split evenly, how much " +
-      "would a rank get?&rdquo;. It sums to " + z3Sum + " = " + TOTAL + " / " + W + ", which agrees with " +
-      "the flat-buffer picture only because every tensor here has an even element count. The flat " +
-      "offsets drawn above are derived in the page from the tensor order and sizes; they are not in " +
-      "<code>tf2.js</code>. With an odd-sized tensor, or a shard count that does not divide " + TOTAL +
-      ", the two answers separate — real FSDP pads the flat buffer to a multiple of the world size and " +
-      "the per-tensor view stops being meaningful."));
+      "<code>partitioning[i].zero3.per_tensor_ceil</code> is <code>ceil(elements / world)</code> " +
+      "computed <em>per tensor</em>. It is kept only for contrast — it is <b>not</b> how ZeRO-3 shards. " +
+      "It sums to " + ptc + ", which matches the flat shard size of " + shardsFor(W).shard_size +
+      " at world " + W + " only because every tensor here has an even element count. The real model is " +
+      "<code>flat_sharding</code>: one buffer, " + FS.total_elements + " elements, cut into " +
+      "<code>shard_size</code> runs that ignore matrix edges — which is exactly why " +
+      "<code>cut_through</code> is non-empty at " +
+      WORLDS.filter(function (w) { return !shardsFor(w).clean_seam; }).join(", ") + " shards. Real FSDP " +
+      "pads the buffer to a multiple of the world size; here <code>padding</code> is " +
+      shardsFor(W).padding + " because " + W + " divides " + FS.total_elements + " exactly."));
 
     host.appendChild(NN.callout("key", "SHAPE-BLIND IS A FEATURE, UNTIL IT ISN'T",
       "ZeRO-3 asks nothing of the model. It does not need to know that W_q's columns are heads or that " +
@@ -1923,7 +1965,7 @@ details.more > div:last-child { padding-bottom: 12px; }
     const OPT_STATES = recipe.components.optimizer / recipe.components.weight;   /* m and v -> 2 */
 
     const tpPer = PART.reduce(function (a, e) { return a + e.tp.per_gpu_elements; }, 0);
-    const z3Per = PART.reduce(function (a, e) { return a + e.zero3.per_gpu_elements; }, 0);
+    const z3Per = shardsFor(W).shard_size;      /* flat_sharding, not the per-tensor ceil */
     const ppPer = PART.filter(function (e) { return e.pp.stage === 0; })
                       .reduce(function (a, e) { return a + e.elements; }, 0);
     const tdPer = PART.filter(function (e) { return e.pp.stage === 0; })

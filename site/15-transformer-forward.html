@@ -185,7 +185,9 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
   const ROWTOK = TOK.map(function (t, i) { return i + " " + t; });
   const KEYTOK = TOK.map(function (t, i) { return "k" + i + " " + t; });
 
-  const S = { tok: 0, step: 0 };
+  /* the last token is the interesting default: it is the only one the causal
+     mask lets attend to every position, so its longhand mixtures are full */
+  const S = { tok: SEQ - 1, step: 0 };
 
   /* ======================================================================
      SMALL MATH (derived here only where TF2 does not ship the value:
@@ -1086,8 +1088,10 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       "<p>That is not just a bad distribution, it is a dead gradient. The softmax Jacobian carries " +
       "a factor p(1−p), which is zero at both ends. Dividing by √d_head = √" + DH +
       " (a factor of " + fmt(sc, 4) + ") holds the scores at unit scale so the softmax stays in " +
-      "the region where it has a derivative. With d_head = " + DH + " the effect here is small; " +
-      "at d_head = 128 the un-scaled scores would be roughly 11× larger. " +
+      "the region where it has a derivative. With d_head = " + DH + " the effect here is small — " +
+      "the divisor is only √" + DH + " = " + fmt(1 / sc, 4) + ". At a production d_head of 128 " +
+      "the divisor is √128 ≈ 11.3, meaning the raw scores are more than an order of magnitude " +
+      "larger than what the softmax should see. " +
       "<a href='16-transformer-backward.html'>Page 16</a> works the Jacobian out.</p>"));
   };
 
@@ -1123,7 +1127,8 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     host.appendChild(el("div", { class: "legendrow" }, [
       el("span", {}, [el("span", { class: "swatch hatchsw" }), "hatched + labelled −∞ = masked out"]),
       el("span", {}, allowed + " of " + (SEQ * SEQ) + " positions survive = seq·(seq+1)/2"),
-      el("span", {}, "≈ half the score matrix is discarded work")
+      el("span", {}, (SEQ * SEQ - allowed) + " masked here; as seq grows the masked fraction " +
+                     "approaches one half of the matrix")
     ]));
 
     for (let h = 0; h < NH; h++) {
@@ -1248,7 +1253,8 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       ]));
 
       const i = S.tok;
-      const cols = ["mixing weight p", "× V" + h + "[j][0]", "× V" + h + "[j][1]"].slice(0, DH + 1);
+      const cols = [];
+      for (let d = 0; d < DH; d++) cols.push("contribution to d" + d);
       const rows = [];
       const acc = new Array(DH).fill(0);
       for (let j = 0; j < SEQ; j++) {
@@ -1263,12 +1269,18 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
         .concat(acc.map(function (v) { return fmt(v, 6); })) });
       card.appendChild(sub(
         "token " + i + " “" + TOK[i] + "” as a convex combination",
-        [arith(["source token j", "pᵢⱼ"].concat(cols.slice(1)), rows),
+        [arith(["source token j", "pᵢⱼ"].concat(cols), rows),
          check(Math.abs(acc[0] - H.O[i][0]) < 1e-12,
            "matches O" + h + "[" + i + "][0] = " + fmt(H.O[i][0], 8) + " from the trace"),
          el("p", { class: "small muted" },
            "The weights in the second column sum to 1, which is why the last row is an average " +
-           "and not just a sum. Masked source tokens contribute a term of exactly zero.")]));
+           "and not just a sum. Masked source tokens contribute a term of exactly zero." +
+           (i === 0 ? " Token 0 is the degenerate case: it may only attend to itself, so the " +
+                      "“mixture” is one term with weight 1 and the output is its own value row. " +
+                      "Switch the token selector to “" + TOK[SEQ - 1] + "” for a mixture with " +
+                      SEQ + " live terms."
+                    : " Switch the token selector to “" + TOK[0] + "” to see the degenerate " +
+                      "first-token case, where the mixture collapses to a single term."))]));
       host.appendChild(card);
     }
   };
@@ -1836,9 +1848,9 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       (acts.filter(function (a) { return a.layer === 0; })
            .reduce(function (a, e) { return a + e.elements; }, 0)) +
       " per block during backward, at the price of running the block's forward a second time. " +
-      "Roughly 30% more compute for a large multiple less activation memory — the standard trade " +
-      "at scale, and the reason the census on <a href='06-loop.html'>page 06</a> has a " +
-      "recompute-shaped hole in it.</p>"));
+      "One extra forward per backward, against a large multiple less activation memory — the " +
+      "standard trade at scale, and the reason the census on <a href='06-loop.html'>page 06</a> " +
+      "has a recompute-shaped hole in it.</p>"));
   })();
 
   /* ======================================================================
