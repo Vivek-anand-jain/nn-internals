@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- The four tensor classes, in the same order and colours the site uses:
+       weight (blue), gradient (orange), activation (green), optimizer
+       (magenta). Dark-surface steps; these are the validated palette. -->
+  <rect width="32" height="32" rx="7" fill="#16181d"/>
+  <rect x="5"  y="5"  width="10" height="10" rx="2" fill="#3d8ae8"/>
+  <rect x="17" y="5"  width="10" height="10" rx="2" fill="#e07020"/>
+  <rect x="5"  y="17" width="10" height="10" rx="2" fill="#159c6b"/>
+  <rect x="17" y="17" width="10" height="10" rx="2" fill="#cc5fb0"/>
+</svg>
