@@ -5,7 +5,10 @@ state and activations — traced number by number through a thirteen-parameter
 model, then scaled until the reason for ZeRO, FSDP, tensor parallelism and
 pipeline parallelism is arithmetic rather than jargon.
 
-**Open `index.html`.** No build step, no dependencies, no server, no network.
+**[Read it live →](https://vivek-anand-jain.github.io/nn-internals/)**
+
+Or clone and open `index.html` directly. No build step, no dependencies, no
+server, no network — every page works from a `file://` URL.
 
 ---
 
