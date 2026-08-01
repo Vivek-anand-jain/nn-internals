@@ -2016,8 +2016,9 @@ details.more > div:last-child { padding-bottom: 12px; }
     }));
 
     host.appendChild(el("p", { html:
-      "Parameter counts are summed over all " + PART.length + " tensors from " +
-      "<code>tp.per_gpu_elements</code> and <code>zero3.per_gpu_elements</code>. Bytes use " +
+      "TP's parameter count is summed over all " + PART.length + " tensors from " +
+      "<code>tp.per_gpu_elements</code>; ZeRO-3's comes from " +
+      "<code>flat_sharding.by_world[" + W + "].shard_size</code>, not from the per-tensor ceiling. Bytes use " +
       "<code>" + recipe.name + "</code> from <code>T.memory.recipes</code>: " +
       recipe.components.weight + " B/weight, " + recipe.components.gradient + " B/gradient, " +
       recipe.components.optimizer + " B/param of optimizer state (m and v)." }));
@@ -2047,9 +2048,10 @@ details.more > div:last-child { padding-bottom: 12px; }
         el("tr", {}, [el("td", {}, "DP / ZeRO-1 / ZeRO-2"), el("td", { class: "op" }, "="),
           el("td", { class: "r" }, String(TOTAL)),
           el("td", { class: "op" }, "the whole model; only optimizer and gradients shard")]),
-        el("tr", {}, [el("td", {}, "ZeRO-3"), el("td", { class: "op" }, "Σ zero3.per_gpu_elements ="),
+        el("tr", {}, [el("td", {}, "ZeRO-3"),
+          el("td", { class: "op" }, "flat_sharding.by_world[" + W + "].shard_size ="),
           el("td", { class: "r" }, String(z3Per)),
-          el("td", { class: "op" }, "= " + TOTAL + " ÷ " + W)]),
+          el("td", { class: "op" }, "= " + FS.total_elements + " ÷ " + W + ", one flat run")]),
         el("tr", {}, [el("td", {}, "TP"), el("td", { class: "op" }, "Σ tp.per_gpu_elements ="),
           el("td", { class: "r" }, String(tpPer)),
           el("td", { class: "op" }, "not " + TOTAL + " ÷ " + W + " — LayerNorm refuses to shard")]),
