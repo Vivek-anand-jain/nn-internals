@@ -55,7 +55,13 @@
     { n: "13", id: "pipelinepar", file: "13-pipeline-parallel.html", title: "Pipeline Parallel",
       blurb: "Split the layers. Live with the bubble." },
     { n: "14", id: "combining",   file: "14-3d-parallelism.html", title: "3D Parallelism",
-      blurb: "Composing TP × PP × DP onto real hardware topology." }
+      blurb: "Composing TP × PP × DP onto real hardware topology." },
+    { n: "15", id: "tfforward",   file: "15-transformer-forward.html", title: "Transformer Forward",
+      blurb: "Two real blocks, every matrix, token by token." },
+    { n: "16", id: "tfbackward",  file: "16-transformer-backward.html", title: "Transformer Backward",
+      blurb: "LayerNorm's two correction terms. Softmax's dense Jacobian." },
+    { n: "17", id: "tfpartition", file: "17-transformer-partitioned.html", title: "Partitioning a Block",
+      blurb: "Every weight matrix, cut four different ways." }
   ];
 
   /* ------------------------------------------------------------- utils */

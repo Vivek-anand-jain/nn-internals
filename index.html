@@ -114,6 +114,15 @@
   </p>
   <div class="cards" id="cards2"></div>
 
+  <h2>Part III — Inside a real block</h2>
+  <p class="muted">
+    Parts I and II use models small enough to print. These three take a real
+    two-layer transformer — multi-head causal attention, pre-LayerNorm, a GELU
+    MLP, 288 parameters — and do the same thing to it: every matrix, every
+    gradient, and every way of cutting it across GPUs.
+  </p>
+  <div class="cards" id="cards3"></div>
+
   <section class="block">
     <h2 style="margin-top:0">Every strategy, verified</h2>
     <p>
@@ -174,6 +183,7 @@
 
 <script src="assets/data/trace.js"></script>
 <script src="assets/data/parallel.js"></script>
+<script src="assets/data/tf2.js"></script>
 <script src="assets/js/ui.js"></script>
 <script>
 (function () {
@@ -243,14 +253,15 @@
 
   /* --------------------------------------------------------- the cards */
   /* Pages 01-08 are the single-GPU arc; 09-14 are the distributed arc. */
-  const c1 = NN.$("#cards1"), c2 = NN.$("#cards2");
+  const c1 = NN.$("#cards1"), c2 = NN.$("#cards2"), c3 = NN.$("#cards3");
   NN.PAGES.forEach(function (p) {
     const card = NN.el("a", { class: "card", href: "site/" + p.file }, [
       NN.el("div", { class: "n" }, "PART " + p.n),
       NN.el("div", { class: "t" }, p.title),
       NN.el("div", { class: "b" }, p.blurb)
     ]);
-    (Number(p.n) <= 8 ? c1 : c2).appendChild(card);
+    const n = Number(p.n);
+    (n <= 8 ? c1 : n <= 14 ? c2 : c3).appendChild(card);
   });
 
   /* ------------------------------------------- the equivalence proofs */
