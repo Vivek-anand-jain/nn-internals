@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NN Internals · 14 3D Parallelism</title>
+<title>NN Internals · 17 3D Parallelism</title>
 <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../assets/css/design.css">
 <style>
@@ -99,7 +99,7 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
 
 <main class="wrap">
   <div class="pagehead">
-    <div class="eyebrow">Part 14</div>
+    <div class="eyebrow">Part 17</div>
     <h1>3D Parallelism: Composing the Axes onto Real Hardware</h1>
     <p class="lede">Pages 09–13 took one axis each. None of them is a choice against the others:
       TP × PP × DP is a <em>factorisation</em> of the GPU count, and every GPU ends up with three
@@ -362,7 +362,7 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
   }
   const C = shape();
 
-  /* Activation accounting, same coefficients as page 08: bytes per
+  /* Activation accounting, same coefficients as page 10: bytes per
      (token x d_model) per layer at 2-byte activations. */
   const ACT_FIXED = 12, ACT_Q = 2, ACT_KV = 4, ACT_MLP = 4, ACT_ATT = 5,
         ACT_LIN_REPL = 10, ACT_BOUND = 2;
@@ -1383,7 +1383,7 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
       "clear no: " + pfmt(C.P) + " " + x + " " + RECIPE.bytes_per_param + " B = <b>" + fsize(full) +
       "</b> of model state against " + NN.gibytes(DEV.hbm_bytes) + " of HBM, which is " +
       NN.fmt(full / DEV.hbm_bytes, 0) + x + " a device before a single activation exists. " +
-      "<a href=\"08-scaling.html\">Page 08</a> is this arithmetic in full.");
+      "<a href=\"10-scaling.html\">Page 10</a> is this arithmetic in full.");
 
     item("Does the model fit in aggregate across the cluster, just not per GPU?",
       "Then shard the model state along the data-parallel axis and change nothing else about your code. " +
@@ -1399,7 +1399,7 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
       "Reach for stage 1 first (optimizer state is " +
       NN.fmt(100 * (RC.o) / RECIPE.bytes_per_param, 0) +
       "% of the bill and stage 1 costs almost nothing extra — it moves exactly DDP's volume, " +
-      "not more), then 2, then 3. <a href=\"11-zero-fsdp.html\">Page 11</a> is the ladder.");
+      "not more), then 2, then 3. <a href=\"13-zero-fsdp.html\">Page 13</a> is the ladder.");
 
     item("Is the resulting communication still affordable — and will it stay affordable?",
       "This is the question people skip, and it is the one that decides whether you ever need TP. " +
@@ -1426,7 +1426,7 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
       fsize(perLayerBytes) + "</b>, which does fit on a " + NN.gibytes(DEV.hbm_bytes) +
       " device, so TP here is a throughput and activation-memory decision rather than a survival one. " +
       "At 405B scale, or at long context, it stops being optional. Keep TP " + approx + " " +
-      HW.perNode + " and inside the node. <a href=\"12-tensor-parallel.html\">Page 12</a>.");
+      HW.perNode + " and inside the node. <a href=\"14-tensor-parallel.html\">Page 14</a>.");
 
     item("Do you have to cross nodes with the model itself?",
       "Once TP has filled a node and ZeRO has done what it can, the next cut has to span nodes — and the " +
@@ -1435,7 +1435,7 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
       " for TP. You pay for it with the bubble, " + P.strategies.pp.bubble_formula + ", which you buy " +
       "down with more micro-batches and interleaved schedules. Reach for PP <em>after</em> TP and ZeRO, " +
       "not before — it is the most invasive change to your model code. " +
-      "<a href=\"13-pipeline-parallel.html\">Page 13</a>.");
+      "<a href=\"15-pipeline-parallel.html\">Page 15</a>.");
 
     item("Is the sequence very long?",
       "Then your problem is not the model state at all; it is the s² attention term and the per-token " +
@@ -1548,7 +1548,7 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
       " less activation memory), <b>not materialising</b> (FlashAttention: the s" + x + "s matrix never " +
       "exists), and <b>sharding a different dimension</b> (sequence parallelism). " +
       "That is why, after all thirteen pages of this site, the last knob anyone actually turns on a " +
-      "training run is the checkpointing policy. <a href=\"08-scaling.html\">Page 08</a> said " +
+      "training run is the checkpointing policy. <a href=\"10-scaling.html\">Page 10</a> said " +
       "activations are the other half of the bill; here, having sharded everything shardable, they are " +
       "what is left."));
   }

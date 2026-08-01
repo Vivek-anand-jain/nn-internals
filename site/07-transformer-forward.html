@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NN Internals · 15 Transformer Forward</title>
+<title>NN Internals · 07 Transformer Forward</title>
 <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../assets/css/design.css">
 <style>
@@ -107,7 +107,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
 
 <main class="wrap">
   <div class="pagehead">
-    <div class="eyebrow">Part 15</div>
+    <div class="eyebrow">Part 07</div>
     <h1>Transformer Forward: Two Blocks, Every Matrix</h1>
     <p class="lede">A real transformer, small enough that nothing has to be hidden: two stacked
       pre-LN blocks, multi-head causal attention, a GELU MLP, and a residual stream running through
@@ -418,7 +418,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       "output features in W's <b>columns</b>. That matters two pages later: when Megatron says " +
       "<i>column-parallel</i>, it means literally these columns. PyTorch's <code>nn.Linear</code> " +
       "stores the transpose of this matrix, which is where the naming confusion comes from — " +
-      "<a href='12-tensor-parallel.html'>page 12</a> covers that trap in detail.</p>"));
+      "<a href='14-tensor-parallel.html'>page 14</a> covers that trap in detail.</p>"));
 
     /* the input */
     REG = [];
@@ -881,7 +881,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
         "LayerNorm's gain and bias are <b>replicated</b>, not split, under tensor parallelism: " +
         "if you cut the hidden dimension across two GPUs, neither one can form μ without a " +
         "reduction. It is also exactly the operation sequence-parallelism was invented to " +
-        "rearrange. <a href='17-transformer-partitioned.html'>Page 17</a> takes every matrix in " +
+        "rearrange. <a href='16-transformer-partitioned.html'>Page 16</a> takes every matrix in " +
         "this block and shows the cut.</p>" +
         "<p>Note what LayerNorm does <i>not</i> do: it does not mix tokens. Every row above was " +
         "computed from that row alone. The only operation in the whole block that moves " +
@@ -890,7 +890,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
         "Memory note: backward needs x̂ and 1/σ for every token, so both are kept from " +
         "forward. That is two of the entries in the activation census in section 6, and the " +
         "reason LayerNorm backward has two correction terms rather than one — " +
-        "<a href='16-transformer-backward.html'>page 16</a>."));
+        "<a href='08-transformer-backward.html'>page 08</a>."));
     } else {
       host.appendChild(el("p", { class: "small muted" },
         "Same operation as step 2, different input: this one normalises the stream <i>after</i> " +
@@ -1092,7 +1092,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       "the divisor is only √" + DH + " = " + fmt(1 / sc, 4) + ". At a production d_head of 128 " +
       "the divisor is √128 ≈ 11.3, meaning the raw scores are more than an order of magnitude " +
       "larger than what the softmax should see. " +
-      "<a href='16-transformer-backward.html'>Page 16</a> works the Jacobian out.</p>"));
+      "<a href='08-transformer-backward.html'>Page 08</a> works the Jacobian out.</p>"));
   };
 
   RENDER.mask = function (L, host) {
@@ -1473,7 +1473,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       fmt(100 * mlpReal / (attnP + lnP + mlpReal), 0) + "% of the block, not " +
       fmt(100 * mlpP / (attnP + lnP + mlpP), 0) + "%. In a production transformer the MLP is " +
       "roughly two thirds of the parameters and the majority of the FLOPs. Read every " +
-      "“the MLP dominates” claim on <a href='08-scaling.html'>page 08</a> with that " +
+      "“the MLP dominates” claim on <a href='10-scaling.html'>page 10</a> with that " +
       "correction in mind; the shape here is a screen-size compromise, not a model design.</p>"));
   };
 
@@ -1593,7 +1593,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
         "attention and MLP in block 1. Every one of them read the stream through a LayerNorm and " +
         "added a delta back. Nothing overwrote it. In a language model this output would then be " +
         "normalised once more and multiplied by an unembedding matrix to produce logits; " +
-        "<a href='16-transformer-backward.html'>page 16</a> starts from a loss on this tensor and " +
+        "<a href='08-transformer-backward.html'>page 08</a> starts from a loss on this tensor and " +
         "walks the gradient back through every step you just stepped through."));
     }
   };
@@ -1715,7 +1715,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     const tb = el("table", { class: "data" }, [
       el("thead", {}, el("tr", {}, [
         el("th", {}, "tensor"), el("th", { class: "wrap" }, "what it is"), el("th", {}, "submodule"),
-        el("th", {}, "shape"), el("th", {}, "elements"), el("th", { class: "wrap" }, "TP cut (page 17)")
+        el("th", {}, "shape"), el("th", {}, "elements"), el("th", { class: "wrap" }, "TP cut (page 16)")
       ])),
       el("tbody", {}, parts.filter(function (e) { return e.layer === 0; }).map(function (e) {
         return el("tr", {}, [
@@ -1858,21 +1858,21 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
      ====================================================================== */
   (function buildNext() {
     const host = NN.$("#nextBody");
-    host.appendChild(NN.callout("why", "Page 16 — the backward pass through exactly these steps",
+    host.appendChild(NN.callout("why", "Page 08 — the backward pass through exactly these steps",
       "<p>Everything you stepped through has a derivative, and two of them are routinely got " +
       "wrong. <b>LayerNorm backward</b> is not <code>g/σ</code>: μ and σ² both " +
       "depend on every element of the row, so the gradient picks up two correction terms. " +
       "<b>Softmax backward</b> has a dense Jacobian: <code>dL/dsᵢ = pᵢ(dL/dpᵢ − " +
       "Σⱼ dL/dpⱼ pⱼ)</code>, and that subtracted scalar is why every row of dS " +
       "sums to zero. Both are derived and finite-difference checked on " +
-      "<a href='16-transformer-backward.html'>page 16 · Transformer Backward</a>.</p>"));
-    host.appendChild(NN.callout("why", "Page 17 — the same block, cut four ways",
+      "<a href='08-transformer-backward.html'>page 08 · Transformer Backward</a>.</p>"));
+    host.appendChild(NN.callout("why", "Page 16 — the same block, cut four ways",
       "<p>The partitioning column in section 5 is a preview. W_q, W_k, W_v and W1 are " +
       "<b>column-parallel</b> (split the output features, so each GPU owns whole heads and whole " +
       "FFN neurons); W_o and W2 are <b>row-parallel</b> (split the input features to match, which " +
       "produces partial sums that must be all-reduced); LayerNorm is replicated because it needs " +
       "the whole hidden vector, exactly as step 2 showed. " +
-      "<a href='17-transformer-partitioned.html'>Page 17 · Partitioning a Block</a> shows " +
+      "<a href='16-transformer-partitioned.html'>Page 16 · Partitioning a Block</a> shows " +
       "every matrix with the cut drawn on it, GPU by GPU.</p>"));
     host.appendChild(p(
       "Nothing on this page needed a fifth tensor class. The stream, the projections' outputs, " +

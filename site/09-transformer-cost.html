@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NN Internals · 07 The Transformer Block</title>
+<title>NN Internals · 09 What a Transformer Costs</title>
 <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../assets/css/design.css">
 <style>
@@ -105,7 +105,7 @@
 
 <main class="wrap">
   <div class="pagehead">
-    <div class="eyebrow">Part 07</div>
+    <div class="eyebrow">Part 09</div>
     <h1>The Transformer Block</h1>
     <p class="lede" id="lede"></p>
   </div>
@@ -1729,7 +1729,7 @@
       num(X.total, 0) + " parameters — which is where the arithmetic stops " +
       "being about transformers and starts being about hardware."));
 
-    host.appendChild(NN.callout("mem", "The number page 08 starts from",
+    host.appendChild(NN.callout("mem", "The number page 10 starts from",
       "Page 05's recipe <b>" + rec.name + "</b> costs " +
       Object.keys(rec.components).map(function (k) {
         return num(rec.components[k], 0) + " B " + k;

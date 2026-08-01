@@ -99,27 +99,31 @@
     <div id="classTable"></div>
   </section>
 
-  <h2>Part I — One GPU</h2>
+  <h2>Part I — The mechanics</h2>
   <p class="muted">
-    What a parameter is, what happens to it, and what that costs in memory.
-    Everything here is traced on the 13-parameter model above.
+    What a parameter is, what happens to it in a training step, and what that
+    costs in memory. Everything here is traced on the 13-parameter model above,
+    which is small enough that no step has to be summarised.
   </p>
   <div class="cards" id="cards1"></div>
 
-  <h2>Part II — Many GPUs</h2>
+  <h2>Part II — A real transformer</h2>
   <p class="muted">
-    Part I ends with a model that does not fit. These pages are the answers,
-    each one simulated on a second toy model — a 193-parameter network on four
-    GPUs — and <em>proven</em> to compute exactly what a single GPU would.
+    The same four tensor classes, now on an architecture you would actually
+    train: a two-layer block with multi-head causal attention, pre-LayerNorm
+    and a GELU MLP, 288 parameters. Forward and backward come first, because
+    you cannot reason about what a transformer <em>costs</em> until you have
+    seen what it <em>computes</em>. Part II ends with a model that does not fit
+    on any single GPU.
   </p>
   <div class="cards" id="cards2"></div>
 
-  <h2>Part III — Inside a real block</h2>
+  <h2>Part III — Many GPUs</h2>
   <p class="muted">
-    Parts I and II use models small enough to print. These three take a real
-    two-layer transformer — multi-head causal attention, pre-LayerNorm, a GELU
-    MLP, 288 parameters — and do the same thing to it: every matrix, every
-    gradient, and every way of cutting it across GPUs.
+    The answers to Part II's memory wall. The mechanics are worked on a third
+    toy — a 193-parameter network on four simulated GPUs — where every strategy
+    is <em>proven</em> to compute exactly what one GPU would. Then page 16
+    applies all of it back to the real transformer, matrix by matrix.
   </p>
   <div class="cards" id="cards3"></div>
 
@@ -261,7 +265,7 @@
       NN.el("div", { class: "b" }, p.blurb)
     ]);
     const n = Number(p.n);
-    (n <= 8 ? c1 : n <= 14 ? c2 : c3).appendChild(card);
+    (n <= 6 ? c1 : n <= 10 ? c2 : c3).appendChild(card);
   });
 
   /* ------------------------------------------- the equivalence proofs */

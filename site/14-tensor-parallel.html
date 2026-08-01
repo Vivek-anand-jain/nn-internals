@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NN Internals · 12 Tensor Parallel</title>
+<title>NN Internals · 14 Tensor Parallel</title>
 <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../assets/css/design.css">
 <style>
@@ -163,7 +163,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
 
 <main class="wrap">
   <div class="pagehead">
-    <div class="eyebrow">Part 12</div>
+    <div class="eyebrow">Part 14</div>
     <h1>Tensor Parallel: Cut the Matrix Itself</h1>
     <p class="lede">Every strategy so far has moved whole tensors between GPUs and left the
       arithmetic alone. Tensor parallelism splits the <em>matrix multiply</em>. No GPU ever
@@ -1195,7 +1195,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     const host = NN.$("#conjBody");
 
     host.appendChild(el("p", { html:
-      "Page <a href='09-collectives.html'>09</a> made the point that collectives come in " +
+      "Page <a href='11-collectives.html'>09</a> made the point that collectives come in " +
       "inverse pairs — all-gather undoes reduce-scatter, scatter undoes gather. The same " +
       "duality shows up one level higher, in autodiff. Megatron names two operators, and they " +
       "are conjugates of each other: whatever one does in forward, the other does in backward." }));
@@ -1456,7 +1456,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       "<b>Sequence parallelism</b> is the fix: split those regions along the <em>sequence</em> " +
       "axis instead, and convert g's all-reduce into a reduce-scatter plus an all-gather — the " +
       "same total bytes, but the norm regions become sharded too. Page " +
-      "<a href='14-3d-parallelism.html'>14</a> composes it with everything else."));
+      "<a href='17-3d-parallelism.html'>14</a> composes it with everything else."));
   })();
 
   /* ==================================================================== */
@@ -1805,9 +1805,9 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       "tensors, none of them overlappable, all of them wanting a link an order of magnitude " +
       "faster than the one between racks. So TP is used the way a specialised tool is used: " +
       "turned up only as far as the fast domain reaches — typically TP = 8 inside one node — " +
-      "and then handed off to <a href='13-pipeline-parallel.html'>pipeline parallelism</a> and " +
-      "<a href='10-data-parallel.html'>data parallelism</a> for everything beyond it. " +
-      "Page <a href='14-3d-parallelism.html'>14</a> puts the three together on real topology." }));
+      "and then handed off to <a href='15-pipeline-parallel.html'>pipeline parallelism</a> and " +
+      "<a href='12-data-parallel.html'>data parallelism</a> for everything beyond it. " +
+      "Page <a href='17-3d-parallelism.html'>14</a> puts the three together on real topology." }));
 
     host.appendChild(NN.legend(["weight", "gradient", "activation", "optimizer"]));
   })();

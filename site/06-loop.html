@@ -1167,7 +1167,7 @@ secC.appendChild(NN.callout("mem", "WHAT CHECKPOINTING DOES NOT HELP",
   "activation one. Weights, optimizer state and gradients are untouched, and for this " + N_PARAMS +
   "-parameter model those are " + B(BASE + PGBYTES) + " of the " + B(PEAK0.peak) + " peak, " +
   NN.fmt((BASE + PGBYTES) / PEAK0.peak * 100, 0) + "%. Checkpointing has no answer for that floor; sharding " +
-  "(ZeRO, FSDP) and lower-precision states do. Page 08 is about that half of the problem."));
+  "(ZeRO, FSDP) and lower-precision states do. Page 10 is about that half of the problem."));
 
 /* ======================================================================
    8.  Section: the loop, annotated

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NN Internals · 10 Data Parallel</title>
+<title>NN Internals · 12 Data Parallel</title>
 <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../assets/css/design.css">
 <style>
@@ -101,7 +101,7 @@ table.data tr.hi { background: var(--surface-3); }
 
 <main class="wrap">
   <div class="pagehead">
-    <div class="eyebrow">Part 10</div>
+    <div class="eyebrow">Part 12</div>
     <h1>Data Parallel: Split the Batch, Average the Gradients</h1>
     <p class="lede">Every GPU holds a complete copy of the model. The batch is what gets cut up.
       Each replica computes a gradient from its own samples — and those gradients are genuinely
@@ -715,7 +715,7 @@ table.data tr.hi { background: var(--surface-3); }
             "concatenated into one flat buffer. A ring implementation sends <b>" +
             fmt(D.schedule[0].sent_per_gpu_elements, 1) + " elements per GPU</b>, which is " +
             "2(N−1)/N × " + NN.count(D.schedule[0].elements) + ". " +
-            "<a href='09-collectives.html#ring'>Page 09</a> has the ring in detail." })
+            "<a href='11-collectives.html#ring'>Page 11</a> has the ring in detail." })
         ]);
         focusPanel.appendChild(el("div", { class: "ringwrap" }, [left, right]));
         setTimeout(function () {
@@ -1079,8 +1079,8 @@ table.data tr.hi { background: var(--surface-3); }
         " — the two agree to " + (AR_DRIFT === 0 ? "the bit" : AR_DRIFT.toExponential(1)) +
         ". The link speed and latency here are in abstract time units, not GB/s: the shape of " +
         "the tradeoff is the point, and the real bandwidths live on " +
-        "<a href='12-tensor-parallel.html#cost'>page 12</a> and " +
-        "<a href='14-3d-parallelism.html#topo'>page 14</a>." }));
+        "<a href='14-tensor-parallel.html#cost'>page 14</a> and " +
+        "<a href='17-3d-parallelism.html#topo'>page 17</a>." }));
       tlHost.appendChild(costModelNote("The shared model those pages price with:"));
 
       /* the tradeoff narrative, derived from the current sim */
@@ -1108,7 +1108,7 @@ table.data tr.hi { background: var(--surface-3); }
         "The useful bucket size is the smallest one that still amortises the latency — which is " +
         "why real implementations cap buckets by <i>bytes</i> rather than by layers, and why the " +
         "default is large enough that a small model ends up with a single bucket. " +
-        "<a href='09-collectives.html#calc'>Page 09</a> measures that latency floor against " +
+        "<a href='11-collectives.html#calc'>Page 11</a> measures that latency floor against " +
         "message size directly, and marks where the framework default sits on the curve; this " +
         "timeline is the same argument seen from the scheduler's side." }));
     }
@@ -1233,7 +1233,7 @@ table.data tr.hi { background: var(--surface-3); }
 
     host.appendChild(NN.callout("mem", "AND THIS IS WHY PAGE 11 EXISTS",
       "If the model does not fit on one GPU, DDP does not help you — it needs the model to fit " +
-      WORLD + " times. Page 08 did this arithmetic at " +
+      WORLD + " times. Page 10 did this arithmetic at " +
       NN.count(T.reference_configs.models.find(function (m) {
         return m.name === T.reference_configs.default_model; }).params) +
       " parameters and it does not fit. The observation that unlocks the next page is that the " +
@@ -1241,7 +1241,7 @@ table.data tr.hi { background: var(--surface-3); }
       "whole parameter vector because we handed it the whole gradient. Hand each rank only the " +
       "shard it will actually update — replace the all-reduce with a reduce-scatter — and the " +
       "optimizer state and gradient bills divide by " + WORLD + " with no change to the maths. " +
-      "That is <a href='11-zero-fsdp.html'>ZeRO</a>, and its stage 3 goes on to shard the weights " +
+      "That is <a href='13-zero-fsdp.html'>ZeRO</a>, and its stage 3 goes on to shard the weights " +
       "themselves."));
   }
 
@@ -1258,7 +1258,7 @@ table.data tr.hi { background: var(--surface-3); }
 
     host.appendChild(el("p", { html:
       "The communication side scales fine, and the ring table from " +
-      "<a href='09-collectives.html#ring'>page 09</a> says why: a ring " +
+      "<a href='11-collectives.html#ring'>page 11</a> says why: a ring " +
       "all-reduce sends 2(N−1)/N × S elements per GPU, which approaches 2S and then stops. " +
       "Doubling the world size does not double what each GPU sends." }));
 
@@ -1313,11 +1313,11 @@ table.data tr.hi { background: var(--surface-3); }
       "So the ceiling on data parallelism is statistical, not architectural. Long before the wire " +
       "gives up, you reach a global batch that stops improving the model, and adding GPUs to the " +
       "data-parallel dimension buys nothing. At that point the extra GPUs have to be spent " +
-      "differently: shard the state instead of replicating it (<a href='11-zero-fsdp.html'>ZeRO " +
-      "and FSDP</a>), cut the weight matrices (<a href='12-tensor-parallel.html'>tensor " +
-      "parallel</a>), or cut the layers (<a href='13-pipeline-parallel.html'>pipeline " +
+      "differently: shard the state instead of replicating it (<a href='13-zero-fsdp.html'>ZeRO " +
+      "and FSDP</a>), cut the weight matrices (<a href='14-tensor-parallel.html'>tensor " +
+      "parallel</a>), or cut the layers (<a href='15-pipeline-parallel.html'>pipeline " +
       "parallel</a>) — and in practice, all of them at once " +
-      "(<a href='14-3d-parallelism.html'>3D parallelism</a>). Data parallelism remains the outer " +
+      "(<a href='17-3d-parallelism.html'>3D parallelism</a>). Data parallelism remains the outer " +
       "dimension of every one of those combinations, which is why it was worth pinning down " +
       "exactly what it computes." }));
 

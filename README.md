@@ -47,8 +47,8 @@ the project of how blame flows backward. It recurs on almost every page.
 | `site/04-backward.html` | The chain rule, and why activations had to be kept |
 | `site/05-optimizer.html` | SGD → momentum → Adam, and the fp32 master copy |
 | `site/06-loop.html` | Memory rising and falling across one iteration |
-| `site/07-transformer.html` | The same four classes at LLM shape, plus the seq² term |
-| `site/08-scaling.html` | The 70B bill, and an interactive memory calculator |
+| `site/09-transformer-cost.html` | The same four classes at LLM shape, plus the seq² term |
+| `site/10-scaling.html` | The 70B bill, and an interactive memory calculator |
 | `slides/index.html` | The same narrative, linear and animated (arrow keys, `g`, `s`) |
 | `docs/deep-dive.md` | Full symbolic derivations, floating point, memory tables |
 | `code/` | Runnable Python — see `code/README.md` |
@@ -109,7 +109,7 @@ flattering statistic.
 **ZeRO-3 alone does not save a 70B run.** Sharding optimizer state, gradients
 and parameters across 64 GPUs drops model state from 1.13 TB to 17.6 GB — but at
 8k sequence length the activations are still ~153 GB per GPU. You need tensor
-parallelism and checkpointing too. Page 08 lets you dial this yourself.
+parallelism and checkpointing too. Page 10 lets you dial this yourself.
 
 ---
 
