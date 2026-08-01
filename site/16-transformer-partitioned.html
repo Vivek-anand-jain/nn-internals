@@ -189,10 +189,11 @@ details.more > div:last-child { padding-bottom: 12px; }
   <div class="pagehead">
     <div class="eyebrow">Part 16</div>
     <h1>Partitioning a Block: Every Matrix, Cut Four Different Ways</h1>
-    <p class="lede">Pages 10–14 argued about parallelism with boxes and arrows. This page does it with
-      the actual numbers. Two real transformer blocks, twenty weight tensors, 288 parameters — and for
-      every strategy, for every matrix, for every cell, exactly which GPU holds it. Point at any number
-      below and the page will tell you whose HBM it is sitting in.</p>
+    <p class="lede">Pages 11–15 argued about parallelism with boxes and arrows, on a 193-parameter MLP.
+      This page does it with the actual numbers, on the block you walked forward on page 07 and
+      differentiated on page 08. Two real transformer blocks, twenty weight tensors, 288 parameters —
+      and for every strategy, for every matrix, for every cell, exactly which GPU holds it. Point at any
+      number below and the page will tell you whose HBM it is sitting in.</p>
     <noscript><p class="callout warn">This page draws every matrix in the browser from
       <code>assets/data/tf2.js</code>. With JavaScript disabled you will see an empty shell.</p></noscript>
   </div>
@@ -873,7 +874,7 @@ details.more > div:last-child { padding-bottom: 12px; }
         "The model has " + TOTAL + " distinct parameters. The group is storing " + (TOTAL * W) +
         " parameter slots, " + (TOTAL * W) + " gradient slots and " + (TOTAL * W * 2) + " optimizer " +
         "slots to train them. Redundancy factor: exactly the world size, " + W + times + ". Nothing about " +
-        "that ratio improves as the model grows — it is the reason pages 11–13 exist." })
+        "that ratio improves as the model grows — it is the reason pages 13–15 exist." })
     ]));
 
     host.appendChild(el("div", {}, P.strategies.ddp.schedule.map(function (c) {
@@ -1830,7 +1831,9 @@ details.more > div:last-child { padding-bottom: 12px; }
       "The axes are independent, so they multiply. TP = " + W + " inside a node, where the all-reduces " +
       "have NVLink. PP = " + NL + " across nodes, where only the residual stream crosses. DP outside " +
       "everything, where the gradient all-reduce can overlap with backward. Every GPU gets three " +
-      "coordinates, and those three coordinates determine every byte it holds." }));
+      "coordinates, and those three coordinates determine every byte it holds. " +
+      "<a href='17-3d-parallelism.html'>Page 17</a> takes this same factorisation off the toy and " +
+      "onto real hardware, where which axis lands on which link decides whether it is fast." }));
 
     const ctrl = el("div", { class: "seg" });
     const gridHost = el("div");
@@ -2168,7 +2171,8 @@ details.more > div:last-child { padding-bottom: 12px; }
       "Q, K, V, W_o, W_up, W_down, and what to do about the two LayerNorms. It makes them at " +
       NN.count(blk) + " parameters instead of " + (TOTAL / NL) + ", " + nl + " times instead of " + NL +
       ", and the answer is the same every time. Scale removes your ability to print the matrix. It does " +
-      "not change which line you cut it on."));
+      "not change which line you cut it on. What is left is choosing the three degrees at once, on a " +
+      "network with real link speeds — <a href=\"17-3d-parallelism.html\">page 17</a>."));
   }
 
   /* ------------------------------------------------------------------ */

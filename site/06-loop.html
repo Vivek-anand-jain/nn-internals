@@ -1234,7 +1234,7 @@ secS.appendChild(NN.callout("mem", "THIS GRAPH, IN GIGABYTES",
   "with long sequences it is routinely hundreds of gigabytes — larger than everything else combined, which is " +
   "precisely why checkpointing exists and why the peak sits at the forward/backward boundary rather than where it " +
   "sits on this page. The 7B figures are order-of-magnitude arithmetic on a stated parameter count, not a measurement; " +
-  "pages 07 and 08 do it properly."));
+  "pages 09 and 10 do it properly."));
 secS.appendChild(el("p", { class: "small muted", html:
   "One more thing that survives the scale-up unchanged: the dead ReLU unit. <code>dL/dW1</code> row 2 is " +
   "<code>" + vec(Bk.dL_dW1[2]) + "</code> here, and it still costs " + B(bytesOf("dL/dW1") / rec("dL/dW1").shape[0]) +

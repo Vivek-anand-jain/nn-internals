@@ -140,12 +140,12 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
   </section>
 
   <section class="block" id="params">
-    <h2>5 · Parameter accounting</h2>
+    <h2>5 · The 288 parameters, tensor by tensor</h2>
     <div id="paramsBody"></div>
   </section>
 
   <section class="block" id="saved">
-    <h2>6 · What forward had to save for backward</h2>
+    <h2>6 · What this forward pass saved, and why</h2>
     <div id="savedBody"></div>
   </section>
 
@@ -415,7 +415,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       "<p>" + M.convention + "</p>" +
       "<p>So a hidden state is a <b>row</b>: <code>x</code> is (" + SEQ + "×" + DM + "), " +
       "one row per token. A weight is (d_in × d_out), and <code>Y = X·W</code> puts " +
-      "output features in W's <b>columns</b>. That matters two pages later: when Megatron says " +
+      "output features in W's <b>columns</b>. That matters once Part III starts cutting them up: when Megatron says " +
       "<i>column-parallel</i>, it means literally these columns. PyTorch's <code>nn.Linear</code> " +
       "stores the transpose of this matrix, which is where the naming confusion comes from — " +
       "<a href='14-tensor-parallel.html'>page 14</a> covers that trap in detail.</p>"));
@@ -1753,11 +1753,14 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
 
     host.appendChild(el("div", { class: "legendrow" }, [NN.chip("weight")]));
     host.appendChild(p(
-      "Arithmetic per block, all of it derivable from the shapes: attention is four " + DM +
-      "×" + DM + " matrices = " + (4 * DM * DM) + "; the MLP is " + DM + "×" + DFF +
-      " plus " + DFF + "×" + DM + " = " + (2 * DM * DFF) + "; LayerNorm is two gain/bias " +
-      "pairs of width " + DM + " = " + (4 * DM) + ". Total " + perBlock + " per block, " +
-      total + " for " + NL + " blocks. Note how tiny the LayerNorm count is — " +
+      "Every count is a product of the shapes in the table: " + perBlock + " per block, " +
+      total + " for " + NL + " blocks. This table's job is the last column — which tensor a " +
+      "GPU cuts, and along which axis. The <b>general</b> version of the count, written in " +
+      "terms of <code>d_model</code> rather than this toy's " + DM + ", reconciled against " +
+      "published parameter counts for real models, is " +
+      "<a href='09-transformer-cost.html#params'>page 09 · What a Transformer Costs</a>."));
+    host.appendChild(p(
+      "Note how tiny the LayerNorm count is — " +
       fmt(100 * groupOf.layernorm.elements / total, 1) + "% of the parameters — and how much " +
       "trouble it nevertheless causes for partitioning, because it is the one operation that " +
       "needs the full hidden vector."));

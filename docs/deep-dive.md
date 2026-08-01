@@ -13,10 +13,14 @@ is stated to be arithmetic performed on their fields.
 Where the site shows something interactively, the page is named:
 `site/01-memory.html`, `site/02-forward.html`, `site/03-loss.html`,
 `site/04-backward.html`, `site/05-optimizer.html`, `site/06-loop.html`,
+`site/07-transformer-forward.html`, `site/08-transformer-backward.html`,
 `site/09-transformer-cost.html`, `site/10-scaling.html`,
 `site/11-collectives.html`, `site/12-data-parallel.html`,
 `site/13-zero-fsdp.html`, `site/14-tensor-parallel.html`,
-`site/15-pipeline-parallel.html`, `site/17-3d-parallelism.html`.
+`site/15-pipeline-parallel.html`, `site/16-transformer-partitioned.html`,
+`site/17-3d-parallelism.html`. The two-layer transformer of pages 07, 08 and
+16 has no section here yet; this document derives the 13-parameter MLP and
+the four-rank distributed toy only.
 
 A note on precision. The trace stores IEEE-754 doubles as Python computed
 them, so `z1[0]` appears as `0.4999999999999999` and `dL/dz1[2]` as `-0.0`.

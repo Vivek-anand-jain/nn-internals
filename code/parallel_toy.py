@@ -1026,7 +1026,7 @@ def build():
                               "boundary, is what crosses between them.",
         },
         # ------------------------------------------------------------------
-        # A SHARED cost model, so pages 09-14 all price communication the
+        # A SHARED cost model, so pages 11-17 all price communication the
         # same way instead of each inventing one. It is deliberately simple
         # and every assumption is stated, because the point is to show the
         # SHAPE of the tradeoffs, not to predict a real run.

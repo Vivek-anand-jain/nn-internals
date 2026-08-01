@@ -47,7 +47,7 @@ the project of how blame flows backward. It recurs on almost every page.
 | `site/04-backward.html` | The chain rule, and why activations had to be kept |
 | `site/05-optimizer.html` | SGD → momentum → Adam, and the fp32 master copy |
 | `site/06-loop.html` | Memory rising and falling across one iteration |
-| `site/09-transformer-cost.html` | The same four classes at LLM shape, plus the seq² term |
+| `site/09-transformer-cost.html` | Parameter counting in `d²`, real-model reconciliation, and the seq² term |
 | `site/10-scaling.html` | The 70B bill, and an interactive memory calculator |
 | `slides/index.html` | The same narrative, linear and animated (arrow keys, `g`, `s`) |
 | `docs/deep-dive.md` | Full symbolic derivations, floating point, memory tables |

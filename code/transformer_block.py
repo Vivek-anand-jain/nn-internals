@@ -540,7 +540,7 @@ def count_activations():
 # ============================================================================
 # The model DIMENSIONS are not invented here. They come from
 # T.reference_configs in assets/data/trace.json, which is the one place the
-# whole site keeps published architecture figures, so pages 02, 07 and 08
+# whole site keeps published architecture figures, so pages 02, 09 and 10
 # cannot quote different numbers for the same model. This file reads that
 # file and does the arithmetic on top of it.
 #

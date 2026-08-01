@@ -46,6 +46,24 @@
   .sidelink .t { font-weight: 650; color: var(--ink); }
   .sidelink .b { font-size: .83rem; color: var(--ink-muted); }
 
+  .paths { display: grid; gap: 12px; margin: 22px 0; }
+  /* the path card is a container, not a link — kill the card's own hover lift */
+  .paths .card:hover { transform: none; border-color: var(--hairline); }
+  .path .t { font-weight: 650; color: var(--ink); font-size: 1rem; }
+  .path .b { font-size: .87rem; color: var(--ink-2); margin: 4px 0 11px; line-height: 1.5; }
+  .chiprow { display: flex; flex-wrap: wrap; gap: 7px; }
+  .pchip {
+    display: inline-flex; align-items: baseline; gap: 7px;
+    font-family: var(--mono); font-size: .78rem;
+    background: var(--surface-2); border: 1px solid var(--hairline);
+    border-radius: 999px; padding: 5px 12px; color: var(--ink-2);
+    transition: border-color .15s, color .15s;
+  }
+  .pchip:hover { border-color: var(--accent); color: var(--ink); text-decoration: none; }
+  .pchip .pn { color: var(--ink-muted); letter-spacing: .06em; }
+  .pchip:hover .pn { color: var(--accent); }
+  .pchip .pt { font-family: var(--sans); }
+
   .verify {
     display: inline-flex; align-items: center; gap: 8px;
     font-family: var(--mono); font-size: .82rem;
@@ -126,6 +144,13 @@
     applies all of it back to the real transformer, matrix by matrix.
   </p>
   <div class="cards" id="cards3"></div>
+
+  <h2>Reading paths</h2>
+  <p class="muted">
+    Almost nobody reads 01 → 17 in order. Four routes that stand on their own,
+    each one the shortest honest way to a particular question.
+  </p>
+  <div class="paths" id="paths"></div>
 
   <section class="block">
     <h2 style="margin-top:0">Every strategy, verified</h2>
@@ -256,7 +281,7 @@
   NN.$("#classTable").appendChild(tbl);
 
   /* --------------------------------------------------------- the cards */
-  /* Pages 01-08 are the single-GPU arc; 09-14 are the distributed arc. */
+  /* Pages 01-10 are the single-GPU arc; 11-17 are the distributed arc. */
   const c1 = NN.$("#cards1"), c2 = NN.$("#cards2"), c3 = NN.$("#cards3");
   NN.PAGES.forEach(function (p) {
     const card = NN.el("a", { class: "card", href: "site/" + p.file }, [
@@ -266,6 +291,44 @@
     ]);
     const n = Number(p.n);
     (n <= 6 ? c1 : n <= 10 ? c2 : c3).appendChild(card);
+  });
+
+  /* -------------------------------------------------- reading paths */
+  /* Routes are lists of page NUMBERS; titles, blurbs and hrefs are looked
+     up in NN.PAGES, so a renumber or a retitle never has to be repeated
+     here. An unknown number would be a bug, so it is asserted, not skipped. */
+  const byNumber = {};
+  NN.PAGES.forEach(function (p) { byNumber[p.n] = p; });
+
+  const ROUTES = [
+    { t: "The mechanics path",
+      b: "How a network computes and learns, MLP first and then the same argument on a real transformer. Start here if you have never traced a backward pass by hand.",
+      pages: ["01", "02", "03", "04", "05", "06", "07", "08"] },
+    { t: "The memory path",
+      b: "What a training step costs and why it stops fitting. For anyone who already knows the maths and wants the byte budget.",
+      pages: ["01", "06", "09", "10"] },
+    { t: "The distributed path",
+      b: "Every strategy for splitting a model across GPUs. Assumes you know what a backward pass is and what a transformer block contains.",
+      pages: ["10", "11", "12", "13", "14", "15", "16", "17"] },
+    { t: "The shortest honest route to “why FSDP exists”",
+      b: "Four pages: what backward keeps alive, what one iteration costs, what that becomes at 70B, and what sharding does about it.",
+      pages: ["04", "06", "10", "13"] }
+  ];
+
+  const pathHost = NN.$("#paths");
+  ROUTES.forEach(function (r) {
+    pathHost.appendChild(NN.el("div", { class: "card path" }, [
+      NN.el("div", { class: "t" }, r.t),
+      NN.el("div", { class: "b" }, r.b),
+      NN.el("div", { class: "chiprow" }, r.pages.map(function (n) {
+        const p = byNumber[n];
+        if (!p) throw new Error("reading path references unknown page " + n);
+        return NN.el("a", { class: "pchip", href: "site/" + p.file, title: p.blurb }, [
+          NN.el("span", { class: "pn" }, p.n),
+          NN.el("span", { class: "pt" }, p.title)
+        ]);
+      }))
+    ]));
   });
 
   /* ------------------------------------------- the equivalence proofs */

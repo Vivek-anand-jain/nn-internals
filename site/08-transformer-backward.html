@@ -2051,7 +2051,7 @@ mark.hl { background: var(--gradient-w); color: var(--gradient); padding: 0 3px;
       "the two reasons transformers use GELU or SwiGLU instead."));
 
     host.appendChild(el("p", { class: "small muted", style: { marginTop: "20px" }, html:
-      "Next: <a href='16-transformer-partitioned.html'>page 16</a> takes the same " +
+      "Later, once the distributed machinery is in place: <a href='16-transformer-partitioned.html'>page 16</a> takes the same " +
       D.partitioning.length + " weight tensors and cuts each one four different ways — tensor, " +
       "pipeline, data and ZeRO — and shows which GPU ends up holding which slice of which matrix." }));
   })();

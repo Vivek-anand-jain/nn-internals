@@ -172,7 +172,7 @@ table.data tr.hi { background: var(--surface-3); }
   for (let g = 0; g < WORLD; g++) ALL_RANKS.push(g);
 
   /* ---- the shared cost model and the canonical ring factor -------------
-     PARALLEL.cost_model is the one cost model pages 10, 12 and 14 use, so
+     PARALLEL.cost_model is the one cost model pages 12, 14 and 17 use, so
      they price communication identically. PARALLEL.collectives carries the
      ring factor as a number per world size; this page keeps its own
      2(N-1)/N recomputation next to it so any drift is visible on screen. */
@@ -1231,7 +1231,7 @@ table.data tr.hi { background: var(--surface-3); }
       " elements of distinct information. Every rank also recomputes the identical optimizer " +
       "update on identical inputs, which is " + WORLD + "× the arithmetic for one result." }));
 
-    host.appendChild(NN.callout("mem", "AND THIS IS WHY PAGE 11 EXISTS",
+    host.appendChild(NN.callout("mem", "AND THIS IS WHY PAGE 13 EXISTS",
       "If the model does not fit on one GPU, DDP does not help you — it needs the model to fit " +
       WORLD + " times. Page 10 did this arithmetic at " +
       NN.count(T.reference_configs.models.find(function (m) {
