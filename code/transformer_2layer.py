@@ -483,12 +483,21 @@ def backward(P, cache, dOut):
                 "row_sums_dS": [round(sum(r), 12) for r in dS],
             })
 
+        # `value` carries dQ for the stepper's headline, but dK and dV are
+        # equally part of this step's output. An earlier version exposed
+        # only dQ, so a consumer trusting `value` saw a third of the
+        # attention input-gradient; page 16 caught that. All three are now
+        # here at full d_model width, already reassembled from the heads.
         steps.append({"layer": L, "id": "attn", "label": "attention backward",
                       "note": "Softmax's Jacobian is dense: dL/ds_i = "
                               "p_i (dL/dp_i - sum_j dL/dp_j p_j). The "
                               "subtracted scalar is why every row of dS sums "
                               "to zero.",
-                      "value": dQ, "heads": head_details})
+                      "value": dQ,
+                      "dQ": dQ, "dK": dK, "dV": dV,
+                      "value_is": "dQ; see dQ/dK/dV for all three at full "
+                                  "d_model width",
+                      "heads": head_details})
 
         # ---- Q/K/V projections -------------------------------------------
         n1 = lc["qkv"]["input"]

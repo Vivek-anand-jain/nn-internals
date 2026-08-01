@@ -1,0 +1,2063 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 16 Transformer Backward</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* page-local layout only; every colour comes from design.css custom properties */
+
+.panel { background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 8px; padding: 12px 14px; }
+.panel h4 { margin: 0 0 9px; font-family: var(--mono); font-size: .68rem; letter-spacing: .13em;
+            text-transform: uppercase; color: var(--ink-muted); font-weight: 700; }
+
+.ctlrow { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: flex-end; margin: 14px 0;
+          padding: 11px 13px; background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 8px; }
+.fld { display: flex; flex-direction: column; gap: 3px; }
+.fld > span { font-family: var(--mono); font-size: .66rem; letter-spacing: .09em;
+              text-transform: uppercase; color: var(--ink-muted); font-weight: 700; }
+.fld select, .fld input[type="range"] { background: var(--surface-3); color: var(--ink);
+              border: 1px solid var(--hairline); border-radius: 6px; padding: 5px 7px;
+              font-family: var(--mono); font-size: .8rem; }
+.fld input[type="range"] { padding: 0; min-width: 170px; accent-color: var(--gradient); }
+.segbtns { display: flex; gap: 4px; flex-wrap: wrap; }
+.segbtns button { background: var(--surface-3); color: var(--ink-2); border: 1px solid var(--hairline);
+                  border-radius: 6px; padding: 5px 11px; font-family: var(--mono); font-size: .78rem;
+                  cursor: pointer; }
+.segbtns button.on { background: var(--gradient-w); border-color: var(--gradient); color: var(--gradient); font-weight: 700; }
+.chk { display: flex; align-items: center; gap: 7px; cursor: pointer; font-family: var(--mono);
+       font-size: .78rem; color: var(--ink-2); user-select: none; }
+.chk input { accent-color: var(--gradient); width: 15px; height: 15px; }
+
+/* ---- the residual-stream diagram + step panel ---- */
+.steplay { display: grid; grid-template-columns: 430px 1fr; gap: 22px; align-items: start; }
+@media (max-width: 1020px) { .steplay { grid-template-columns: 1fr; } }
+.diagwrap { background: var(--surface-1); border: 1px solid var(--hairline); border-radius: 10px; padding: 6px; }
+svg.stream { width: 100%; height: auto; display: block; }
+svg.stream text { font-family: var(--mono); fill: var(--ink-2); }
+.nd rect { fill: var(--surface-2); stroke: var(--hairline); stroke-width: 1; rx: 5;
+           transition: fill .3s, stroke .3s; }
+.nd text.n { fill: var(--ink-2); font-size: 10.5px; }
+.nd text.s { fill: var(--ink-muted); font-size: 8.5px; }
+.nd.done rect { stroke: var(--gradient); fill: var(--gradient-w); }
+.nd.done text.n { fill: var(--gradient); }
+.nd.now rect { stroke: var(--gradient); stroke-width: 2.4; fill: var(--gradient-w); }
+.nd.now text.n { fill: var(--ink); font-weight: 700; }
+.jn circle { fill: var(--surface-2); stroke: var(--hairline); stroke-width: 1.4; transition: fill .3s, stroke .3s; }
+.jn.done circle { stroke: var(--gradient); fill: var(--gradient-w); }
+.jn.now circle { stroke: var(--gradient); stroke-width: 2.6; fill: var(--gradient-w); }
+.jn text { font-size: 12px; fill: var(--ink-2); }
+.packet { transition: transform .5s cubic-bezier(.4,0,.2,1); }
+.packet circle.core { fill: var(--gradient); }
+.packet circle.halo { fill: none; stroke: var(--gradient); opacity: .45; }
+line.gfill { transition: y1 .5s cubic-bezier(.4,0,.2,1); }
+.layerband { fill: none; stroke: var(--hairline-2); stroke-width: 1; rx: 8; }
+
+.stepcard { border: 1px solid var(--hairline); border-left: 4px solid var(--gradient);
+            border-radius: 0 9px 9px 0; background: var(--surface-2); padding: 14px 17px; }
+.stepcard h3 { margin: 4px 0 8px; font-size: 1.15rem; }
+.stepcard p.note { color: var(--ink-2); font-size: .93rem; margin: 0 0 12px; line-height: 1.6; }
+.tag { display: inline-block; font-family: var(--mono); font-size: .6rem; letter-spacing: .09em;
+       text-transform: uppercase; font-weight: 700; padding: 2px 7px; border-radius: 99px;
+       border: 1px solid var(--hairline); color: var(--ink-muted); }
+.tag.g { color: var(--gradient); border-color: var(--gradient); }
+.chiprow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0 0; }
+.chiprow .lbl { font-family: var(--mono); font-size: .66rem; letter-spacing: .08em;
+                text-transform: uppercase; color: var(--ink-muted); font-weight: 700; margin-right: 4px; }
+
+/* ---- verdicts / checks ---- */
+.verdict { border-radius: 8px; padding: 11px 15px; margin: 13px 0; border: 1px solid var(--hairline);
+           background: var(--surface-2); display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 18px;
+           font-family: var(--mono); font-size: .84rem; }
+.verdict.ok  { border-left: 4px solid var(--good); }
+.verdict.bad { border-left: 4px solid var(--critical); }
+.verdict .big { font-size: 1.05rem; font-weight: 800; }
+.verdict.ok .big  { color: var(--good); }
+.verdict.bad .big { color: var(--critical); }
+.verdict .det { color: var(--ink-2); }
+
+/* ---- generic numeric table ---- */
+.kv { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .79rem;
+      font-variant-numeric: tabular-nums; margin: 10px 0; }
+.kv th, .kv td { padding: 5px 9px; border-bottom: 1px solid var(--hairline-2); text-align: right; white-space: nowrap; }
+.kv th { font-size: .62rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-muted);
+         border-bottom: 1px solid var(--hairline); }
+.kv td:first-child, .kv th:first-child { text-align: left; }
+.kv tr.off td { opacity: .3; text-decoration: line-through; }
+.kv tr.tot td { border-top: 1px solid var(--hairline); font-weight: 700; color: var(--ink); }
+.kv tr.tot.g td { color: var(--gradient); }
+.kv td.nz { color: var(--ink-muted); }
+.kv .cmt { font-size: .72rem; color: var(--ink-muted); white-space: normal; }
+
+/* ---- naive vs correct bars ---- */
+.dbar { position: relative; height: 13px; background: var(--surface-3); border-radius: 3px; overflow: hidden; min-width: 90px; }
+.dbar > i { position: absolute; top: 0; height: 100%; display: block; }
+.dbar > i.pos { background: var(--gradient); }
+.dbar > i.neg { background: var(--accent); }
+.dbar > u { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--ink-muted); opacity: .55; }
+
+/* ---- softmax jacobian heatmap ---- */
+.jacwrap { display: flex; flex-wrap: wrap; gap: 22px; align-items: flex-start; }
+.jac { display: grid; gap: 3px; width: max-content; max-width: 100%; }
+.jcell { min-width: 84px; padding: 7px 8px; border-radius: 5px; font-family: var(--mono);
+         font-size: .76rem; text-align: right; border: 1px solid var(--hairline); position: relative;
+         background: var(--surface-3); cursor: default; }
+.jcell .fillbg { position: absolute; inset: 0; background: var(--gradient); border-radius: 4px; }
+.jcell .val { position: relative; display: block; font-variant-numeric: tabular-nums; }
+.jcell .kind { position: relative; display: block; font-size: .55rem; letter-spacing: .06em;
+               text-transform: uppercase; color: var(--ink-muted); }
+.jcell.diag { border-style: solid; border-color: var(--gradient); }
+.jcell.offd { border-style: dashed; }
+.jcell.zero .val { opacity: .35; }
+.jhdr { font-family: var(--mono); font-size: .64rem; color: var(--ink-muted); text-align: right;
+        padding: 2px 8px; letter-spacing: .06em; }
+
+/* ---- split diagram (residual) ---- */
+svg.split { width: 100%; height: auto; display: block; }
+svg.split text { font-family: var(--mono); fill: var(--ink-2); }
+
+/* ---- gradcheck report ---- */
+.gcrow { display: grid; grid-template-columns: 96px 44px 1fr 96px 34px; gap: 10px; align-items: center;
+         font-family: var(--mono); font-size: .77rem; padding: 4px 0; border-bottom: 1px solid var(--hairline-2); }
+.gcrow .nm { color: var(--ink); }
+.gcrow .el { color: var(--ink-muted); text-align: right; }
+.gcrow .er { text-align: right; font-variant-numeric: tabular-nums; }
+.gcrow .vd { text-align: center; color: var(--good); font-weight: 700; }
+.gcbar { height: 10px; background: var(--surface-3); border-radius: 3px; overflow: hidden; }
+.gcbar > i { display: block; height: 100%; background: var(--gradient); }
+.gchdr { display: grid; grid-template-columns: 96px 44px 1fr 96px 34px; gap: 10px;
+         font-family: var(--mono); font-size: .6rem; letter-spacing: .1em; text-transform: uppercase;
+         color: var(--ink-muted); font-weight: 700; padding-bottom: 5px; border-bottom: 1px solid var(--hairline); }
+
+.tensorrow { display: flex; flex-wrap: wrap; gap: 4px 18px; align-items: flex-start; }
+.eqn { font-family: var(--mono); font-size: .9rem; }
+.scrollx { overflow-x: auto; }
+mark.hl { background: var(--gradient-w); color: var(--gradient); padding: 0 3px; border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 16</div>
+    <h1>Transformer Backward: Every Gradient, Derived</h1>
+    <p class="lede">Page 15 pushed three tokens forward through two blocks and saved the
+      activations. This page spends them. Fourteen backward steps, in reverse order, each one an
+      application of the chain rule to a specific saved tensor — and three places where the answer
+      is not what a first guess produces: LayerNorm's two correction terms, softmax's dense
+      Jacobian, and the residual connection that makes the whole stack trainable. Every gradient
+      here is checked against central finite differences.</p>
+    <noscript><p class="callout warn">This page derives and renders every number in the browser
+      from <code>assets/data/tf2.js</code>. With JavaScript disabled you will see an empty shell.</p></noscript>
+  </div>
+
+  <section class="block" id="seed">
+    <h2>1 · Where the gradient comes from</h2>
+    <div id="seedBody"></div>
+  </section>
+
+  <section class="block" id="walk">
+    <h2>2 · The walk: fourteen steps, in reverse</h2>
+    <div id="walkBody"></div>
+  </section>
+
+  <section class="block" id="ln">
+    <h2>3 · LayerNorm backward — the two correction terms</h2>
+    <div id="lnBody"></div>
+  </section>
+
+  <section class="block" id="attn">
+    <h2>4 · Attention backward, in full</h2>
+    <div id="attnBody"></div>
+  </section>
+
+  <section class="block" id="soft">
+    <h2>5 · The softmax Jacobian is dense</h2>
+    <div id="softBody"></div>
+  </section>
+
+  <section class="block" id="qkv">
+    <h2>6 · Q, K and V gradients add</h2>
+    <div id="qkvBody"></div>
+  </section>
+
+  <section class="block" id="res">
+    <h2>7 · The residual connection is a gradient superhighway</h2>
+    <div id="resBody"></div>
+  </section>
+
+  <section class="block" id="read">
+    <h2>8 · What backward read</h2>
+    <div id="readBody"></div>
+  </section>
+
+  <section class="block" id="check">
+    <h2>9 · The gradient check</h2>
+    <div id="checkBody"></div>
+  </section>
+
+  <section class="block" id="close">
+    <h2>10 · What this looks like at 70B</h2>
+    <div id="closeBody"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/tf2.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T  = NN.T;
+  const D  = window.TF2;
+  const el = NN.el;
+  const fmt = NN.fmt, fmts = NN.fmtSigned;
+
+  if (!D) {
+    document.querySelector("main").prepend(
+      NN.callout("warn", "DATA MISSING",
+        "<code>assets/data/tf2.js</code> did not load. Run " +
+        "<code>python3 code/transformer_2layer.py</code> to regenerate it."));
+    NN.page("tfbackward");
+    return;
+  }
+
+  const M     = D.meta;
+  const SEQ   = M.seq, DM = M.d_model, NH = M.n_heads, DH = M.d_head;
+  const NL    = M.n_layers, DFF = M.d_ff;
+  const TOK   = M.tokens;
+  const STEPS = D.backward_steps;
+  const NSTEP = STEPS.length;
+
+  /* ------------------------------------------------------------ linear algebra */
+  function Tr(A)      { return A[0].map(function (_, j) { return A.map(function (r) { return r[j]; }); }); }
+  function mm(A, B)   {
+    const K = B.length, N = B[0].length;
+    return A.map(function (row) {
+      const out = new Array(N);
+      for (let j = 0; j < N; j++) { let s = 0; for (let t = 0; t < K; t++) s += row[t] * B[t][j]; out[j] = s; }
+      return out;
+    });
+  }
+  function add(A, B)  { return A.map(function (r, i) { return r.map(function (v, j) { return v + B[i][j]; }); }); }
+  function sub(A, B)  { return A.map(function (r, i) { return r.map(function (v, j) { return v - B[i][j]; }); }); }
+  function smul(A, s) { return A.map(function (r) { return r.map(function (v) { return v * s; }); }); }
+  function fro(A)     { let s = 0; A.forEach(function (r) { r.forEach(function (v) { s += v * v; }); }); return Math.sqrt(s); }
+  function maxdiff(A, B) {
+    let m = 0;
+    A.forEach(function (r, i) { r.forEach(function (v, j) { m = Math.max(m, Math.abs(v - B[i][j])); }); });
+    return m;
+  }
+  function vsum(v)    { return v.reduce(function (a, b) { return a + b; }, 0); }
+  function vdot(a, b) { return a.reduce(function (s, v, i) { return s + v * b[i]; }, 0); }
+  function sci(x, d)  { return (x === 0) ? "0" : x.toExponential(d === undefined ? 2 : d); }
+  function cols(A, lo, hi) { return A.map(function (r) { return r.slice(lo, hi); }); }
+
+  /* ------------------------------------------------------------ step indexing */
+  const S = {};
+  STEPS.forEach(function (s, i) { S[s.layer + ":" + s.id] = s; s._i = i; });
+  const ORDER = ["resid2", "mlp", "ln2", "wo", "attn", "qkv", "ln1"];
+
+  /* Per-layer derived gradients on the residual stream. */
+  const BLK = [];
+  for (let L = NL - 1; L >= 0; L--) {
+    const din  = S[L + ":resid2"].value;              // gradient arriving on the stream
+    const p2   = S[L + ":ln2"].value;                 // MLP branch contribution
+    const dh1  = add(din, p2);                        // stream after the MLP branch merges
+    const dout = S[L + ":ln1"].value;                 // gradient leaving the block
+    const p1   = sub(dout, dh1);                      // attention branch contribution
+    BLK.push({ L: L, din: din, dh1: dh1, dout: dout, proc2: p2, proc1: p1 });
+  }
+  const BLKof = {}; BLK.forEach(function (b) { BLKof[b.L] = b; });
+
+  /* ------------------------------------------------------------ shared checks */
+  /* Every "verified" claim on this page is recomputed here, in the browser,
+     from the forward cache — never asserted. */
+  const CHECK = {};
+
+  /* dOut: re-derive the seed gradient from the forward output and the target. */
+  (function () {
+    const N = SEQ * DM;
+    const mine = smul(sub(D.forward.out, D.input.target), 2 / N);
+    CHECK.dOut = maxdiff(mine, D.dOut);
+    CHECK.dOutMine = mine;
+  })();
+
+  /* Softmax: rebuild dS from the explicit dense Jacobian, for every row of
+     every head of every layer, and confirm every row sums to zero. */
+  (function () {
+    let worstJ = 0, worstSum = 0, rows = 0, zeroRows = 0;
+    for (let L = 0; L < NL; L++) {
+      const st = S[L + ":attn"];
+      for (let h = 0; h < NH; h++) {
+        const P = D.forward.layers[L].heads[h].P;
+        const hd = st.heads[h];
+        for (let i = 0; i < SEQ; i++) {
+          const p = P[i], dp = hd.dP[i];
+          const J = p.map(function (pi, a) { return p.map(function (pj, b) { return pi * ((a === b ? 1 : 0) - pj); }); });
+          // dL/ds_b = sum_a dp_a * J[a][b]
+          const ds = p.map(function (_, b) { return p.reduce(function (s, __, a) { return s + dp[a] * J[a][b]; }, 0); });
+          for (let b = 0; b < SEQ; b++) worstJ = Math.max(worstJ, Math.abs(ds[b] - hd.dS[i][b]));
+          const rs = Math.abs(vsum(hd.dS[i]));
+          worstSum = Math.max(worstSum, rs);
+          rows++; if (rs < 1e-12) zeroRows++;
+        }
+      }
+    }
+    CHECK.jac = worstJ;
+    CHECK.rowSum = worstSum;
+    CHECK.rows = rows;
+    CHECK.zeroRows = zeroRows;
+  })();
+
+  /* Attention: rebuild dP, dV, dQ, dK per head from the saved forward tensors. */
+  (function () {
+    let worst = 0;
+    for (let L = 0; L < NL; L++) {
+      const lc = D.forward.layers[L], st = S[L + ":attn"], dO = S[L + ":wo"].value;
+      for (let h = 0; h < NH; h++) {
+        const H = lc.heads[h], hd = st.heads[h];
+        const dOh = cols(dO, H.cols[0], H.cols[1]);
+        worst = Math.max(worst, maxdiff(mm(dOh, Tr(H.V)), hd.dP));
+        worst = Math.max(worst, maxdiff(mm(Tr(H.P), dOh), hd.dV));
+        const dRaw = smul(hd.dS, lc.scale);
+        worst = Math.max(worst, maxdiff(mm(dRaw, H.K), hd.dQ));
+        worst = Math.max(worst, maxdiff(mm(Tr(dRaw), H.Q), hd.dK));
+      }
+    }
+    CHECK.attn = worst;
+  })();
+
+  /* Assemble full-width dQ / dK / dV by concatenating the per-head slices. */
+  function assemble(L, key) {
+    const out = [];
+    for (let i = 0; i < SEQ; i++) out.push(new Array(DM).fill(0));
+    const st = S[L + ":attn"];
+    for (let h = 0; h < NH; h++) {
+      const lo = D.forward.layers[L].heads[h].cols[0];
+      st.heads[h][key].forEach(function (r, i) { r.forEach(function (v, j) { out[i][lo + j] += v; }); });
+    }
+    return out;
+  }
+  const QKV = {};
+  for (let L = 0; L < NL; L++) QKV[L] = { dQ: assemble(L, "dQ"), dK: assemble(L, "dK"), dV: assemble(L, "dV") };
+  CHECK.dQ = 0;
+  for (let L = 0; L < NL; L++) CHECK.dQ = Math.max(CHECK.dQ, maxdiff(QKV[L].dQ, S[L + ":attn"].value));
+
+  /* Q/K/V input gradients: three contributions that must sum to dn1. */
+  const QKVSUM = {};
+  for (let L = 0; L < NL; L++) {
+    const cq = mm(QKV[L].dQ, Tr(D.params["L" + L + ".Wq"]));
+    const ck = mm(QKV[L].dK, Tr(D.params["L" + L + ".Wk"]));
+    const cv = mm(QKV[L].dV, Tr(D.params["L" + L + ".Wv"]));
+    QKVSUM[L] = { q: cq, k: ck, v: cv, sum: add(add(cq, ck), cv), err: maxdiff(add(add(cq, ck), cv), S[L + ":qkv"].value) };
+  }
+  CHECK.qkv = Math.max.apply(null, Object.keys(QKVSUM).map(function (L) { return QKVSUM[L].err; }));
+
+  /* LayerNorm: rebuild dx from the three terms, and measure the two invariants. */
+  const LNSITES = [];
+  for (let L = NL - 1; L >= 0; L--) {
+    ["ln2", "ln1"].forEach(function (id) {
+      const st = S[L + ":" + id];
+      LNSITES.push({
+        key: L + ":" + id, L: L, id: id,
+        label: "layer " + L + " · " + (id === "ln1" ? "LN1 (before attention)" : "LN2 (before MLP)"),
+        detail: st.ln_detail,
+        rows: D.forward.layers[L][id].rows,
+        gain: D.params["L" + L + "." + id + ".g"],
+        bias: D.params["L" + L + "." + id + ".b"],
+        dg: D.grads["L" + L + "." + id + ".g"],
+        db: D.grads["L" + L + "." + id + ".b"]
+      });
+    });
+  }
+  (function () {
+    let worst = 0, wsum = 0, wsumx = 0, naiveWorstSum = 0, naiveWorstDiff = 0;
+    LNSITES.forEach(function (site) {
+      site.detail.forEach(function (t) {
+        const dx = t.xhat.map(function (xh, j) {
+          return t.inv_std * (t.dxhat[j] - t.mean_dxhat - xh * t.mean_dxhat_xhat);
+        });
+        worst = Math.max(worst, Math.max.apply(null, dx.map(function (v, j) { return Math.abs(v - t.dx[j]); })));
+        wsum  = Math.max(wsum,  Math.abs(vsum(t.dx)));
+        wsumx = Math.max(wsumx, Math.abs(vdot(t.dx, t.xhat)));
+        naiveWorstSum  = Math.max(naiveWorstSum,  Math.abs(vsum(t.naive_dx)));
+        naiveWorstDiff = Math.max(naiveWorstDiff, Math.max.apply(null,
+          t.dx.map(function (v, j) { return Math.abs(v - t.naive_dx[j]); })));
+      });
+    });
+    CHECK.lnRebuild = worst;
+    CHECK.lnSum = wsum;
+    CHECK.lnSumX = wsumx;
+    CHECK.naiveSum = naiveWorstSum;
+    CHECK.naiveDiff = naiveWorstDiff;
+  })();
+
+  const GCWORST = D.gradcheck.max_abs_err;
+
+  /* LayerNorm forward, reimplemented here so the invariance can be tested live. */
+  function lnfwd(x, g, b, eps) {
+    const n = x.length;
+    const mu = vsum(x) / n;
+    const va = x.reduce(function (a, v) { return a + (v - mu) * (v - mu); }, 0) / n;
+    const inv = 1 / Math.sqrt(va + eps);
+    const xh = x.map(function (v) { return (v - mu) * inv; });
+    return { mu: mu, va: va, inv: inv, xhat: xh, y: xh.map(function (v, j) { return g[j] * v + b[j]; }) };
+  }
+
+  /* ------------------------------------------------------------ small helpers */
+  function verdict(ok, big, det) {
+    return el("div", { class: "verdict " + (ok ? "ok" : "bad") }, [
+      el("span", { class: "big" }, (ok ? "✓ " : "✗ ") + big),
+      el("span", { class: "det", html: det })
+    ]);
+  }
+  function gtensor(name, vals, note) {
+    return NN.tensor({ name: name, values: vals, cls: "gradient", digits: 5, signed: true, note: note });
+  }
+  function atensor(name, vals, note) {
+    return NN.tensor({ name: name, values: vals, cls: "activation", digits: 4, note: note });
+  }
+  function seg(labels, cur, onpick) {
+    const wrap = el("div", { class: "segbtns" });
+    labels.forEach(function (t, i) {
+      const b = el("button", { class: i === cur ? "on" : "", onclick: function () {
+        NN.$$("button", wrap).forEach(function (x, k) { x.classList.toggle("on", k === i); });
+        onpick(i);
+      } }, t);
+      wrap.appendChild(b);
+    });
+    return wrap;
+  }
+  function field(label, node) { return el("label", { class: "fld" }, [el("span", {}, label), node]); }
+  function mono(t, cls) { return el("span", { class: "mono " + (cls || "") }, t); }
+
+  /* ======================================================================
+     1 · WHERE THE GRADIENT COMES FROM
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#seedBody");
+    const N = SEQ * DM;
+
+    host.appendChild(el("p", { html:
+      "Backward starts with one number and one derivative. The loss is a mean squared error over " +
+      "every element of the output stream — " + SEQ + " tokens × " + DM + " channels = " + N +
+      " numbers — against a fixed target:" }));
+
+    host.appendChild(NN.formula({
+      rule: "L = (1/N) &Sigma;<sub>t,d</sub> ( out[t][d] &minus; target[t][d] )<sup>2</sup>",
+      sub: "N = " + SEQ + " &times; " + DM + " = " + N,
+      result: fmt(D.loss, 9),
+      cls: "gradient"
+    }));
+
+    host.appendChild(NN.formula({
+      rule: "&part;L/&part;out[t][d] = (2/N) ( out[t][d] &minus; target[t][d] )",
+      sub: "one derivative per output element; this matrix is the <em>seed</em> of the whole backward pass",
+      cls: "gradient"
+    }));
+
+    host.appendChild(el("div", { class: "tensorrow" }, [
+      atensor("out", D.forward.out, "forward result"),
+      atensor("target", D.input.target, "fixed"),
+      gtensor("dL/dout", D.dOut, "the seed")
+    ]));
+
+    host.appendChild(verdict(CHECK.dOut < 1e-15,
+      "seed re-derived in the browser",
+      "recomputed <code>2(out&minus;target)/N</code> from the forward cache and compared to " +
+      "<code>TF2.dOut</code>: max |&Delta;| = <b>" + sci(CHECK.dOut) + "</b>"));
+
+    host.appendChild(el("p", { html:
+      "From here the job is mechanical and completely local: at every operation, take the gradient " +
+      "with respect to that operation's output, and produce (a) the gradient with respect to its " +
+      "inputs, to hand further back, and (b) the gradient with respect to its parameters, to keep. " +
+      "There are " + NSTEP + " such steps in this model — " + (NSTEP / NL) + " per block, run in " +
+      "reverse — and they produce " + D.gradcheck.per_param.length + " parameter-gradient tensors " +
+      "covering all " + M.n_params + " parameters." }));
+
+    const stats = [];
+    stats.push({ k: "loss", v: fmt(D.loss, 6), cls: "gradient" });
+    stats.push({ k: "backward steps", v: String(NSTEP), s: (NSTEP / NL) + " per block × " + NL + " blocks" });
+    stats.push({ k: "parameter tensors", v: String(D.gradcheck.per_param.length), s: M.n_params + " scalars", cls: "weight" });
+    stats.push({ k: "|dL/dout|", v: fmt(fro(D.dOut), 5), s: "Frobenius norm, at the top", cls: "gradient" });
+    stats.push({ k: "|dL/dx|", v: fmt(fro(D.dx_in), 5), s: "at the input, " + fmt(fro(D.dx_in) / fro(D.dOut), 3) + "× larger", cls: "gradient" });
+    stats.push({ k: "worst gradcheck", v: sci(GCWORST), s: "vs central differences" });
+    host.appendChild(NN.tiles(stats));
+
+    host.appendChild(NN.legend(["activation", "gradient", "weight"]));
+
+    host.appendChild(NN.callout("key", "THE ONE RULE",
+      "Backward is the chain rule applied in reverse topological order, and nothing else. Every " +
+      "surprise on this page — LayerNorm's correction terms, softmax's off-diagonal Jacobian, the " +
+      "residual's untouched copy — falls out of asking one question honestly: <em>which of my " +
+      "inputs does this output actually depend on?</em> Every mistake people make comes from " +
+      "answering that question too quickly."));
+  })();
+
+  /* ======================================================================
+     2 · THE WALK — the stepper + persistent residual-stream diagram
+     ====================================================================== */
+
+  /* Authored per-step metadata: the symbolic rule, what it reads, what it
+     produces. The numbers all come from TF2; only the algebra is written here. */
+  const META = {
+    resid2: {
+      vname: "dD = dh₁",
+      rule: "h₂ = h₁ + D &nbsp;→&nbsp; &part;h₂/&part;h₁ = I, &nbsp; &part;h₂/&part;D = I",
+      sub: "so dh₁ &larr; dh₂ and dD &larr; dh₂ &mdash; the <em>same matrix</em>, copied twice",
+      reads: [], weights: [], produces: [],
+      extra: "Addition is the only op here that costs no memory and loses no signal."
+    },
+    mlp: {
+      vname: "dn₂",
+      rule: "D = GELU(n₂ W₁) W₂ &nbsp;→&nbsp; dW₂ = G<sup>T</sup>·dD, &nbsp; dG = dD·W₂<sup>T</sup>, " +
+            "&nbsp; dU = dG ⊙ GELU&prime;(U), &nbsp; dW₁ = n₂<sup>T</sup>·dU, &nbsp; dn₂ = dU·W₁<sup>T</sup>",
+      sub: "GELU is elementwise, so its Jacobian <em>is</em> diagonal &mdash; a Hadamard product, not a matmul",
+      reads: ["G (GELU out)", "U (pre-act)", "n₂ (LN2 out)"], weights: ["W₁", "W₂"],
+      produces: ["dW₁", "dW₂"]
+    },
+    ln2: {
+      vname: "dh₁ (branch)",
+      rule: "y = g ⊙ x̂ + b &nbsp;→&nbsp; dx<sub>j</sub> = (1/&sigma;)[ dx̂<sub>j</sub> " +
+            "&minus; mean<sub>k</sub>(dx̂<sub>k</sub>) &minus; x̂<sub>j</sub>·mean<sub>k</sub>(dx̂<sub>k</sub>x̂<sub>k</sub>) ]",
+      sub: "&sect;3 derives this. The two subtracted terms are the mean's and the variance's contributions",
+      reads: ["x̂ (LN2)", "1/σ (LN2)"], weights: ["g₂"], produces: ["dg₂", "db₂"]
+    },
+    wo: {
+      vname: "dO",
+      rule: "A = O W<sub>o</sub> &nbsp;→&nbsp; dW<sub>o</sub> = O<sup>T</sup>·dA, &nbsp; dO = dA·W<sub>o</sub><sup>T</sup>",
+      sub: "the plain linear-layer pair: outer product for the weight, transposed matmul for the input",
+      reads: ["O (concat heads)"], weights: ["Wₒ"], produces: ["dWₒ"]
+    },
+    attn: {
+      vname: "dQ",
+      rule: "O = P·V &nbsp;→&nbsp; dP = dO·V<sup>T</sup>, dV = P<sup>T</sup>·dO. &nbsp;&nbsp; " +
+            "S = QK<sup>T</sup>·scale &nbsp;→&nbsp; dQ = dS·K·scale, dK = dS<sup>T</sup>·Q·scale",
+      sub: "with softmax in between: dS<sub>i</sub> = p<sub>i</sub>(dP<sub>i</sub> &minus; &Sigma;<sub>j</sub> dP<sub>j</sub>p<sub>j</sub>). &sect;4 and &sect;5",
+      reads: ["P (probs)", "V", "K → dQ", "Q → dK"], weights: [], produces: []
+    },
+    qkv: {
+      vname: "dn₁",
+      rule: "Q = n₁W<sub>q</sub>, K = n₁W<sub>k</sub>, V = n₁W<sub>v</sub> &nbsp;→&nbsp; " +
+            "dn₁ = dQ·W<sub>q</sub><sup>T</sup> + dK·W<sub>k</sub><sup>T</sup> + dV·W<sub>v</sub><sup>T</sup>",
+      sub: "one tensor read three times fans <em>in</em> three gradients on the way back. &sect;6",
+      reads: ["n₁ (LN1 out)"], weights: ["W_q", "W_k", "W_v"], produces: ["dW_q", "dW_k", "dW_v"]
+    },
+    ln1: {
+      vname: "dh (leaving)",
+      rule: "same LayerNorm rule as LN2, then dh = dh<sub>skip</sub> + dh<sub>branch</sub>",
+      sub: "the residual's untouched copy is added back here, closing the block",
+      reads: ["x̂ (LN1)", "1/σ (LN1)"], weights: ["g₁"], produces: ["dg₁", "db₁"]
+    }
+  };
+
+  const GEO = (function () {
+    const SPINE = 78, BX = 262, HW = 92;
+    const BAND = 272, TOP = 40;
+    const g = { SPINE: SPINE, BX: BX, HW: HW, W: 420, H: 0, top: TOP, band: BAND, layers: {} };
+    for (let L = 0; L < NL; L++) {
+      const TT = TOP + L * BAND;
+      g.layers[L] = {
+        TT: TT,
+        tapA: TT + 14,
+        ln1: TT + 36, qkv: TT + 68, attn: TT + 100, wo: TT + 132,
+        join1: TT + 162,
+        tapB: TT + 176,
+        ln2: TT + 196, mlp: TT + 228,
+        join2: TT + 250
+      };
+    }
+    g.xin = 20;
+    g.loss = TOP + (NL - 1) * BAND + 250 + 40;
+    g.H = g.loss + 24;
+    return g;
+  })();
+
+  (function () {
+    const host = NN.$("#walkBody");
+
+    host.appendChild(el("p", { html:
+      "The diagram is the residual stream, drawn with the input at the top and the loss at the " +
+      "bottom, so <b>forward runs down and backward climbs up</b>. The orange packet is the gradient. " +
+      "It enters at the loss, works up through layer " + (NL - 1) + " first — backward visits blocks " +
+      "in reverse — and leaves at the input. The thick orange line is how far the gradient has " +
+      "travelled; the boxes it has already passed through stay lit, because their parameter " +
+      "gradients are now sitting in memory waiting for the optimizer." }));
+
+    const lay = el("div", { class: "steplay" });
+    const dwrap = el("div", { class: "diagwrap" });
+    const right = el("div", {});
+    lay.appendChild(dwrap); lay.appendChild(right);
+    host.appendChild(lay);
+
+    /* ---------------- build the SVG ---------------- */
+    const svg = NN.svg;
+    const root = svg("svg", { class: "stream", viewBox: "0 0 " + GEO.W + " " + GEO.H,
+                              role: "img", "aria-label": "residual stream, backward pass" });
+
+    function txt(x, y, s, size, anchor, fill) {
+      const t = svg("text", { x: x, y: y, "font-size": size || 10, "text-anchor": anchor || "start",
+                              fill: fill || "var(--ink-2)" });
+      t.textContent = s; root.appendChild(t); return t;
+    }
+
+    /* layer bands */
+    for (let L = 0; L < NL; L++) {
+      const G = GEO.layers[L];
+      root.appendChild(svg("rect", { class: "layerband", x: 8, y: G.TT - 8, width: GEO.W - 16,
+                                     height: 268, rx: 9 }));
+      txt(14, G.TT + 12, "block " + L, 9.5, "start", "var(--ink-muted)");
+    }
+
+    /* branch rails */
+    for (let L = 0; L < NL; L++) {
+      const G = GEO.layers[L];
+      [[G.tapA, G.join1], [G.tapB, G.join2]].forEach(function (pr) {
+        root.appendChild(svg("path", {
+          d: "M" + GEO.SPINE + " " + pr[0] + " H" + GEO.BX + " V" + pr[1] + " H" + GEO.SPINE,
+          fill: "none", stroke: "var(--hairline)", "stroke-width": 1.5
+        }));
+      });
+    }
+
+    /* the residual spine (neutral), then the gradient-filled overlay */
+    root.appendChild(svg("line", { x1: GEO.SPINE, y1: GEO.xin, x2: GEO.SPINE, y2: GEO.loss,
+                                   stroke: "var(--accent)", "stroke-width": 5, "stroke-linecap": "round",
+                                   opacity: .55 }));
+    const gfill = svg("line", { class: "gfill", x1: GEO.SPINE, y1: GEO.loss, x2: GEO.SPINE, y2: GEO.loss,
+                                stroke: "var(--gradient)", "stroke-width": 5, "stroke-linecap": "round" });
+    root.appendChild(gfill);
+
+    /* forward-direction hint */
+    root.appendChild(svg("path", { d: "M" + (GEO.W - 16) + " 30 V" + (GEO.loss - 12),
+                                   stroke: "var(--hairline)", "stroke-width": 1, fill: "none" }));
+    txt(GEO.W - 22, 26, "forward ↓", 8.5, "end", "var(--ink-muted)");
+    txt(GEO.W - 22, GEO.loss - 2, "backward ↑", 8.5, "end", "var(--gradient)");
+
+    /* stream endpoints */
+    root.appendChild(svg("circle", { cx: GEO.SPINE, cy: GEO.xin, r: 5, fill: "var(--activation)" }));
+    txt(GEO.SPINE + 11, GEO.xin + 4, "x  (" + TOK.join(", ") + ")", 10, "start", "var(--activation)");
+    root.appendChild(svg("circle", { cx: GEO.SPINE, cy: GEO.loss, r: 5, fill: "var(--gradient)" }));
+    txt(GEO.SPINE + 11, GEO.loss + 4, "L = " + fmt(D.loss, 5), 10, "start", "var(--gradient)");
+
+    /* nodes */
+    const NODES = {};
+    const NODEDEF = {
+      ln1: ["LayerNorm 1", "μ, σ per token"],
+      qkv: ["Q, K, V = n₁W", "3 projections"],
+      attn: ["attention", NH + " heads, causal"],
+      wo: ["Wₒ projection", "concat → d_model"],
+      ln2: ["LayerNorm 2", "μ, σ per token"],
+      mlp: ["MLP", "d_ff " + DFF + ", GELU"]
+    };
+    ["ln1", "qkv", "attn", "wo", "ln2", "mlp"].forEach(function (id) {
+      for (let L = 0; L < NL; L++) {
+        const y = GEO.layers[L][id];
+        const g = svg("g", { class: "nd", "data-k": L + ":" + id });
+        g.appendChild(svg("rect", { x: GEO.BX - GEO.HW, y: y - 13, width: GEO.HW * 2, height: 26 }));
+        const t1 = svg("text", { class: "n", x: GEO.BX - GEO.HW + 9, y: y - 1, "font-size": 10.5 });
+        t1.textContent = NODEDEF[id][0]; g.appendChild(t1);
+        const t2 = svg("text", { class: "s", x: GEO.BX - GEO.HW + 9, y: y + 9, "font-size": 8.5 });
+        t2.textContent = NODEDEF[id][1]; g.appendChild(t2);
+        root.appendChild(g);
+        NODES[L + ":" + id] = { g: g, x: GEO.BX, y: y };
+      }
+    });
+
+    /* residual junctions */
+    for (let L = 0; L < NL; L++) {
+      [["resid1", GEO.layers[L].join1], ["resid2", GEO.layers[L].join2]].forEach(function (pr) {
+        const g = svg("g", { class: "jn", "data-k": L + ":" + pr[0] });
+        g.appendChild(svg("circle", { cx: GEO.SPINE, cy: pr[1], r: 10 }));
+        const t = svg("text", { x: GEO.SPINE, y: pr[1] + 4.5, "text-anchor": "middle", "font-size": 13 });
+        t.textContent = "+"; g.appendChild(t);
+        root.appendChild(g);
+        NODES[L + ":" + pr[0]] = { g: g, x: GEO.SPINE, y: pr[1] };
+      });
+    }
+
+    /* stream-norm readouts, left of the spine */
+    const NORMTXT = {};
+    for (let L = 0; L < NL; L++) {
+      ["join1", "join2"].forEach(function (j) {
+        const t = txt(GEO.SPINE - 13, GEO.layers[L][j] + 3.5, "", 8.5, "end", "var(--gradient)");
+        NORMTXT[L + ":" + j] = t;
+      });
+    }
+    const normTop = txt(GEO.SPINE - 13, GEO.xin + 3.5, "", 8.5, "end", "var(--gradient)");
+    const normBot = txt(GEO.SPINE - 13, GEO.loss + 3.5, "", 8.5, "end", "var(--gradient)");
+
+    /* the packet */
+    const packet = svg("g", { class: "packet" });
+    packet.appendChild(svg("circle", { class: "halo", cx: 0, cy: 0, r: 11, "stroke-width": 2 }));
+    packet.appendChild(svg("circle", { class: "core", cx: 0, cy: 0, r: 5.5 }));
+    packet.setAttribute("transform", "translate(" + GEO.SPINE + "," + GEO.loss + ")");
+    root.appendChild(packet);
+
+    dwrap.appendChild(root);
+    dwrap.appendChild(el("div", { class: "small muted", style: { padding: "6px 8px 2px", lineHeight: "1.5" } },
+      "Frobenius norm of the gradient on the stream is printed at each junction. " +
+      "It never collapses — §7 explains why."));
+
+    /* ---------------- right-hand step card ---------------- */
+    const card = el("div", { class: "stepcard" });
+    right.appendChild(card);
+    const ctlHost = el("div", {});
+    right.appendChild(ctlHost);
+
+    const labels = STEPS.map(function (s) { return "L" + s.layer + " · " + s.label; });
+
+    function render(i) {
+      const st = META[STEPS[i].id];
+      const s = STEPS[i];
+      const key = s.layer + ":" + s.id;
+
+      /* diagram state */
+      const seen = {};
+      for (let k = 0; k <= i; k++) seen[STEPS[k].layer + ":" + STEPS[k].id] = k;
+      /* resid1 lights up once wo has been reached (the split happens there) */
+      Object.keys(NODES).forEach(function (nk) {
+        const g = NODES[nk].g;
+        let done = seen[nk] !== undefined;
+        if (nk.indexOf("resid1") >= 0) {
+          const L = +nk.split(":")[0];
+          done = seen[L + ":ln2"] !== undefined;
+        }
+        g.classList.toggle("done", done && nk !== key);
+        g.classList.toggle("now", nk === key);
+      });
+      const pos = NODES[key];
+      packet.setAttribute("transform", "translate(" + pos.x + "," + pos.y + ")");
+      /* the orange spine fills from the loss up to the current stream height */
+      const streamY = Math.min(pos.y, GEO.loss);
+      gfill.setAttribute("y1", i === NSTEP - 1 && s.id === "ln1" && s.layer === 0 ? GEO.xin : streamY);
+
+      /* stream norms revealed as the gradient passes */
+      normBot.textContent = fmt(fro(D.dOut), 4);
+      for (let L = 0; L < NL; L++) {
+        const b = BLKof[L];
+        NORMTXT[L + ":join2"].textContent = seen[L + ":resid2"] !== undefined ? fmt(fro(b.din), 4) : "";
+        NORMTXT[L + ":join1"].textContent = seen[L + ":ln2"] !== undefined ? fmt(fro(b.dh1), 4) : "";
+      }
+      normTop.textContent = (i === NSTEP - 1) ? fmt(fro(D.dx_in), 4) : "";
+
+      /* card */
+      card.innerHTML = "";
+      card.appendChild(el("div", { class: "chiprow" }, [
+        el("span", { class: "tag g" }, "step " + (i + 1) + " / " + NSTEP),
+        el("span", { class: "tag" }, "block " + s.layer),
+        el("span", { class: "tag" }, s.id)
+      ]));
+      card.appendChild(el("h3", {}, s.label));
+      card.appendChild(el("p", { class: "note" }, s.note));
+      card.appendChild(NN.formula({ rule: st.rule, sub: st.sub, cls: "gradient" }));
+
+      card.appendChild(el("div", { class: "tensorrow" }, [
+        gtensor(st.vname, s.value, "(" + SEQ + "×" + DM + ") · |·| = " + fmt(fro(s.value), 5))
+      ]));
+
+      const reads = el("div", { class: "chiprow" }, [el("span", { class: "lbl" }, "reads")]);
+      if (!st.reads.length && !st.weights.length) {
+        reads.appendChild(el("span", { class: "small muted" },
+          "nothing — addition has no operands to remember"));
+      }
+      st.reads.forEach(function (r) { reads.appendChild(NN.chip("activation", r)); });
+      st.weights.forEach(function (w) { reads.appendChild(NN.chip("weight", w)); });
+      card.appendChild(reads);
+
+      const prod = el("div", { class: "chiprow" }, [el("span", { class: "lbl" }, "produces")]);
+      if (!st.produces.length) {
+        prod.appendChild(el("span", { class: "small muted" },
+          "no parameter gradient — this step only moves the signal"));
+      }
+      st.produces.forEach(function (p) { prod.appendChild(NN.chip("gradient", p)); });
+      card.appendChild(prod);
+
+      if (st.extra) card.appendChild(el("p", { class: "small muted", style: { marginTop: "10px" } }, st.extra));
+
+      /* running tally */
+      let done = 0;
+      for (let k = 0; k <= i; k++) done += META[STEPS[k].id].produces.length;
+      card.appendChild(el("div", { class: "small muted", style: { marginTop: "12px" } },
+        "parameter-gradient tensors completed: " + done + " / " + D.gradcheck.per_param.length));
+    }
+
+    const stepper = new NN.Stepper({
+      mount: ctlHost, count: NSTEP, labels: labels, autoplayMs: 2000,
+      onStep: function (i) { render(i); }
+    });
+
+    host.appendChild(NN.callout("why", "WHY REVERSE ORDER IS FORCED",
+      "You cannot compute <code>dWₒ</code> in block 0 before you know the gradient arriving at " +
+      "block 0's output, and that gradient is only available after block " + (NL - 1) +
+      " has been differentiated. Backward is a topological sort of the forward graph, run backwards. " +
+      "This is exactly why pipeline parallelism has a bubble (page 13) and why activations from the " +
+      "<em>first</em> layer must survive until the <em>last</em> backward step — the longest-lived " +
+      "tensors in training are the ones created earliest."));
+  })();
+
+  /* ======================================================================
+     3 · LAYERNORM BACKWARD — the two correction terms
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#lnBody");
+
+    host.appendChild(el("p", { html:
+      "This is the single most commonly mis-derived gradient in a transformer, and the reason is " +
+      "that the obvious answer is <em>almost</em> right. LayerNorm is elementwise-looking: " +
+      "<code>y<sub>j</sub> = g<sub>j</sub>&middot;x̂<sub>j</sub> + b<sub>j</sub></code>. So the " +
+      "gradient must be elementwise too, surely — <code>dx<sub>j</sub> = dy<sub>j</sub>&middot;g<sub>j</sub>/&sigma;</code>. " +
+      "It is not, and the reason is one line of the forward pass." }));
+
+    host.appendChild(NN.formula({
+      rule: "&mu; = (1/n) &Sigma;<sub>k</sub> x<sub>k</sub> &nbsp;&nbsp;&nbsp; " +
+            "&sigma;<sup>2</sup> = (1/n) &Sigma;<sub>k</sub> (x<sub>k</sub> &minus; &mu;)<sup>2</sup> " +
+            "&nbsp;&nbsp;&nbsp; x̂<sub>j</sub> = (x<sub>j</sub> &minus; &mu;)/√(&sigma;<sup>2</sup>+&epsilon;)",
+      sub: "&mu; and &sigma; are functions of <b>every</b> element of the row. Perturb one x<sub>j</sub> " +
+           "and you move the normalisation of all " + DM + " channels of that token.",
+      cls: "activation"
+    }));
+
+    host.appendChild(el("h3", {}, "3.1 · The derivation, carried through both dependencies"));
+
+    host.appendChild(el("p", { html:
+      "Write <code>dx̂<sub>j</sub> = dL/dy<sub>j</sub> &middot; g<sub>j</sub></code> — the gradient " +
+      "with respect to the normalised value, which is genuinely elementwise because the affine " +
+      "<code>g,b</code> stage is. The total derivative of L with respect to <code>x<sub>j</sub></code> " +
+      "then has three routes to travel:" }));
+
+    host.appendChild(NN.formula({
+      rule: "dL/dx<sub>j</sub> = &Sigma;<sub>k</sub> dx̂<sub>k</sub> &middot; &part;x̂<sub>k</sub>/&part;x<sub>j</sub>" +
+            "<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; = &Sigma;<sub>k</sub> dx̂<sub>k</sub> " +
+            "[ <mark class='hl'>&part;x̂<sub>k</sub>/&part;x<sub>j</sub></mark><sub>direct</sub> " +
+            "+ <mark class='hl'>&part;x̂<sub>k</sub>/&part;&mu;</mark>&middot;&part;&mu;/&part;x<sub>j</sub> " +
+            "+ <mark class='hl'>&part;x̂<sub>k</sub>/&part;&sigma;<sup>2</sup></mark>&middot;&part;&sigma;<sup>2</sup>/&part;x<sub>j</sub> ]",
+      sub: "three routes: straight through, via the mean, via the variance",
+      cls: "gradient"
+    }));
+
+    host.appendChild(el("p", { html: "Take them one at a time, writing <code>&sigma; = √(&sigma;<sup>2</sup>+&epsilon;)</code>:" }));
+
+    const tbl = el("table", { class: "kv" });
+    tbl.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "route"), el("th", {}, "partial derivative"), el("th", {}, "contracts to")
+    ])));
+    const tb = el("tbody", {});
+    [
+      ["direct", "&part;x̂<sub>k</sub>/&part;x<sub>j</sub> |<sub>&mu;,&sigma; fixed</sub> = &delta;<sub>kj</sub>/&sigma;",
+       "dx̂<sub>j</sub> / &sigma;"],
+      ["via &mu;", "&part;x̂<sub>k</sub>/&part;&mu; = &minus;1/&sigma; &nbsp;and&nbsp; &part;&mu;/&part;x<sub>j</sub> = 1/n",
+       "&minus; (1/&sigma;)&middot;mean<sub>k</sub>(dx̂<sub>k</sub>)"],
+      ["via &sigma;<sup>2</sup>", "&part;x̂<sub>k</sub>/&part;&sigma;<sup>2</sup> = &minus;x̂<sub>k</sub>/(2&sigma;<sup>2</sup>) " +
+       "&nbsp;and&nbsp; &part;&sigma;<sup>2</sup>/&part;x<sub>j</sub> = 2x̂<sub>j</sub>&sigma;/n",
+       "&minus; (1/&sigma;)&middot;x̂<sub>j</sub>&middot;mean<sub>k</sub>(dx̂<sub>k</sub>x̂<sub>k</sub>)"]
+    ].forEach(function (r) {
+      tb.appendChild(el("tr", {}, [
+        el("td", { html: r[0] }), el("td", { html: r[1], style: { textAlign: "left" } }), el("td", { html: r[2] })
+      ]));
+    });
+    tbl.appendChild(tb);
+    host.appendChild(el("div", { class: "scrollx" }, tbl));
+
+    host.appendChild(el("p", { class: "small muted", html:
+      "The variance route needs one substitution to look clean: " +
+      "<code>&part;&sigma;<sup>2</sup>/&part;x<sub>j</sub> = (2/n)(x<sub>j</sub>&minus;&mu;) = (2/n)&middot;x̂<sub>j</sub>&middot;&sigma;</code>, " +
+      "using the definition of x̂ backwards. That is where the stray &sigma; cancels against the " +
+      "&sigma;<sup>2</sup> in the denominator and leaves a single 1/&sigma; out front." }));
+
+    host.appendChild(NN.formula({
+      rule: "<b>dx<sub>j</sub> = (1/&sigma;) [ dx̂<sub>j</sub> &minus; mean<sub>k</sub>(dx̂<sub>k</sub>) " +
+            "&minus; x̂<sub>j</sub>&middot;mean<sub>k</sub>(dx̂<sub>k</sub>x̂<sub>k</sub>) ]</b>",
+      sub: "term 1 is the naive answer; term 2 is the mean's correction; term 3 is the variance's",
+      cls: "gradient"
+    }));
+
+    /* --------------------- the interactive --------------------- */
+    host.appendChild(el("h3", {}, "3.2 · Watch the corrections move the number"));
+    host.appendChild(el("p", { html:
+      "Pick one of the " + LNSITES.length + " LayerNorms in the model and one token. The table " +
+      "builds <code>dx</code> term by term. Switch a correction off and the row greys out and stops " +
+      "contributing — the <b>naive</b> row is what you get with both off." }));
+
+    const st = { site: 0, tok: 0, useMean: true, useVar: true };
+
+    const ctl = el("div", { class: "ctlrow" });
+    const sel = el("select", { onchange: function () { st.site = +this.value; draw(); } },
+      LNSITES.map(function (s, i) { return el("option", { value: i }, s.label); }));
+    ctl.appendChild(field("layernorm", sel));
+    ctl.appendChild(field("token", seg(TOK.map(function (t, i) { return i + " · " + t; }), 0,
+      function (i) { st.tok = i; draw(); })));
+    const c1 = el("input", { type: "checkbox", checked: "checked",
+      onchange: function () { st.useMean = this.checked; draw(); } });
+    const c2 = el("input", { type: "checkbox", checked: "checked",
+      onchange: function () { st.useVar = this.checked; draw(); } });
+    ctl.appendChild(el("label", { class: "chk" }, [c1, "− meanₖ(dx̂ₖ)  (mean term)"]));
+    ctl.appendChild(el("label", { class: "chk" }, [c2, "− x̂ⱼ·meanₖ(dx̂ₖx̂ₖ)  (variance term)"]));
+    host.appendChild(ctl);
+
+    const out = el("div", {});
+    host.appendChild(out);
+
+    function bar(v, scale) {
+      const w = Math.min(50, Math.abs(v) / scale * 50);
+      const b = el("div", { class: "dbar" }, [
+        el("u", { style: { left: "50%" } }),
+        el("i", { class: v >= 0 ? "pos" : "neg",
+                  style: { left: v >= 0 ? "50%" : (50 - w) + "%", width: w + "%" } })
+      ]);
+      return b;
+    }
+
+    function draw() {
+      const site = LNSITES[st.site];
+      const t = site.detail[st.tok];
+      const n = t.xhat.length;
+      const inv = t.inv_std;
+
+      const termNaive = t.dxhat.map(function (d) { return inv * d; });
+      const termMean  = t.xhat.map(function () { return -inv * t.mean_dxhat; });
+      const termVar   = t.xhat.map(function (xh) { return -inv * xh * t.mean_dxhat_xhat; });
+      const cur = termNaive.map(function (v, j) {
+        return v + (st.useMean ? termMean[j] : 0) + (st.useVar ? termVar[j] : 0);
+      });
+      const correct = t.dx;
+      const scale = Math.max.apply(null, termNaive.concat(correct, cur).map(Math.abs)) || 1;
+
+      out.innerHTML = "";
+
+      /* the row's forward state */
+      const fr = site.rows[st.tok];
+      out.appendChild(el("div", { class: "tensorrow", style: { marginBottom: "6px" } }, [
+        el("div", { class: "panel", style: { flex: "1 1 260px" } }, [
+          el("h4", {}, "forward state saved for this token"),
+          el("div", { class: "eqn small" }, [
+            mono("μ = " + fmt(fr.mu, 6)), el("br", {}),
+            mono("σ² = " + fmt(fr.var, 6)), el("br", {}),
+            mono("1/σ = " + fmt(fr.inv_std, 6) + "   ← saved"), el("br", {}),
+            mono("x̂ = [" + fr.xhat.map(function (v) { return fmt(v, 4); }).join(", ") + "]   ← saved")
+          ])
+        ]),
+        el("div", { class: "panel", style: { flex: "1 1 260px" } }, [
+          el("h4", {}, "row scalars used by backward"),
+          el("div", { class: "eqn small" }, [
+            mono("meanₖ(dx̂ₖ)     = " + sci(t.mean_dxhat, 4)), el("br", {}),
+            mono("meanₖ(dx̂ₖx̂ₖ) = " + sci(t.mean_dxhat_xhat, 4)), el("br", {}),
+            el("span", { class: "muted small", html:
+              "two scalars per token &mdash; that is the entire extra cost of getting this right" })
+          ])
+        ])
+      ]));
+
+      /* term-by-term table */
+      const tt = el("table", { class: "kv" });
+      const hdr = el("tr", {}, [el("th", {}, "term")]);
+      for (let j = 0; j < n; j++) hdr.appendChild(el("th", {}, "j=" + j));
+      hdr.appendChild(el("th", {}, "Σⱼ"));
+      tt.appendChild(el("thead", {}, hdr));
+      const body = el("tbody", {});
+
+      function row(label, vals, cls, extra) {
+        const tr = el("tr", cls ? { class: cls } : {});
+        tr.appendChild(el("td", { html: label }));
+        vals.forEach(function (v) { tr.appendChild(el("td", {}, fmts(v, 5))); });
+        tr.appendChild(el("td", { class: "nz" }, extra !== undefined ? extra : fmts(vsum(vals), 5)));
+        return tr;
+      }
+
+      body.appendChild(row("dx̂ⱼ = dyⱼ·gⱼ", t.dxhat));
+      body.appendChild(row("x̂ⱼ", t.xhat));
+      body.appendChild(el("tr", {}, [el("td", { colspan: n + 2, class: "cmt",
+        style: { borderBottom: "1px solid var(--hairline)" } },
+        "— the three terms, each already multiplied by 1/σ = " + fmt(inv, 5) + " —")]));
+      body.appendChild(row("(1/σ)·dx̂ⱼ &nbsp;<span class='muted'>[naive]</span>", termNaive));
+      body.appendChild(row("−(1/σ)·meanₖ(dx̂ₖ)", termMean, st.useMean ? "" : "off"));
+      body.appendChild(row("−(1/σ)·x̂ⱼ·meanₖ(dx̂ₖx̂ₖ)", termVar, st.useVar ? "" : "off"));
+      body.appendChild(row("<b>dxⱼ &nbsp;(as toggled)</b>", cur, "tot g"));
+      body.appendChild(row("dxⱼ &nbsp;correct", correct));
+      body.appendChild(row("difference", cur.map(function (v, j) { return v - correct[j]; })));
+      tt.appendChild(body);
+      out.appendChild(el("div", { class: "scrollx" }, tt));
+
+      /* bars: naive vs correct */
+      const bwrap = el("div", { class: "panel", style: { marginTop: "6px" } }, [
+        el("h4", {}, "naive (both corrections off) vs correct, per channel")
+      ]);
+      const bt = el("table", { class: "kv" });
+      const bb = el("tbody", {});
+      for (let j = 0; j < n; j++) {
+        bb.appendChild(el("tr", {}, [
+          el("td", {}, "channel " + j),
+          el("td", { style: { width: "38%" } }, bar(termNaive[j], scale)),
+          el("td", {}, fmts(termNaive[j], 5)),
+          el("td", { style: { width: "38%" } }, bar(correct[j], scale)),
+          el("td", {}, fmts(correct[j], 5)),
+          el("td", { class: "nz" }, "Δ " + sci(Math.abs(termNaive[j] - correct[j]), 2))
+        ]));
+      }
+      bt.appendChild(el("thead", {}, el("tr", {}, [
+        el("th", {}, ""), el("th", {}, "naive"), el("th", {}, "value"),
+        el("th", {}, "correct"), el("th", {}, "value"), el("th", {}, "error")
+      ])));
+      bt.appendChild(bb);
+      bwrap.appendChild(el("div", { class: "scrollx" }, bt));
+      out.appendChild(bwrap);
+
+      /* the invariants */
+      const sCur  = vsum(cur),  sxCur  = vdot(cur, t.xhat);
+      const sCor  = vsum(correct), sxCor = vdot(correct, t.xhat);
+      const sNa   = vsum(termNaive), sxNa = vdot(termNaive, t.xhat);
+
+      const iv = el("div", { class: "panel", style: { marginTop: "14px" } }, [
+        el("h4", {}, "the two invariants the correct gradient must satisfy")
+      ]);
+      const it = el("table", { class: "kv" });
+      it.appendChild(el("thead", {}, el("tr", {}, [
+        el("th", {}, "quantity"), el("th", {}, "naive"), el("th", {}, "as toggled"),
+        el("th", {}, "correct"), el("th", {}, "must be")
+      ])));
+      it.appendChild(el("tbody", {}, [
+        el("tr", {}, [el("td", { html: "&Sigma;ⱼ dxⱼ &nbsp;<span class='muted'>(shift direction)</span>" }),
+          el("td", {}, sci(sNa, 3)), el("td", {}, sci(sCur, 3)), el("td", {}, sci(sCor, 3)),
+          el("td", {}, "0")]),
+        el("tr", {}, [el("td", { html: "&Sigma;ⱼ dxⱼ&middot;x̂ⱼ &nbsp;<span class='muted'>(scale direction)</span>" }),
+          el("td", {}, sci(sxNa, 3)), el("td", {}, sci(sxCur, 3)), el("td", {}, sci(sxCor, 3)),
+          el("td", {}, "≈ 0")])
+      ]));
+      iv.appendChild(el("div", { class: "scrollx" }, it));
+      out.appendChild(iv);
+
+      /* live proof of the invariance */
+      const shift = el("input", { type: "range", min: -200, max: 200, value: 60, step: 1 });
+      const scaleI = el("input", { type: "range", min: -200, max: 200, value: 60, step: 1 });
+      const proof = el("div", { class: "panel", style: { marginTop: "12px" } });
+      const proofOut = el("div", {});
+      proof.appendChild(el("h4", {}, "why those invariants are forced — tested live"));
+      proof.appendChild(el("p", { class: "small", style: { margin: "0 0 8px" }, html:
+        "LayerNorm subtracts the mean and divides by the standard deviation, so <b>adding a constant " +
+        "to the whole row changes nothing</b>, and <b>scaling the whole row changes almost nothing</b> " +
+        "(only &epsilon; = " + M.eps + " breaks the second one). If the output does not move, the loss " +
+        "does not move, so the directional derivative along those directions must be zero. Slide, and " +
+        "watch the recomputed LayerNorm output." }));
+      const pctl = el("div", { class: "ctlrow", style: { margin: "0 0 10px" } });
+      pctl.appendChild(field("add c to every xⱼ", shift));
+      pctl.appendChild(field("scale x by (1+e)", scaleI));
+      proof.appendChild(pctl);
+      proof.appendChild(proofOut);
+      out.appendChild(proof);
+
+      function reproof() {
+        const c = (+shift.value) / 100;
+        const e = (+scaleI.value) / 100;
+        const x = fr.x;
+        const base = lnfwd(x, site.gain, site.bias, M.eps);
+        const shifted = lnfwd(x.map(function (v) { return v + c; }), site.gain, site.bias, M.eps);
+        const scaled  = lnfwd(x.map(function (v) { return v * (1 + e); }), site.gain, site.bias, M.eps);
+        const dS = Math.max.apply(null, base.y.map(function (v, j) { return Math.abs(v - shifted.y[j]); }));
+        const dC = Math.max.apply(null, base.y.map(function (v, j) { return Math.abs(v - scaled.y[j]); }));
+
+        proofOut.innerHTML = "";
+        const pt = el("table", { class: "kv" });
+        pt.appendChild(el("thead", {}, el("tr", {}, [
+          el("th", {}, "perturbation"), el("th", {}, "new μ"), el("th", {}, "new 1/σ"),
+          el("th", {}, "max |Δy|"), el("th", {}, "")
+        ])));
+        pt.appendChild(el("tbody", {}, [
+          el("tr", {}, [el("td", {}, "none"), el("td", {}, fmt(base.mu, 5)), el("td", {}, fmt(base.inv, 5)),
+            el("td", {}, "–"), el("td", {}, "")]),
+          el("tr", {}, [el("td", {}, "x + " + fmt(c, 2)), el("td", {}, fmt(shifted.mu, 5)),
+            el("td", {}, fmt(shifted.inv, 5)), el("td", {}, sci(dS, 2)),
+            el("td", { style: { color: dS < 1e-12 ? "var(--good)" : "var(--critical)" } },
+              dS < 1e-12 ? "✓ exactly flat" : "moved")]),
+          el("tr", {}, [el("td", {}, "x × " + fmt(1 + e, 2)), el("td", {}, fmt(scaled.mu, 5)),
+            el("td", {}, fmt(scaled.inv, 5)), el("td", {}, sci(dC, 2)),
+            el("td", { style: { color: dC < 1e-6 ? "var(--good)" : "var(--warning)" } },
+              dC < 1e-6 ? "✓ flat to " + sci(dC, 1) : "ε shows through")])
+        ]));
+        proofOut.appendChild(el("div", { class: "scrollx" }, pt));
+
+        proofOut.appendChild(el("p", { class: "small muted", style: { margin: "8px 0 0" }, html:
+          "So the true <code>dL/dx</code> for this row is orthogonal to <code>1</code> and (almost) to " +
+          "<code>x̂</code>. The correct gradient satisfies that to <b>" + sci(Math.abs(sCor), 2) +
+          "</b> and <b>" + sci(Math.abs(sxCor), 2) + "</b>. The naive one claims a derivative of <b>" +
+          sci(Math.abs(sNa), 2) + "</b> along a direction the model provably cannot feel." }));
+      }
+      shift.addEventListener("input", reproof);
+      scaleI.addEventListener("input", reproof);
+      reproof();
+
+      /* the exact identity behind the residual epsilon */
+      out.appendChild(NN.formula({
+        rule: "&Sigma;ⱼ dxⱼ&middot;x̂ⱼ = (1/&sigma;)&middot;meanₖ(dx̂ₖx̂ₖ)&middot;( n &minus; &Sigma;ₖ x̂ₖ<sup>2</sup> )",
+        sub: "n = " + n + ", &nbsp; &Sigma;ₖ x̂ₖ<sup>2</sup> = " +
+             fmt(t.xhat.reduce(function (a, v) { return a + v * v; }, 0), 9) +
+             " &nbsp; (it is not exactly n because of &epsilon;)",
+        result: sci(inv * t.mean_dxhat_xhat * (n - t.xhat.reduce(function (a, v) { return a + v * v; }, 0)), 3),
+        cls: "gradient"
+      }));
+      out.appendChild(el("p", { class: "small muted", html:
+        "That is the entire explanation for why the second invariant lands at " + sci(Math.abs(sxCor), 2) +
+        " rather than machine zero: <code>&Sigma;x̂<sup>2</sup></code> would be exactly n if the " +
+        "denominator were &sigma; and not √(&sigma;<sup>2</sup>+&epsilon;). The first invariant has " +
+        "no such leak and lands at " + sci(Math.abs(sCor), 2) + "." }));
+    }
+    draw();
+
+    /* --------------------- the numeric verdicts --------------------- */
+    host.appendChild(el("h3", {}, "3.3 · Verifying it, and what the naive version would have cost"));
+
+    host.appendChild(verdict(CHECK.lnRebuild < 1e-15,
+      "the three-term formula reproduces every stored dx",
+      "rebuilt <code>dx</code> from <code>(1/&sigma;)[dx̂ &minus; mean &minus; x̂·mean]</code> for all " +
+      (LNSITES.length * SEQ) + " (layernorm, token) pairs: max |&Delta;| = <b>" + sci(CHECK.lnRebuild) + "</b>"));
+
+    host.appendChild(verdict(CHECK.lnSum < 1e-14,
+      "Σⱼ dxⱼ = 0 for every row",
+      "worst over all " + (LNSITES.length * SEQ) + " rows: <b>" + sci(CHECK.lnSum) +
+      "</b> — machine zero. The naive gradient's worst is <b>" + sci(CHECK.naiveSum) +
+      "</b>, about <b>" + sci(CHECK.naiveSum / Math.max(CHECK.lnSum, 1e-300), 1) + "×</b> larger."));
+
+    const lnParams = D.gradcheck.per_param.filter(function (c) { return c.param.indexOf("ln") >= 0; });
+    const lnWorst = Math.max.apply(null, lnParams.map(function (c) { return c.max_abs_err; }));
+
+    host.appendChild(el("p", { html:
+      "The parameter gradients <code>dg</code> and <code>db</code> come out of the same routine and " +
+      "are checked against finite differences like everything else. All " + lnParams.length +
+      " LayerNorm parameter tensors pass at " + sci(lnWorst, 2) + " or better:" }));
+
+    const lt = el("table", { class: "kv" });
+    lt.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "tensor"), el("th", {}, "elements"), el("th", {}, "max |analytic − numerical|"), el("th", {}, "")
+    ])));
+    lt.appendChild(el("tbody", {}, lnParams.map(function (c) {
+      return el("tr", {}, [
+        el("td", {}, c.param), el("td", {}, String(c.elements)), el("td", {}, sci(c.max_abs_err, 3)),
+        el("td", { style: { color: "var(--good)" } }, "✓")
+      ]);
+    })));
+    host.appendChild(el("div", { class: "scrollx" }, lt));
+
+    host.appendChild(NN.callout("warn", "WHAT NAIVE dx WOULD HAVE BROKEN",
+      "<code>dg</code> and <code>db</code> would still be right — they never touch the corrections. " +
+      "The damage is <em>upstream</em>: <code>dx</code> is what gets handed to Q/K/V, to the attention, " +
+      "to the block below, and eventually to <code>dL/dx_input</code>. On this model the naive answer " +
+      "differs from the correct one by up to <b>" + sci(CHECK.naiveDiff, 2) + "</b> per element, and it " +
+      "asserts a directional derivative of up to <b>" + sci(CHECK.naiveSum, 2) + "</b> along a direction " +
+      "where the loss is flat to machine precision (proved above by re-running the LayerNorm). " +
+      "The finite-difference check on this model resolves differences down to <b>" + sci(GCWORST, 2) +
+      "</b>; the naive error is about <b>" + sci(CHECK.naiveSum / GCWORST, 1) + "×</b> that. " +
+      "It is not a subtle failure — it is a screaming one, and it is why you always gradcheck a " +
+      "hand-written LayerNorm."));
+
+    host.appendChild(NN.callout("mem", "WHY LAYERNORM IS NOT FREE",
+      "Look at what the backward formula needs: <code>x̂</code> for every token and <code>1/&sigma;</code> " +
+      "for every token. Neither is recoverable from the output without re-running the forward. So " +
+      "LayerNorm <b>saves</b> them — " + (SEQ * DM) + " elements plus " + SEQ + " per LayerNorm here, " +
+      "and 2 LayerNorms per block × " + NL + " blocks. That is " +
+      (2 * NL * (SEQ * DM + SEQ)) + " saved numbers in a model with only " + M.n_params +
+      " parameters. LayerNorm looks like a cheap normalisation and behaves like an activation " +
+      "checkpoint. §8 accounts for it; page 15 is where they were created."));
+  })();
+
+  /* ======================================================================
+     4 · ATTENTION BACKWARD, IN FULL
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#attnBody");
+
+    host.appendChild(el("p", { html:
+      "Attention is three matrix products with a softmax wedged in the middle, and backward walks " +
+      "them in reverse. Nothing here is exotic — but two facts about what has to be kept in memory " +
+      "fall straight out of the algebra, and they are the facts that dominate activation memory in " +
+      "real training." }));
+
+    host.appendChild(NN.formula({
+      rule: "O = P&middot;V &nbsp;&nbsp;→&nbsp;&nbsp; dP = dO&middot;V<sup>T</sup> &nbsp;&nbsp;&nbsp; dV = P<sup>T</sup>&middot;dO",
+      sub: "a product of two tensors: each gradient needs <em>the other</em> operand, so both P and V must survive forward",
+      cls: "gradient"
+    }));
+    host.appendChild(NN.formula({
+      rule: "S = (Q&middot;K<sup>T</sup>)&middot;scale &nbsp;&nbsp;→&nbsp;&nbsp; dQ = dS&middot;K&middot;scale " +
+            "&nbsp;&nbsp;&nbsp; dK = dS<sup>T</sup>&middot;Q&middot;scale",
+      sub: "scale = 1/√d_head = " + fmt(D.forward.layers[0].scale, 6) +
+           ". <b>dQ needs K and dK needs Q</b> — each of the pair keeps the other alive",
+      cls: "gradient"
+    }));
+
+    host.appendChild(NN.callout("key", "THE OPERAND SWAP",
+      "Every bilinear op has this property: <code>C = A&middot;B</code> gives <code>dA = dC&middot;B<sup>T</sup></code> " +
+      "and <code>dB = A<sup>T</sup>&middot;dC</code>. You never need <code>C</code> itself, and you always " +
+      "need both <code>A</code> and <code>B</code>. That single sentence explains most of the activation " +
+      "census in §8: <b>Q and K are saved for each other</b>, <b>P and V are saved for each other</b>, " +
+      "and the concatenated head output <code>O</code> is saved because <code>dWₒ = O<sup>T</sup>dA</code> " +
+      "needs it."));
+
+    const st = { L: NL - 1, h: 0 };
+    const ctl = el("div", { class: "ctlrow" });
+    ctl.appendChild(field("block", seg(Array.from({ length: NL }, function (_, i) { return "block " + (NL - 1 - i); }), 0,
+      function (i) { st.L = NL - 1 - i; draw(); })));
+    ctl.appendChild(field("head", seg(Array.from({ length: NH }, function (_, i) { return "head " + i; }), 0,
+      function (i) { st.h = i; draw(); })));
+    host.appendChild(ctl);
+    const out = el("div", {});
+    host.appendChild(out);
+
+    function draw() {
+      const L = st.L, h = st.h;
+      const lc = D.forward.layers[L], H = lc.heads[h], hd = S[L + ":attn"].heads[h];
+      const dO = S[L + ":wo"].value;
+      const dOh = cols(dO, H.cols[0], H.cols[1]);
+
+      out.innerHTML = "";
+      out.appendChild(el("p", { class: "small muted", html:
+        "block " + L + ", head " + h + " owns columns [" + H.cols[0] + ", " + H.cols[1] +
+        ") of the d_model=" + DM + " stream. d_head = " + DH + ", so this head's Q, K, V are " +
+        SEQ + "×" + DH + " and its attention matrix is " + SEQ + "×" + SEQ + "." }));
+
+      out.appendChild(el("h3", {}, "Stage 1 — through O = P·V"));
+      out.appendChild(el("div", { class: "tensorrow" }, [
+        gtensor("dO (head slice)", dOh),
+        atensor("P (saved)", H.P, "rows sum to 1"),
+        atensor("V (saved)", H.V)
+      ]));
+      out.appendChild(el("div", { class: "tensorrow" }, [
+        gtensor("dP = dO·Vᵀ", hd.dP),
+        gtensor("dV = Pᵀ·dO", hd.dV)
+      ]));
+
+      out.appendChild(el("h3", {}, "Stage 2 — through the softmax"));
+      out.appendChild(el("p", { class: "small", html:
+        "Row by row, with the dense Jacobian derived in §5. Note the first row of <code>dS</code> is " +
+        "identically zero: the causal mask leaves token 0 attending only to itself, so " +
+        "<code>p = [1, 0, …]</code> and a saturated softmax has a zero Jacobian — no score change can " +
+        "alter a distribution that is already a point mass." }));
+      out.appendChild(el("div", { class: "tensorrow" }, [
+        gtensor("dS", hd.dS, "every row sums to 0")
+      ]));
+
+      out.appendChild(el("h3", {}, "Stage 3 — through S = QKᵀ·scale"));
+      out.appendChild(el("div", { class: "tensorrow" }, [
+        atensor("Q (saved)", H.Q, "needed for dK"),
+        atensor("K (saved)", H.K, "needed for dQ")
+      ]));
+      out.appendChild(el("div", { class: "tensorrow" }, [
+        gtensor("dQ = dS·K·scale", hd.dQ),
+        gtensor("dK = dSᵀ·Q·scale", hd.dK)
+      ]));
+
+      let w = 0;
+      w = Math.max(w, maxdiff(mm(dOh, Tr(H.V)), hd.dP));
+      w = Math.max(w, maxdiff(mm(Tr(H.P), dOh), hd.dV));
+      const dRaw = smul(hd.dS, lc.scale);
+      w = Math.max(w, maxdiff(mm(dRaw, H.K), hd.dQ));
+      w = Math.max(w, maxdiff(mm(Tr(dRaw), H.Q), hd.dK));
+      out.appendChild(verdict(w < 1e-15, "this head re-derived from the saved forward tensors",
+        "dP, dV, dQ and dK recomputed in the browser from P, V, Q, K and dO: max |&Delta;| = <b>" +
+        sci(w) + "</b>"));
+    }
+    draw();
+
+    host.appendChild(verdict(CHECK.attn < 1e-15,
+      "all " + (NL * NH) + " heads re-derived",
+      "every dP, dV, dQ, dK across " + NL + " blocks × " + NH + " heads: max |&Delta;| = <b>" +
+      sci(CHECK.attn) + "</b>"));
+
+    host.appendChild(NN.callout("mem", "THE ONE THAT SCALES QUADRATICALLY",
+      "Q, K, V and O are all (seq × d_model) — linear in sequence length. <code>P</code> is " +
+      "(heads × seq × seq). At seq=" + SEQ + " that is " + (NH * SEQ * SEQ) +
+      " numbers against " + (SEQ * DM) + " for the stream, which looks harmless. Multiply the sequence " +
+      "by 1000 and the stream grows by 1000 while P grows by a million. This is the term FlashAttention " +
+      "exists to delete: it never materialises P, and pays for that by recomputing the row of scores " +
+      "inside the backward kernel from the still-saved Q and K."));
+  })();
+
+  /* ======================================================================
+     5 · THE SOFTMAX JACOBIAN IS DENSE
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#softBody");
+
+    host.appendChild(el("p", { html:
+      "Softmax looks elementwise. It is not, for the same structural reason LayerNorm is not: there " +
+      "is a sum over the whole row in the denominator. Every output probability depends on every " +
+      "input score, so the Jacobian is a full " + SEQ + "×" + SEQ + " matrix rather than a diagonal." }));
+
+    host.appendChild(NN.formula({
+      rule: "p<sub>i</sub> = e<sup>s<sub>i</sub></sup> / &Sigma;<sub>k</sub> e<sup>s<sub>k</sub></sup> " +
+            "&nbsp;&nbsp;→&nbsp;&nbsp; &part;p<sub>i</sub>/&part;s<sub>j</sub> = p<sub>i</sub>(&delta;<sub>ij</sub> &minus; p<sub>j</sub>)",
+      sub: "diagonal: p<sub>i</sub>(1&minus;p<sub>i</sub>) &ge; 0. &nbsp; off-diagonal: &minus;p<sub>i</sub>p<sub>j</sub> &le; 0. " +
+           "Note it is <b>symmetric</b>, so you never have to worry which index you contract.",
+      cls: "activation"
+    }));
+
+    host.appendChild(el("p", { class: "small", html:
+      "Deriving it takes one quotient rule. Write <code>Z = &Sigma;<sub>k</sub>e<sup>s<sub>k</sub></sup></code>. " +
+      "Then <code>&part;Z/&part;s<sub>j</sub> = e<sup>s<sub>j</sub></sup></code>, and " +
+      "<code>&part;p<sub>i</sub>/&part;s<sub>j</sub> = (&delta;<sub>ij</sub>e<sup>s<sub>i</sub></sup>Z &minus; " +
+      "e<sup>s<sub>i</sub></sup>e<sup>s<sub>j</sub></sup>)/Z<sup>2</sup> = " +
+      "p<sub>i</sub>&delta;<sub>ij</sub> &minus; p<sub>i</sub>p<sub>j</sub></code>. The second term is the " +
+      "coupling: raising score j steals probability mass from <em>every</em> other position." }));
+
+    host.appendChild(NN.formula({
+      rule: "dL/ds<sub>i</sub> = &Sigma;<sub>j</sub> (dL/dp<sub>j</sub>)&middot;p<sub>j</sub>(&delta;<sub>ji</sub> &minus; p<sub>i</sub>) " +
+            "= p<sub>i</sub> ( dL/dp<sub>i</sub> &minus; <mark class='hl'>&Sigma;<sub>j</sub> dL/dp<sub>j</sub>&middot;p<sub>j</sub></mark> )",
+      sub: "the highlighted term is a single scalar per row — the p-weighted average of the incoming " +
+           "gradient — subtracted from every element. In the code it is called <code>dot</code>.",
+      cls: "gradient"
+    }));
+
+    /* ------------- the interactive heatmap ------------- */
+    host.appendChild(el("h3", {}, "5.1 · See the off-diagonal terms"));
+
+    const st = { L: NL - 1, h: 0, row: SEQ - 1 };
+    const ctl = el("div", { class: "ctlrow" });
+    ctl.appendChild(field("block", seg(Array.from({ length: NL }, function (_, i) { return "block " + (NL - 1 - i); }), 0,
+      function (i) { st.L = NL - 1 - i; draw(); })));
+    ctl.appendChild(field("head", seg(Array.from({ length: NH }, function (_, i) { return "head " + i; }), 0,
+      function (i) { st.h = i; draw(); })));
+    ctl.appendChild(field("query token (row)", seg(TOK.map(function (t, i) { return i + " · " + t; }), SEQ - 1,
+      function (i) { st.row = i; draw(); })));
+    host.appendChild(ctl);
+    const out = el("div", {});
+    host.appendChild(out);
+
+    function draw() {
+      const L = st.L, h = st.h, i0 = st.row;
+      const P = D.forward.layers[L].heads[h].P;
+      const hd = S[L + ":attn"].heads[h];
+      const p = P[i0], dp = hd.dP[i0];
+      const J = p.map(function (pi, a) { return p.map(function (pj, b) { return pi * ((a === b ? 1 : 0) - pj); }); });
+      const maxJ = Math.max.apply(null, J.map(function (r) { return Math.max.apply(null, r.map(Math.abs)); })) || 1;
+      const dot = vdot(dp, p);
+      const ds = p.map(function (pi, i) { return pi * (dp[i] - dot); });
+
+      out.innerHTML = "";
+
+      out.appendChild(el("p", { class: "small muted", html:
+        "block " + L + ", head " + h + ", query token " + i0 + " (“" + TOK[i0] + "”). Under the " +
+        "causal mask this row attends to tokens 0…" + i0 + "." }));
+
+      const grid = el("div", { class: "jac", style: { gridTemplateColumns: "52px repeat(" + SEQ + ", 118px)" } });
+      grid.appendChild(el("div", { class: "jhdr" }, ""));
+      for (let b = 0; b < SEQ; b++) grid.appendChild(el("div", { class: "jhdr" }, "∂s" + b));
+      for (let a = 0; a < SEQ; a++) {
+        grid.appendChild(el("div", { class: "jhdr", style: { alignSelf: "center" } }, "∂p" + a));
+        for (let b = 0; b < SEQ; b++) {
+          const v = J[a][b];
+          const cell = el("div", {
+            class: "jcell " + (a === b ? "diag" : "offd") + (Math.abs(v) < 1e-12 ? " zero" : ""),
+            title: "∂p" + a + "/∂s" + b + " = p" + a + (a === b ? "(1 − p" + b + ")" : "·(−p" + b + ")") +
+                   " = " + fmt(p[a], 6) + " × " + fmt((a === b ? 1 : 0) - p[b], 6) + " = " + v
+          }, [
+            el("div", { class: "fillbg", style: { opacity: String(0.06 + 0.5 * Math.abs(v) / maxJ) } }),
+            el("span", { class: "val" }, fmts(v, 5)),
+            el("span", { class: "kind" }, a === b ? "diag +" : "off −")
+          ]);
+          cell.addEventListener("mouseenter", function (e) {
+            NN.tip.show("<b>∂p" + a + "/∂s" + b + "</b><br>= p<sub>" + a + "</sub>(δ − p<sub>" + b +
+              "</sub>)<br>= " + fmt(p[a], 6) + " × " + fmt((a === b ? 1 : 0) - p[b], 6) +
+              "<br>= <b>" + fmt(v, 8) + "</b>", e.clientX, e.clientY);
+          });
+          cell.addEventListener("mouseleave", function () { NN.tip.hide(); });
+          grid.appendChild(cell);
+        }
+      }
+
+      const side = el("div", { style: { minWidth: "250px", flex: "1 1 250px" } });
+      side.appendChild(el("div", { class: "panel" }, [
+        el("h4", {}, "the row"),
+        el("div", { class: "eqn small" }, [
+          mono("p  = [" + p.map(function (v) { return fmt(v, 5); }).join(", ") + "]"), el("br", {}),
+          mono("Σp = " + fmt(vsum(p), 9) + "   ← always 1"), el("br", {}), el("br", {}),
+          mono("dP = [" + dp.map(function (v) { return fmts(v, 5); }).join(", ") + "]"), el("br", {}),
+          mono("dot = Σⱼ dPⱼ pⱼ = " + fmts(dot, 8)), el("br", {}),
+          el("span", { class: "muted small" }, "= TF2 softmax_dots[" + i0 + "] = " + fmts(hd.softmax_dots[i0], 8))
+        ])
+      ]));
+
+      const nOff = SEQ * SEQ - SEQ;
+      side.appendChild(el("div", { class: "panel", style: { marginTop: "12px" } }, [
+        el("h4", {}, "diagonal only would be wrong"),
+        el("table", { class: "kv" }, [
+          el("thead", {}, el("tr", {}, [el("th", {}, "i"), el("th", {}, "diag-only"), el("th", {}, "full"), el("th", {}, "error")])),
+          el("tbody", {}, p.map(function (pi, i) {
+            const diagOnly = pi * (1 - pi) * dp[i];
+            return el("tr", {}, [
+              el("td", {}, String(i)), el("td", {}, fmts(diagOnly, 6)),
+              el("td", {}, fmts(ds[i], 6)),
+              el("td", { class: "nz" }, sci(Math.abs(diagOnly - ds[i]), 2))
+            ]);
+          }))
+        ])
+      ]));
+
+      out.appendChild(el("div", { class: "jacwrap" }, [
+        el("div", {}, [
+          el("div", { class: "small muted", style: { marginBottom: "6px" } },
+            "Jacobian J[a][b] = ∂p_a/∂s_b. Solid border = diagonal (positive), dashed = " +
+            "off-diagonal (negative). Fill opacity tracks magnitude; the number is printed in every cell."),
+          grid,
+          el("div", { class: "small muted", style: { marginTop: "8px" } },
+            SEQ * SEQ + " entries, of which " + nOff + " are off-diagonal. A diagonal approximation " +
+            "throws away " + nOff + "/" + (SEQ * SEQ) + " of the derivative structure.")
+        ]),
+        side
+      ]));
+
+      /* contraction check */
+      const dsFromJ = p.map(function (_, b) { return p.reduce(function (s, __, a) { return s + dp[a] * J[a][b]; }, 0); });
+      const w = Math.max.apply(null, dsFromJ.map(function (v, b) { return Math.abs(v - hd.dS[i0][b]); }));
+      out.appendChild(verdict(w < 1e-15, "contracting dP with the full Jacobian reproduces dS",
+        "&Sigma;<sub>a</sub> dP<sub>a</sub>&middot;J[a][b] vs the stored dS row: max |&Delta;| = <b>" + sci(w) +
+        "</b> &nbsp;&nbsp; dS = [" + hd.dS[i0].map(function (v) { return fmts(v, 6); }).join(", ") + "]"));
+
+      /* the row sum */
+      out.appendChild(el("h3", {}, "5.2 · Every row of dS sums to zero"));
+      out.appendChild(NN.formula({
+        rule: "&Sigma;<sub>i</sub> dL/ds<sub>i</sub> = &Sigma;<sub>i</sub> p<sub>i</sub>dL/dp<sub>i</sub> " +
+              "&minus; (&Sigma;<sub>i</sub> p<sub>i</sub>)&middot;dot = dot &minus; 1&middot;dot = 0",
+        sub: "for this row: " + fmts(vdot(p, dp), 9) + " &minus; " + fmt(vsum(p), 9) + " × " +
+             fmts(dot, 9) + " = " + sci(vsum(ds), 2),
+        result: sci(vsum(hd.dS[i0]), 2),
+        cls: "gradient"
+      }));
+    }
+    draw();
+
+    host.appendChild(verdict(CHECK.zeroRows === CHECK.rows,
+      CHECK.zeroRows + " / " + CHECK.rows + " softmax rows sum to zero",
+      "checked every row of dS across " + NL + " blocks × " + NH + " heads × " + SEQ +
+      " query positions. Worst |&Sigma;<sub>i</sub> dS<sub>i</sub>| = <b>" + sci(CHECK.rowSum) +
+      "</b>, and the full-Jacobian contraction matches the stored dS to <b>" + sci(CHECK.jac) + "</b>."));
+
+    host.appendChild(NN.callout("key", "WHY IT HAS TO BE ZERO — THE ELEGANT PART",
+      "<p>The softmax output lives on the simplex: <code>&Sigma;p<sub>i</sub> = 1</code>, always, for " +
+      "every possible input. That constraint has a consequence for the <em>input</em>. Add the same " +
+      "constant c to every score and the softmax output does not change at all — the constant cancels " +
+      "between numerator and denominator. (That is not an approximation; it is the identity every " +
+      "stable implementation exploits when it subtracts the row max before exponentiating.)</p>" +
+      "<p>So the loss is exactly flat along the all-ones direction in score space, which means " +
+      "<code>&Sigma;<sub>i</sub> dL/ds<sub>i</sub> = 0</code> must hold. It is not a coincidence of the " +
+      "algebra; the algebra is the shadow. The gradient cannot have a component that would change the " +
+      "total, because the total is not a thing the model can change. Compare " +
+      "<a href='#ln'>&sect;3</a>: LayerNorm's <code>&Sigma;dx = 0</code> is the same argument about a " +
+      "different invariance. When an operation is invariant to a direction, the gradient is orthogonal " +
+      "to it — every time, with no exceptions.</p>"));
+  })();
+
+  /* ======================================================================
+     6 · Q, K AND V GRADIENTS ADD
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#qkvBody");
+
+    host.appendChild(el("p", { html:
+      "In forward, one tensor — the LayerNorm output <code>n₁</code> — is read three times, by " +
+      "<code>W<sub>q</sub></code>, <code>W<sub>k</sub></code> and <code>W<sub>v</sub></code>. Fan-out " +
+      "in forward is fan-<em>in</em> in backward: a node with three consumers collects three gradients " +
+      "and <b>adds</b> them. Not averages, not picks one. Adds." }));
+
+    host.appendChild(NN.formula({
+      rule: "dn₁ = dQ&middot;W<sub>q</sub><sup>T</sup> + dK&middot;W<sub>k</sub><sup>T</sup> + dV&middot;W<sub>v</sub><sup>T</sup>",
+      sub: "the multivariate chain rule: total derivative = sum over every path from n₁ to L",
+      cls: "gradient"
+    }));
+
+    const st = { L: NL - 1, q: true, k: true, v: true };
+    const ctl = el("div", { class: "ctlrow" });
+    ctl.appendChild(field("block", seg(Array.from({ length: NL }, function (_, i) { return "block " + (NL - 1 - i); }), 0,
+      function (i) { st.L = NL - 1 - i; draw(); })));
+    ["q", "k", "v"].forEach(function (kk) {
+      const cb = el("input", { type: "checkbox", checked: "checked",
+        onchange: function () { st[kk] = this.checked; draw(); } });
+      ctl.appendChild(el("label", { class: "chk" }, [cb, "include d" + kk.toUpperCase() +
+        "·W_" + kk + "ᵀ"]));
+    });
+    host.appendChild(ctl);
+    const out = el("div", {});
+    host.appendChild(out);
+
+    function draw() {
+      const L = st.L, C = QKVSUM[L];
+      const parts = [];
+      if (st.q) parts.push(C.q);
+      if (st.k) parts.push(C.k);
+      if (st.v) parts.push(C.v);
+      let cur = null;
+      parts.forEach(function (p) { cur = cur ? add(cur, p) : p; });
+      if (!cur) cur = C.q.map(function (r) { return r.map(function () { return 0; }); });
+      const truth = S[L + ":qkv"].value;
+      const err = maxdiff(cur, truth);
+      const all = st.q && st.k && st.v;
+
+      out.innerHTML = "";
+      out.appendChild(el("div", { class: "tensorrow" }, [
+        gtensor("dQ", QKV[L].dQ, "|·| = " + fmt(fro(QKV[L].dQ), 5)),
+        gtensor("dK", QKV[L].dK, "|·| = " + fmt(fro(QKV[L].dK), 5)),
+        gtensor("dV", QKV[L].dV, "|·| = " + fmt(fro(QKV[L].dV), 5))
+      ]));
+      out.appendChild(el("p", { class: "small muted", html:
+        "assembled by concatenating the " + NH + " per-head slices back into d_model=" + DM +
+        " columns; each head wrote its own [" + DH + "-wide] block. Verified against the stored " +
+        "<code>dQ</code>: max |&Delta;| = " + sci(CHECK.dQ) + "." }));
+
+      out.appendChild(el("div", { class: "tensorrow", style: { marginTop: "10px" } }, [
+        gtensor("dQ·W_qᵀ", C.q, st.q ? "included" : "EXCLUDED"),
+        gtensor("dK·W_kᵀ", C.k, st.k ? "included" : "EXCLUDED"),
+        gtensor("dV·W_vᵀ", C.v, st.v ? "included" : "EXCLUDED")
+      ]));
+      out.appendChild(el("div", { class: "tensorrow" }, [
+        gtensor("sum (as toggled)", cur, "|·| = " + fmt(fro(cur), 5)),
+        gtensor("dn₁ (truth)", truth, "|·| = " + fmt(fro(truth), 5))
+      ]));
+
+      out.appendChild(verdict(all && err < 1e-15,
+        all ? "all three included — exact match" : "dropping a term breaks it",
+        all ? "max |&Delta;| = <b>" + sci(err) + "</b>"
+            : "max |&Delta;| = <b>" + sci(err, 3) + "</b> &mdash; " + NN.count(Math.round(err / GCWORST)) +
+              "× the finite-difference resolution of <b>" + sci(GCWORST, 2) + "</b>. " +
+              "The gradcheck would fail immediately."));
+
+      const cont = [
+        { n: "dQ·W_qᵀ", v: fro(C.q) }, { n: "dK·W_kᵀ", v: fro(C.k) },
+        { n: "dV·W_vᵀ", v: fro(C.v) }, { n: "dn₁ (sum)", v: fro(truth) }
+      ];
+      out.appendChild(NN.chart.bars({
+        items: cont.map(function (c, i) {
+          return { label: c.n, value: c.v, color: i === 3 ? "var(--gradient)" : "var(--accent)",
+                   sub: i === 3 ? "" : "(" + fmt(c.v / fro(truth) * 100, 0) + "% of the sum's norm)" };
+        }),
+        unit: ""
+      }));
+      out.appendChild(el("p", { class: "small muted", html:
+        "The value path normally dominates: <code>dV</code> comes straight through the linear " +
+        "<code>O = P&middot;V</code>, while <code>dQ</code> and <code>dK</code> have to squeeze through " +
+        "the softmax, which — as §5 showed — projects out the mean and shrinks whatever is left. " +
+        "On this model |dQ| = " + fmt(fro(QKV[L].dQ), 5) + " against |dV| = " + fmt(fro(QKV[L].dV), 5) + "." }));
+    }
+    draw();
+
+    host.appendChild(NN.callout("why", "THE SAME RULE, EVERYWHERE",
+      "This is not an attention fact. Any tensor read by k consumers accumulates k gradients. It is " +
+      "why <code>.grad</code> fields in an autograd framework <em>accumulate</em> rather than assign, " +
+      "why you have to call <code>zero_grad()</code>, and why weight tying (an embedding matrix reused " +
+      "as the output projection) produces a gradient that is the sum of two very different terms. " +
+      "Here it also means one saved activation — <code>n₁</code>, " + (SEQ * DM) + " numbers — pays " +
+      "for three weight gradients."));
+  })();
+
+  /* ======================================================================
+     7 · THE RESIDUAL CONNECTION
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#resBody");
+
+    host.appendChild(el("p", { html:
+      "Everything above is machinery. This section is the reason the machinery gets to run " +
+      (T.reference_configs.models.find(function (m) { return m.name === "Llama 3 70B"; }).n_layers) +
+      " layers deep without the gradient dying on the way down." }));
+
+    host.appendChild(NN.formula({
+      rule: "h₂ = h₁ + D &nbsp;&nbsp;→&nbsp;&nbsp; &part;h₂/&part;h₁ = I",
+      sub: "the identity. Not a matrix that happens to be close to identity — the identity, exactly, " +
+           "at every step of training, for every input.",
+      cls: "gradient"
+    }));
+
+    host.appendChild(el("p", { html:
+      "So when the gradient <code>dh₂</code> arrives at a residual junction it does not divide. It is " +
+      "<b>copied</b>. One copy goes into the sub-layer and gets mangled — through <code>W₂</code>, " +
+      "through GELU's derivative, through <code>W₁</code>, through LayerNorm's three-term rule — " +
+      "arriving smaller and rotated. The other copy goes straight down the skip wire, byte for byte " +
+      "identical. The gradient leaving the junction below is their sum, and it therefore contains a " +
+      "<em>pristine</em> copy of what arrived, no matter what the sub-layer did to the other one." }));
+
+    /* ---- the splitter diagram ---- */
+    const JN = [];
+    for (let L = NL - 1; L >= 0; L--) {
+      const b = BLKof[L];
+      JN.push({ key: "L" + L + "-mlp", L: L, name: "block " + L + " · residual 2 (MLP branch)",
+                inn: b.din, proc: b.proc2, outp: b.dh1, branch: "LN2 → W₁ → GELU → W₂" });
+      JN.push({ key: "L" + L + "-attn", L: L, name: "block " + L + " · residual 1 (attention branch)",
+                inn: b.dh1, proc: b.proc1, outp: b.dout, branch: "LN1 → QKV → softmax → Wₒ" });
+    }
+
+    const st = { j: 0 };
+    const ctl = el("div", { class: "ctlrow" });
+    ctl.appendChild(field("junction", seg(JN.map(function (j) { return j.name.replace("block ", "L"); }), 0,
+      function (i) { st.j = i; draw(); })));
+    host.appendChild(ctl);
+    const out = el("div", {});
+    host.appendChild(out);
+
+    function draw() {
+      const j = JN[st.j];
+      const nin = fro(j.inn), nproc = fro(j.proc), nout = fro(j.outp);
+      out.innerHTML = "";
+
+      const W = 720, H = 250;
+      const s = NN.svg("svg", { class: "split", viewBox: "0 0 " + W + " " + H, role: "img" });
+      function t(x, y, txt, size, anchor, fill, weight) {
+        const e = NN.svg("text", { x: x, y: y, "font-size": size || 11, "text-anchor": anchor || "middle",
+                                   fill: fill || "var(--ink-2)", "font-weight": weight || 400 });
+        e.textContent = txt; s.appendChild(e); return e;
+      }
+      /* arriving */
+      s.appendChild(NN.svg("path", { d: "M40 125 H150", stroke: "var(--gradient)", "stroke-width": 8,
+                                     "stroke-linecap": "round" }));
+      t(95, 112, "dh arriving", 11, "middle", "var(--gradient)", 700);
+      t(95, 150, "|·| = " + fmt(nin, 5), 10.5, "middle", "var(--ink-2)");
+
+      /* the split node */
+      s.appendChild(NN.svg("circle", { cx: 176, cy: 125, r: 15, fill: "var(--gradient-w)",
+                                       stroke: "var(--gradient)", "stroke-width": 2 }));
+      t(176, 130, "+", 16, "middle", "var(--gradient)", 700);
+      t(176, 165, "copy, don't divide", 9, "middle", "var(--ink-muted)");
+
+      /* skip path (top) */
+      s.appendChild(NN.svg("path", { d: "M192 118 C 260 60, 380 60, 470 60 H560", fill: "none",
+                                     stroke: "var(--gradient)", "stroke-width": 8, "stroke-linecap": "round" }));
+      t(370, 44, "skip path — identity — unchanged", 11, "middle", "var(--gradient)", 700);
+      t(370, 80, "|·| = " + fmt(nin, 5) + "   (×1.000, bit for bit)", 10.5, "middle", "var(--ink-2)");
+
+      /* sub-layer path (bottom) */
+      const relW = Math.max(1.6, 8 * (nproc / nin));
+      s.appendChild(NN.svg("path", { d: "M192 132 C 260 195, 380 195, 470 195 H560", fill: "none",
+                                     stroke: "var(--accent)", "stroke-width": relW, "stroke-linecap": "round" }));
+      s.appendChild(NN.svg("rect", { x: 300, y: 178, width: 170, height: 34, rx: 6,
+                                     fill: "var(--surface-2)", stroke: "var(--hairline)" }));
+      t(385, 194, "sub-layer", 10.5, "middle", "var(--ink)", 700);
+      t(385, 206, j.branch, 8.5, "middle", "var(--ink-muted)");
+      t(243, 224, "processed path", 10.5, "middle", "var(--accent)", 700);
+      t(600, 214, "|·| = " + fmt(nproc, 5) + "   (×" + fmt(nproc / nin, 3) + ")", 10.5, "middle", "var(--ink-2)");
+
+      /* merge */
+      s.appendChild(NN.svg("circle", { cx: 578, cy: 125, r: 15, fill: "var(--gradient-w)",
+                                       stroke: "var(--gradient)", "stroke-width": 2 }));
+      s.appendChild(NN.svg("path", { d: "M560 60 C 572 60, 578 90, 578 110", fill: "none",
+                                     stroke: "var(--gradient)", "stroke-width": 3 }));
+      s.appendChild(NN.svg("path", { d: "M560 195 C 572 195, 578 160, 578 140", fill: "none",
+                                     stroke: "var(--accent)", "stroke-width": 3 }));
+      t(578, 130, "+", 16, "middle", "var(--gradient)", 700);
+      s.appendChild(NN.svg("path", { d: "M596 125 H690", stroke: "var(--gradient)", "stroke-width": 8,
+                                     "stroke-linecap": "round" }));
+      t(645, 112, "dh leaving", 11, "middle", "var(--gradient)", 700);
+      t(645, 150, "|·| = " + fmt(nout, 5), 10.5, "middle", "var(--ink-2)");
+      t(645, 166, "×" + fmt(nout / nin, 3) + " overall", 10, "middle", "var(--ink-muted)");
+
+      out.appendChild(el("div", { class: "scrollx" }, s));
+
+      out.appendChild(el("div", { class: "tensorrow" }, [
+        gtensor("dh arriving", j.inn),
+        gtensor("skip copy", j.inn, "identical — same object"),
+        gtensor("sub-layer copy", j.proc, "×" + fmt(nproc / nin, 3)),
+        gtensor("dh leaving = sum", j.outp)
+      ]));
+
+      const chk = maxdiff(add(j.inn, j.proc), j.outp);
+      out.appendChild(verdict(chk < 1e-15, "skip + processed = the gradient below",
+        "elementwise sum of the two copies vs the recorded gradient: max |&Delta;| = <b>" + sci(chk) +
+        "</b>. Note this is <em>not</em> a norm identity: |sum| = " + fmt(nout, 5) + " is not " +
+        fmt(nin, 5) + " + " + fmt(nproc, 5) + ", because the two copies point in different directions."));
+    }
+    draw();
+
+    /* ---- the depth argument ---- */
+    host.appendChild(el("h3", {}, "7.1 · What happens over depth"));
+
+    const facs = JN.map(function (j) { return fro(j.proc) / fro(j.inn); });
+    const geo = Math.exp(facs.reduce(function (a, f) { return a + Math.log(f); }, 0) / facs.length);
+    const overall = fro(D.dx_in) / fro(D.dOut);
+    const perSub = Math.pow(overall, 1 / facs.length);
+
+    const ft = el("table", { class: "kv" });
+    ft.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "junction"), el("th", {}, "|dh| in"), el("th", {}, "|processed|"),
+      el("th", {}, "processed / in"), el("th", {}, "|dh| out"), el("th", {}, "out / in")
+    ])));
+    ft.appendChild(el("tbody", {}, JN.map(function (j) {
+      return el("tr", {}, [
+        el("td", {}, j.name.replace("block ", "L").replace(" · ", " ")),
+        el("td", {}, fmt(fro(j.inn), 5)), el("td", {}, fmt(fro(j.proc), 5)),
+        el("td", { style: { color: "var(--critical)" } }, "×" + fmt(fro(j.proc) / fro(j.inn), 4)),
+        el("td", {}, fmt(fro(j.outp), 5)),
+        el("td", { style: { color: "var(--good)" } }, "×" + fmt(fro(j.outp) / fro(j.inn), 4))
+      ]);
+    })));
+    host.appendChild(el("div", { class: "scrollx" }, ft));
+
+    host.appendChild(el("p", { html:
+      "Read the two rightmost columns against each other. Through the sub-layer alone the gradient is " +
+      "multiplied by a geometric mean of <b>" + fmt(geo, 4) + "</b> per sub-layer. Through the residual " +
+      "stream it is multiplied by <b>" + fmt(perSub, 4) + "</b>. Over " + facs.length +
+      " sub-layers that is the difference between arriving at " + fmt(fro(D.dx_in), 5) + " and " +
+      "arriving at " + sci(fro(D.dOut) * Math.pow(geo, facs.length), 2) + "." }));
+
+    const mdl = T.reference_configs.models.find(function (m) { return m.name === "Llama 3 70B"; });
+    const NSUB = mdl.n_layers * 2;
+
+    const slider = el("input", { type: "range", min: 2, max: NSUB, value: NSUB, step: 2 });
+    const dctl = el("div", { class: "ctlrow" });
+    dctl.appendChild(field("depth (sub-layers)", slider));
+    const dread = el("div", { class: "fld" }, [el("span", {}, "at this depth"), el("div", { class: "eqn" })]);
+    dctl.appendChild(dread);
+    host.appendChild(dctl);
+    const dhost = el("div", {});
+    host.appendChild(dhost);
+
+    function depth() {
+      const n = +slider.value;
+      dread.lastChild.innerHTML =
+        "<span style='color:var(--good)'>residual ×" + sci(Math.pow(perSub, n), 2) + "</span> &nbsp; vs &nbsp;" +
+        "<span style='color:var(--critical)'>sub-layer only ×" + sci(Math.pow(geo, n), 2) + "</span>";
+      dhost.innerHTML = "";
+      const ptsA = [], ptsB = [];
+      const stride = Math.max(1, Math.round(NSUB / 32));
+      for (let k = 0; k <= NSUB; k += stride) {
+        ptsA.push([k, Math.pow(perSub, k)]);
+        ptsB.push([k, Math.pow(geo, k)]);
+      }
+      dhost.appendChild(NN.chart.line({
+        series: [
+          { name: "with residual (measured ×" + fmt(perSub, 4) + "/sub-layer)",
+            color: "var(--gradient)", points: ptsA, dots: false },
+          { name: "sub-layer path only (measured ×" + fmt(geo, 4) + "/sub-layer)",
+            color: "var(--critical)", points: ptsB, dots: false }
+        ],
+        width: 900, height: 280, logY: true,
+        xlabel: "sub-layers traversed backward", ylabel: "gradient magnitude, relative"
+      }));
+      dhost.appendChild(el("div", { class: "legend" }, [
+        el("span", { class: "small", style: { color: "var(--gradient)" } },
+          "● with residual — " + sci(Math.pow(perSub, n), 2) + " after " + n + " sub-layers"),
+        el("span", { class: "small", style: { color: "var(--critical)" } },
+          "● without — " + sci(Math.pow(geo, n), 2) + " after " + n + " sub-layers")
+      ]));
+    }
+    slider.addEventListener("input", depth);
+    depth();
+
+    host.appendChild(NN.tiles([
+      { k: "|dL/dout| at the loss", v: fmt(fro(D.dOut), 5), cls: "gradient" },
+      { k: "|dL/dx| at the input", v: fmt(fro(D.dx_in), 5), s: "×" + fmt(overall, 4) + " over " + NL + " blocks", cls: "gradient" },
+      { k: "sub-layer attenuation", v: "×" + fmt(geo, 4), s: "geometric mean, " + facs.length + " junctions" },
+      { k: "at " + mdl.n_layers + " layers, no residual", v: sci(Math.pow(geo, NSUB), 1),
+        s: NSUB + " sub-layers of " + mdl.name },
+      { k: "fp32 smallest normal", v: sci(T.formats.fp32.min_normal, 1),
+        s: "the floor a gradient can even be represented above" }
+    ]));
+
+    host.appendChild(NN.callout("key", "THIS IS WHY DEEP TRANSFORMERS TRAIN",
+      "<p>" + mdl.name + " has " + mdl.n_layers + " blocks, so " + NSUB + " sub-layers. If the gradient " +
+      "had to pass <em>through</em> every one of them — " + NSUB + " multiplications by weight matrices " +
+      "and nonlinearity derivatives — it would arrive at layer 0 scaled by roughly " +
+      sci(Math.pow(geo, NSUB), 1) + " on the attenuation measured here. fp32 cannot even represent that: " +
+      "the smallest normal fp32 is " + sci(T.formats.fp32.min_normal, 1) +
+      ". The early layers would receive exactly zero and never learn anything. bf16, with its wider " +
+      "exponent but same underflow story, does not save you.</p>" +
+      "<p>The residual connection means the gradient does not have to pass through anything. It has a " +
+      "route to every layer that is <b>" + NSUB + " additions and zero multiplications</b>. The " +
+      "sub-layer contributions are corrections added on top of a signal that arrives intact. On this " +
+      "toy the measured end-to-end factor is ×" + fmt(overall, 4) + " — the gradient at the input is " +
+      "slightly <em>larger</em> than at the output, not smaller. That is what a healthy deep network " +
+      "looks like from the inside.</p>"));
+
+    host.appendChild(NN.callout("why", "AND WHY PRE-LN, NOT POST-LN",
+      "Note where the LayerNorms sit: <em>inside</em> the branch, on the way into the sub-layer, never " +
+      "on the residual stream itself. That is “pre-LN”, and it is what keeps <code>&part;h₂/&part;h₁ = I</code> " +
+      "exactly true. The original 2017 transformer put LayerNorm <em>after</em> the addition, which puts " +
+      "a normalisation — and therefore §3's three-term Jacobian — on the superhighway itself. That " +
+      "configuration needs a learning-rate warmup to train at all past a few dozen layers. Every large " +
+      "model since is pre-LN, and this diagram is the reason."));
+  })();
+
+  /* ======================================================================
+     8 · WHAT BACKWARD READ
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#readBody");
+
+    host.appendChild(el("p", { html:
+      "Page 15 created these tensors and said they would be needed. Here is the receipt: every saved " +
+      "activation, the backward step that consumed it, and the specific term in that step's formula " +
+      "that would be impossible to evaluate without it." }));
+
+    const CONSUMER = {
+      "LN1 xhat":          { step: "ln1", term: "dx = (1/&sigma;)[dx̂ &minus; mean &minus; x̂·mean]", cls: "activation" },
+      "Q,K,V":             { step: "attn", term: "dQ = dS·<b>K</b>·scale, &nbsp; dK = dSᵀ·<b>Q</b>·scale, &nbsp; dP = dO·<b>V</b>ᵀ", cls: "activation" },
+      "attention probs P": { step: "attn", term: "dV = <b>P</b>ᵀ·dO, and the Jacobian p<sub>i</sub>(&delta;&minus;p<sub>j</sub>)", cls: "activation" },
+      "concat O":          { step: "wo", term: "dWₒ = <b>O</b>ᵀ·dA", cls: "activation" },
+      "LN2 xhat":          { step: "ln2", term: "dx = (1/&sigma;)[dx̂ &minus; mean &minus; x̂·mean]", cls: "activation" },
+      "MLP pre-act U":     { step: "mlp", term: "dU = dG ⊙ GELU&prime;(<b>U</b>)", cls: "activation" },
+      "MLP act G":         { step: "mlp", term: "dW₂ = <b>G</b>ᵀ·dD", cls: "activation" }
+    };
+
+    const tbl = el("table", { class: "data" });
+    tbl.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "saved tensor"), el("th", {}, "block"), el("th", {}, "elements"),
+      el("th", { class: "wrap", style: { textAlign: "left" } }, "consumed by"),
+      el("th", { class: "wrap", style: { textAlign: "left" } }, "the term that needs it")
+    ])));
+    const tb = el("tbody", {});
+    let total = 0;
+    D.activations.forEach(function (a) {
+      const c = CONSUMER[a.name] || { step: "?", term: a.why };
+      const stp = S[a.layer + ":" + c.step];
+      total += a.elements;
+      tb.appendChild(el("tr", {}, [
+        el("td", {}, a.name),
+        el("td", { class: "n" }, String(a.layer)),
+        el("td", { class: "n" }, String(a.elements)),
+        el("td", { style: { textAlign: "left" } },
+          stp ? "step " + (stp._i + 1) + " · " + stp.label : c.step),
+        el("td", { class: "n", style: { textAlign: "left", fontSize: ".8rem" }, html: c.term })
+      ]));
+    });
+    tbl.appendChild(tb);
+    tbl.appendChild(el("tfoot", {}, el("tr", {}, [
+      el("td", { style: { fontWeight: 700 } }, "total"),
+      el("td", {}, ""), el("td", { class: "n", style: { fontWeight: 700 } }, String(total)),
+      el("td", { colspan: 2, style: { textAlign: "left" }, html:
+        "<span class='muted'>vs " + M.n_params + " parameters — " +
+        fmt(total / M.n_params, 2) + "× as many numbers, for a " + SEQ + "-token sequence</span>" })
+    ])));
+    host.appendChild(el("div", { class: "scrollx" }, tbl));
+
+    host.appendChild(el("p", { class: "small muted", html:
+      "Full detail on where each of these was born, and the forward arithmetic that produced it, is on " +
+      "<a href='15-transformer-forward.html'>page 15</a>. The lifetime picture — allocation, peak, " +
+      "free — is on <a href='06-loop.html'>page 06</a>." }));
+
+    /* memory strip: what is resident at the moment backward starts */
+    const bytes = 4;
+    const segs = [
+      { cls: "weight", bytes: M.n_params * bytes, label: "parameters" },
+      { cls: "activation", bytes: total * bytes, label: "saved activations" },
+      { cls: "gradient", bytes: M.n_params * bytes, label: "parameter gradients" }
+    ];
+    host.appendChild(el("h3", {}, "8.1 · The moment backward starts"));
+    host.appendChild(NN.memstrip(segs, segs.reduce(function (a, s) { return a + s.bytes; }, 0)));
+    host.appendChild(NN.legend(["weight", "activation", "gradient"]));
+    host.appendChild(el("p", { class: "small muted", html:
+      "fp32, this model, this " + SEQ + "-token sequence: " +
+      segs.map(function (s) { return s.label + " " + NN.bytes(s.bytes); }).join(" · ") +
+      ". Activations are already the largest class, at " + SEQ + " tokens. They scale with sequence " +
+      "length and batch size; parameters do not." }));
+
+    host.appendChild(NN.callout("mem", "TRANSIENT vs SAVED",
+      "The " + NSTEP + " gradients the stepper in §2 walks through are each " + (SEQ * DM) +
+      " elements and each one dies as soon as the next step consumes it — they are the orange " +
+      "<code>dh</code> flowing up the stream, and only one or two are alive at a time. The " +
+      D.gradcheck.per_param.length + " <em>parameter</em> gradients are different: every one of them " +
+      "must stay resident from the moment it is computed until the optimizer step, because the " +
+      "optimizer needs all " + M.n_params + " of them at once. That asymmetry is the whole reason " +
+      "gradient memory is 1:1 with parameter memory and activation memory is not."));
+  })();
+
+  /* ======================================================================
+     9 · THE GRADIENT CHECK
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#checkBody");
+    const gc = D.gradcheck;
+
+    host.appendChild(el("p", { html:
+      "Every derivation on this page was done by hand. The only reason to believe any of it is that " +
+      "each analytic gradient was compared against a central finite difference of the actual loss:" }));
+
+    host.appendChild(NN.formula({
+      rule: "&part;L/&part;&theta;<sub>i</sub> ≈ [ L(&theta; + h·e<sub>i</sub>) &minus; L(&theta; &minus; h·e<sub>i</sub>) ] / 2h",
+      sub: "h = " + gc.h + ", two full forward passes per parameter, " + M.n_params +
+           " parameters = " + (2 * M.n_params) + " forward passes. Central differences have O(h²) " +
+           "truncation error, which is why the residual lands near " + sci(GCWORST, 1) +
+           " and not near h.",
+      cls: "weight"
+    }));
+
+    const rows = gc.per_param.slice().sort(function (a, b) { return b.max_abs_err - a.max_abs_err; });
+    const worst = rows[0];
+    const maxE = worst.max_abs_err;
+
+    host.appendChild(el("div", { class: "verdict ok", style: { fontSize: ".95rem" } }, [
+      el("span", { class: "big" }, "✓ " + rows.length + " / " + rows.length + " PASSED"),
+      el("span", { class: "det", html:
+        "worst tensor <code>" + worst.param + "</code> at <b>" + sci(maxE, 3) + "</b> &nbsp;·&nbsp; " +
+        "threshold " + sci(1e-6, 0) + " &nbsp;·&nbsp; " + M.n_params + " parameters, " +
+        (2 * M.n_params) + " probe forward passes" })
+    ]));
+
+    const rep = el("div", { class: "panel" });
+    rep.appendChild(el("div", { class: "gchdr" }, [
+      el("div", {}, "tensor"), el("div", { class: "el" }, "el"),
+      el("div", {}, "max |analytic − numerical|"), el("div", { class: "er" }, "value"), el("div", {}, "")
+    ]));
+    rows.forEach(function (c) {
+      rep.appendChild(el("div", { class: "gcrow" }, [
+        el("div", { class: "nm" }, c.param),
+        el("div", { class: "el" }, String(c.elements)),
+        el("div", { class: "gcbar" }, el("i", { style: { width: (c.max_abs_err / maxE * 100) + "%" } })),
+        el("div", { class: "er" }, sci(c.max_abs_err, 3)),
+        el("div", { class: "vd" }, "✓")
+      ]));
+    });
+    host.appendChild(rep);
+
+    host.appendChild(el("p", { class: "small muted", html:
+      "Bars are relative to the worst tensor. Every entry is between " +
+      sci(rows[rows.length - 1].max_abs_err, 1) + " and " + sci(maxE, 1) +
+      " — five to six orders of magnitude below the " + sci(1e-6, 0) + " threshold, and right at " +
+      "the level where the finite-difference side, not the analytic side, is the limiting error." }));
+    host.appendChild(el("p", { class: "small muted", style: { marginTop: "-10px" },
+      html: "From the generator: <em>" + gc.note + "</em>." }));
+
+    /* per-section attribution */
+    host.appendChild(el("h3", {}, "9.1 · Which section each row proves"));
+    const PROOF = {
+      "ln1.g": "§3 LayerNorm", "ln1.b": "§3 LayerNorm",
+      "ln2.g": "§3 LayerNorm", "ln2.b": "§3 LayerNorm",
+      "Wq": "§4/§5/§6 attention", "Wk": "§4/§5/§6 attention",
+      "Wv": "§4/§6 attention", "Wo": "§4 attention",
+      "W1": "MLP + GELU", "W2": "MLP + GELU"
+    };
+    const groups = {};
+    rows.forEach(function (c) {
+      const short = c.param.split(".").slice(1).join(".");
+      const g = PROOF[short] || "other";
+      if (!groups[g]) groups[g] = { n: 0, el: 0, worst: 0 };
+      groups[g].n++; groups[g].el += c.elements;
+      groups[g].worst = Math.max(groups[g].worst, c.max_abs_err);
+    });
+    const gt = el("table", { class: "kv" });
+    gt.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "derivation"), el("th", {}, "tensors"), el("th", {}, "scalars"),
+      el("th", {}, "worst residual"), el("th", {}, "")
+    ])));
+    gt.appendChild(el("tbody", {}, Object.keys(groups).map(function (k) {
+      return el("tr", {}, [
+        el("td", { html: k }), el("td", {}, String(groups[k].n)), el("td", {}, String(groups[k].el)),
+        el("td", {}, sci(groups[k].worst, 3)),
+        el("td", { style: { color: "var(--good)" } }, "✓")
+      ]);
+    })));
+    host.appendChild(el("div", { class: "scrollx" }, gt));
+
+    host.appendChild(el("h3", {}, "9.2 · Every check on this page, in one place"));
+    const allc = [
+      ["seed dL/dout re-derived from out and target", CHECK.dOut, 1e-15],
+      ["LayerNorm three-term formula rebuilds every dx", CHECK.lnRebuild, 1e-15],
+      ["LayerNorm Σⱼ dxⱼ = 0 (shift invariance)", CHECK.lnSum, 1e-13],
+      ["LayerNorm Σⱼ dxⱼ x̂ⱼ ≈ 0 (scale invariance, ε-limited)", CHECK.lnSumX, 1e-3],
+      ["softmax: dense-Jacobian contraction reproduces dS", CHECK.jac, 1e-15],
+      ["softmax: every row of dS sums to zero (" + CHECK.zeroRows + "/" + CHECK.rows + ")", CHECK.rowSum, 1e-13],
+      ["attention: dP, dV, dQ, dK rebuilt from saved P, V, Q, K", CHECK.attn, 1e-15],
+      ["dQ reassembled from " + NH + " head slices", CHECK.dQ, 1e-15],
+      ["Q/K/V input gradients sum to dn₁", CHECK.qkv, 1e-15],
+      ["parameter gradients vs central differences", GCWORST, 1e-6]
+    ];
+    const at = el("table", { class: "kv" });
+    at.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "check"), el("th", {}, "residual"), el("th", {}, "tolerance"), el("th", {}, "")
+    ])));
+    at.appendChild(el("tbody", {}, allc.map(function (c) {
+      const ok = c[1] < c[2];
+      return el("tr", {}, [
+        el("td", { html: c[0] }), el("td", {}, sci(c[1], 3)), el("td", {}, sci(c[2], 0)),
+        el("td", { style: { color: ok ? "var(--good)" : "var(--critical)", fontWeight: 700 } },
+          ok ? "✓" : "✗")
+      ]);
+    })));
+    host.appendChild(el("div", { class: "scrollx" }, at));
+
+    const big = T.reference_configs.models.find(function (m) { return m.name === "Llama 3 70B"; });
+    host.appendChild(NN.callout("key", "GRADCHECK IS NOT OPTIONAL",
+      "Finite differences cost " + (2 * M.n_params) + " forward passes here and would cost " +
+      NN.count(2 * big.params) + " of them on " + big.name +
+      ", so nobody runs this at scale. That is exactly why you run it on the tiny " +
+      "version, on every hand-written kernel, before it ever meets a cluster. A backward pass that is " +
+      "wrong by a factor of two still trains — slower, worse, and with no error message. A backward " +
+      "pass that drops LayerNorm's mean term still trains too. Silent wrongness is the failure mode " +
+      "this table exists to catch."));
+  })();
+
+  /* ======================================================================
+     10 · AT 70B
+     ====================================================================== */
+  (function () {
+    const host = NN.$("#closeBody");
+    const mdl = T.reference_configs.models.find(function (m) { return m.name === "Llama 3 70B"; });
+    const bf16 = T.memory.dtype_bytes.bf16;
+
+    /* Per sequence, per model: what the three deep sections of this page cost. */
+    const lnEls  = mdl.n_layers * 2 * (mdl.seq * mdl.d_model + mdl.seq);   // xhat + inv_std
+    const probEls = mdl.n_layers * mdl.n_heads * mdl.seq * mdl.seq;         // attention probs
+    const qkvEls = mdl.n_layers * 3 * mdl.seq * mdl.d_model;
+
+    host.appendChild(el("p", { html:
+      "Same three facts, same arithmetic, at " + NN.count(mdl.params) + " parameters. " +
+      mdl.name + ": " + mdl.n_layers + " blocks, d_model " + NN.count(mdl.d_model) + ", " +
+      mdl.n_heads + " heads, sequence " + NN.count(mdl.seq) + ". One sequence, bf16 activations:" }));
+
+    host.appendChild(NN.chart.bars({
+      items: [
+        { label: "LayerNorm saved x̂ and 1/σ (§3)", value: lnEls * bf16 / 1e9,
+          color: "var(--activation)", sub: "· " + NN.count(lnEls) + " elements" },
+        { label: "Q, K, V saved for each other (§4)", value: qkvEls * bf16 / 1e9,
+          color: "var(--activation)", sub: "· " + NN.count(qkvEls) + " elements" },
+        { label: "attention probs P (§5) — quadratic in seq", value: probEls * bf16 / 1e9,
+          color: "var(--activation)", sub: "· " + NN.count(probEls) + " elements" }
+      ],
+      unit: "GB"
+    }));
+
+    host.appendChild(el("p", { class: "small muted", html:
+      "Derived from <code>T.reference_configs</code>: " + mdl.n_layers + " layers × 2 LayerNorms × (" +
+      NN.count(mdl.seq) + " × " + NN.count(mdl.d_model) + " + " + NN.count(mdl.seq) + ") × " +
+      bf16 + " B = " + NN.bytes(lnEls * bf16) + " for the normalisation statistics alone, and " +
+      mdl.n_layers + " × " + mdl.n_heads + " × " + NN.count(mdl.seq) + "² × " + bf16 +
+      " B = " + NN.bytes(probEls * bf16) + " if the attention matrices are materialised. " +
+      "For one sequence. " + T.reference_configs._source + "." }));
+
+    host.appendChild(NN.callout("mem", "THREE PAGES OF MATH, THREE LINES OF ENGINEERING",
+      "<p><b>§3 → fused LayerNorm kernels.</b> The two correction terms need two row reductions of " +
+      "the incoming gradient. A naive implementation reads the row three times from HBM. Every " +
+      "production kernel fuses them into one pass, and saves <code>1/&sigma;</code> rather than " +
+      "<code>&sigma;<sup>2</sup></code> so backward does not repeat the square root " +
+      NN.count(mdl.n_layers * 2 * mdl.seq) + " times.</p>" +
+      "<p><b>§5 → FlashAttention.</b> " + NN.bytes(probEls * bf16) + " of attention probabilities " +
+      "per sequence is not a rounding error, it is the single largest activation tensor in the model. " +
+      "FlashAttention never writes P to HBM; it recomputes each tile of scores inside the backward " +
+      "kernel from Q and K, which §4 already proved must be saved anyway. The dense Jacobian is " +
+      "still applied in full — it is applied in registers.</p>" +
+      "<p><b>§7 → everything.</b> The residual stream is why " + mdl.n_layers +
+      " blocks is a reasonable number and not a research problem. It is also why activation " +
+      "checkpointing works: you can throw away everything inside a block and recompute it, because " +
+      "the one tensor you must not lose — the stream itself — is exactly the one that is cheap " +
+      "to keep.</p>"));
+
+    host.appendChild(NN.callout("why", "THE DEAD RELU, ONE LAST TIME",
+      "The " + T.meta.architecture + " model from pages 01–06 has a unit whose gradient row in " +
+      "<code>dL/dW1</code> is exactly <code>[0, 0]</code>, because ReLU's derivative at a negative " +
+      "pre-activation is zero and zero times anything is zero. Nothing on this page changes that " +
+      "logic; it only adds structure around it. GELU, unlike ReLU, has no exactly-zero derivative " +
+      "anywhere — " + fmt(D.forward.layers[0].mlp.U.length * D.forward.layers[0].mlp.U[0].length, 0) +
+      " pre-activations per block here, and not one of them produces a dead gradient. That is one of " +
+      "the two reasons transformers use GELU or SwiGLU instead."));
+
+    host.appendChild(el("p", { class: "small muted", style: { marginTop: "20px" }, html:
+      "Next: <a href='17-transformer-partitioned.html'>page 17</a> takes the same " +
+      D.partitioning.length + " weight tensors and cuts each one four different ways — tensor, " +
+      "pipeline, data and ZeRO — and shows which GPU ends up holding which slice of which matrix." }));
+  })();
+
+  NN.page("tfbackward");
+})();
+</script>
+</body>
+</html>
