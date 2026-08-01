@@ -598,7 +598,8 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       items.forEach(function (it) {
         if (it.kind === "static") return;
         const on = A.has(it.node);
-        const other = it.layer !== null && it.layer !== undefined && it.layer !== curLayer;
+        const other = it.layer !== null && it.layer !== undefined &&
+                      curLayer !== null && it.layer !== curLayer;
         it.el.setAttribute("opacity", other ? .3 : 1);
         if (it.kind === "line") {
           it.el.setAttribute("stroke", on ? "var(--activation)" : "var(--accent)");
@@ -621,7 +622,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
         a.el.textContent = (a.layer === curLayer && attnLabel) ? attnLabel : a.base;
       });
     }
-    return { el: root, set: set, X: X };
+    return { el: root, set: set, X: X, endX: VBW - 6 };
   })();
 
   /* ======================================================================
@@ -1470,7 +1471,8 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     const x0 = -3, x1 = 3, y0 = -0.6, y1 = 3.2;
     const X = function (v) { return m.l + (v - x0) / (x1 - x0) * iw; };
     const Y = function (v) { return m.t + ih - (v - y0) / (y1 - y0) * ih; };
-    const s = NN.svg("svg", { class: "chart", viewBox: "0 0 " + W + " " + H, width: W, height: H,
+    const s = NN.svg("svg", { class: "chart", viewBox: "0 0 " + W + " " + H, height: H,
+                              style: "max-width:" + W + "px",
                               role: "img", "aria-label": "GELU curve with this block's pre-activations marked" });
     /* axes */
     s.appendChild(NN.svg("line", { class: "gridline", x1: X(x0), x2: X(x1), y1: Y(0), y2: Y(0) }));
@@ -1645,12 +1647,11 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       "read-modify-write operations on it."));
 
     /* a second, independent copy of the diagram, fully lit */
+    /* neutralise the live diagram, snapshot it, and let the final render()
+       at the bottom of this script restore the stepper's highlighting */
+    SPINE.set([], null, SPINE.endX, null);
     const clone = SPINE.el.cloneNode(true);
-    NN.$$("[opacity]", clone).forEach(function (e) {
-      if (e.getAttribute("opacity") === "0.3") e.setAttribute("opacity", "1");
-    });
-    const cp = NN.$("[data-role=prog]", clone), cd = NN.$("[data-role=dot]", clone);
-    if (cp) cp.setAttribute("x2", "1122");
+    const cd = NN.$("[data-role=dot]", clone);
     if (cd) cd.setAttribute("opacity", "0");
     host.appendChild(el("div", { class: "scrollx" }, clone));
 

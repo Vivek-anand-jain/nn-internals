@@ -597,8 +597,10 @@ def partitioning(P):
             (f"L{L}.Wo", "W_o", "attention", "row",
              "split by INPUT feature, matching the head split above; "
              "produces partial sums that must be all-reduced"),
-            (f"L{L}.ln2.g", "LayerNorm 2 gain", "layernorm", "replicated", ""),
-            (f"L{L}.ln2.b", "LayerNorm 2 bias", "layernorm", "replicated", ""),
+            (f"L{L}.ln2.g", "LayerNorm 2 gain", "layernorm", "replicated",
+             "needs the whole row to take a mean"),
+            (f"L{L}.ln2.b", "LayerNorm 2 bias", "layernorm", "replicated",
+             "needs the whole row to take a mean"),
             (f"L{L}.W1", "W_up (MLP in)", "mlp", "column",
              "split by output feature = whole FFN neurons per GPU"),
             (f"L{L}.W2", "W_down (MLP out)", "mlp", "row",
@@ -632,11 +634,80 @@ def partitioning(P):
                 "dp": {"mode": "replicated",
                        "why": "every data-parallel rank holds a full copy"},
                 "zero3": {"mode": "flat-sharded",
-                          "per_gpu_elements": -(-n_el // N),
-                          "why": "flattened into the parameter buffer and cut "
-                                 "into N equal shards, ignoring matrix shape"},
+                          # NOTE: this is a PER-TENSOR ceiling and is NOT how
+                          # ZeRO-3 actually shards. Kept for comparison only;
+                          # `flat_sharding` below is the real model. Page 17
+                          # caught that these coincide here only because every
+                          # tensor happens to have an even element count.
+                          "per_tensor_ceil": -(-n_el // N),
+                          "why": "see flat_sharding -- ZeRO-3 flattens ALL "
+                                 "parameters into one buffer and cuts THAT, "
+                                 "so shard boundaries ignore matrix edges"},
             })
     return entries
+
+
+def flat_sharding(entries, worlds=(2, 3, 4, 6, 8)):
+    """
+    The real ZeRO-3 model: concatenate every parameter into one flat buffer
+    in declaration order, then cut the BUFFER into N equal shards.
+
+    Boundaries land wherever the arithmetic puts them, which is the whole
+    point -- a shard routinely spans the end of one weight matrix and the
+    start of an unrelated one. That is the concrete difference from tensor
+    parallelism, which respects what each matrix MEANS.
+
+    (Page 17 pointed out that at world 2 the single boundary happens to land
+    exactly on the layer-0/layer-1 seam, so the straddling is invisible at
+    that size. Several world sizes are emitted so the effect is visible from
+    the data rather than needing a caveat.)
+    """
+    layout, off = [], 0
+    for e in entries:
+        layout.append({"key": e["key"], "display": e["display"],
+                       "layer": e["layer"], "group": e["group"],
+                       "shape": e["shape"], "elements": e["elements"],
+                       "start": off, "end": off + e["elements"]})
+        off += e["elements"]
+    total = off
+
+    by_world = {}
+    for N in worlds:
+        size = -(-total // N)                     # ceil, then pad
+        padded = size * N
+        shards = []
+        for r in range(N):
+            lo, hi = r * size, min((r + 1) * size, total)
+            spans = [t for t in layout if t["start"] < hi and t["end"] > lo]
+            # does this shard START partway through a tensor?
+            straddles = [t["display"] + " (L" + str(t["layer"]) + ")"
+                         for t in spans
+                         if t["start"] < lo or t["end"] > hi]
+            shards.append({
+                "gpu": r, "range": [lo, hi], "elements": max(0, hi - lo),
+                "spans_tensors": [t["key"] for t in spans],
+                "n_tensors_spanned": len(spans),
+                "cut_through": straddles,
+            })
+        cut_boundaries = sum(
+            1 for r in range(1, N)
+            if any(t["start"] < r * size < t["end"] for t in layout))
+        by_world[str(N)] = {
+            "world": N, "shard_size": size, "padded_total": padded,
+            "padding": padded - total, "shards": shards,
+            "boundaries": N - 1,
+            "boundaries_cutting_a_matrix": cut_boundaries,
+            "clean_seam": cut_boundaries == 0,
+        }
+
+    return {"total_elements": total, "layout": layout, "by_world": by_world,
+            "note": "ZeRO-3 shards the flat buffer, not the matrices. Shard "
+                    "boundaries land on arithmetic, not meaning -- which is "
+                    "why ZeRO-3 must all-gather a WHOLE tensor before it can "
+                    "be used, and therefore never reduces the peak size of "
+                    "any single layer. Tensor parallelism does the opposite: "
+                    "it cuts along axes the maths understands, so a shard is "
+                    "independently usable. They are complementary."}
 
 
 def build():
@@ -658,6 +729,7 @@ def build():
 
     n_params = sum(len(flat(v)) if isinstance(v[0], list) else len(v)
                    for v in P.values())
+    _part = partitioning(P)
 
     # activation census
     act = []
@@ -705,7 +777,8 @@ def build():
                       "passed": worst < 1e-6, "h": 1e-5,
                       "note": "central differences; the residual is the "
                               "finite-difference side, not the analytic one"},
-        "partitioning": partitioning(P),
+        "partitioning": _part,
+        "flat_sharding": flat_sharding(_part),
         "activations": act,
     }
 

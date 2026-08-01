@@ -3900,8 +3900,8 @@
    },
    "zero3": {
     "mode": "flat-sharded",
-    "per_gpu_elements": 2,
-    "why": "flattened into the parameter buffer and cut into N equal shards, ignoring matrix shape"
+    "per_tensor_ceil": 2,
+    "why": "see flat_sharding -- ZeRO-3 flattens ALL parameters into one buffer and cuts THAT, so shard boundaries ignore matrix edges"
    }
   },
   {
@@ -3941,8 +3941,8 @@
    },
    "zero3": {
     "mode": "flat-sharded",
-    "per_gpu_elements": 2,
-    "why": "flattened into the parameter buffer and cut into N equal shards, ignoring matrix shape"
+    "per_tensor_ceil": 2,
+    "why": "see flat_sharding -- ZeRO-3 flattens ALL parameters into one buffer and cuts THAT, so shard boundaries ignore matrix edges"
    }
   },
   {
@@ -3990,8 +3990,8 @@
    },
    "zero3": {
     "mode": "flat-sharded",
-    "per_gpu_elements": 8,
-    "why": "flattened into the parameter buffer and cut into N equal shards, ignoring matrix shape"
+    "per_tensor_ceil": 8,
+    "why": "see flat_sharding -- ZeRO-3 flattens ALL parameters into one buffer and cuts THAT, so shard boundaries ignore matrix edges"
    }
   },
   {
@@ -4039,8 +4039,8 @@
    },
    "zero3": {
     "mode": "flat-sharded",
-    "per_gpu_elements": 8,
-    "why": "flattened into the parameter buffer and cut into N equal shards, ignoring matrix shape"
+    "per_tensor_ceil": 8,
+    "why": "see flat_sharding -- ZeRO-3 flattens ALL parameters into one buffer and cuts THAT, so shard boundaries ignore matrix edges"
    }
   },
   {
@@ -4088,8 +4088,8 @@
    },
    "zero3": {
     "mode": "flat-sharded",
-    "per_gpu_elements": 8,
-    "why": "flattened into the parameter buffer and cut into N equal shards, ignoring matrix shape"
+    "per_tensor_ceil": 8,
+    "why": "see flat_sharding -- ZeRO-3 flattens ALL parameters into one buffer and cuts THAT, so shard boundaries ignore matrix edges"
    }
   },
   {
@@ -4137,8 +4137,8 @@
    },
    "zero3": {
     "mode": "flat-sharded",
-    "per_gpu_elements": 8,
-    "why": "flattened into the parameter buffer and cut into N equal shards, ignoring matrix shape"
+    "per_tensor_ceil": 8,
+    "why": "see flat_sharding -- ZeRO-3 flattens ALL parameters into one buffer and cuts THAT, so shard boundaries ignore matrix edges"
    }
   },
   {
@@ -4166,7 +4166,7 @@
       "full": true
      }
     ],
-    "why": ""
+    "why": "needs the whole row to take a mean"
    },
    "pp": {
     "stage": 0,
@@ -4178,8 +4178,8 @@
    },
    "zero3": {
     "mode": "flat-sharded",
-    "per_gpu_elements": 2,
-    "why": "flattened into the parameter buffer and cut into N equal shards, ignoring matrix shape"
+    "per_tensor_ceil": 2,
+    "why": "see flat_sharding -- ZeRO-3 flattens ALL parameters into one buffer and cuts THAT, so shard boundaries ignore matrix edges"
    }
   },
   {
@@ -4207,7 +4207,7 @@
       "full": true
      }
     ],
-    "why": ""
+    "why": "needs the whole row to take a mean"
    },
    "pp": {
     "stage": 0,
@@ -4219,8 +4219,8 @@
    },
    "zero3": {
     "mode": "flat-sharded",
-    "per_gpu_elements": 2,
-    "why": "flattened into the parameter buffer and cut into N equal shards, ignoring matrix shape"
+    "per_tensor_ceil": 2,
+    "why": "see flat_sharding -- ZeRO-3 flattens ALL parameters into one buffer and cuts THAT, so shard boundaries ignore matrix edges"
    }
   },
   {
@@ -4268,8 +4268,8 @@
    },
    "zero3": {
     "mode": "flat-sharded",
-    "per_gpu_elements": 16,
-    "why": "flattened into the parameter buffer and cut into N equal shards, ignoring matrix shape"
+    "per_tensor_ceil": 16,
+    "why": "see flat_sharding -- ZeRO-3 flattens ALL parameters into one buffer and cuts THAT, so shard boundaries ignore matrix edges"
    }
   },
   {
@@ -4317,8 +4317,8 @@
    },
    "zero3": {
     "mode": "flat-sharded",
-    "per_gpu_elements": 16,
-    "why": "flattened into the parameter buffer and cut into N equal shards, ignoring matrix shape"
+    "per_tensor_ceil": 16,
+    "why": "see flat_sharding -- ZeRO-3 flattens ALL parameters into one buffer and cuts THAT, so shard boundaries ignore matrix edges"
    }
   },
   {
@@ -4358,8 +4358,8 @@
    },
    "zero3": {
     "mode": "flat-sharded",
-    "per_gpu_elements": 2,
-    "why": "flattened into the parameter buffer and cut into N equal shards, ignoring matrix shape"
+    "per_tensor_ceil": 2,
+    "why": "see flat_sharding -- ZeRO-3 flattens ALL parameters into one buffer and cuts THAT, so shard boundaries ignore matrix edges"
    }
   },
   {
@@ -4399,8 +4399,8 @@
    },
    "zero3": {
     "mode": "flat-sharded",
-    "per_gpu_elements": 2,
-    "why": "flattened into the parameter buffer and cut into N equal shards, ignoring matrix shape"
+    "per_tensor_ceil": 2,
+    "why": "see flat_sharding -- ZeRO-3 flattens ALL parameters into one buffer and cuts THAT, so shard boundaries ignore matrix edges"
    }
   },
   {
@@ -4448,8 +4448,8 @@
    },
    "zero3": {
     "mode": "flat-sharded",
-    "per_gpu_elements": 8,
-    "why": "flattened into the parameter buffer and cut into N equal shards, ignoring matrix shape"
+    "per_tensor_ceil": 8,
+    "why": "see flat_sharding -- ZeRO-3 flattens ALL parameters into one buffer and cuts THAT, so shard boundaries ignore matrix edges"
    }
   },
   {
@@ -4497,8 +4497,8 @@
    },
    "zero3": {
     "mode": "flat-sharded",
-    "per_gpu_elements": 8,
-    "why": "flattened into the parameter buffer and cut into N equal shards, ignoring matrix shape"
+    "per_tensor_ceil": 8,
+    "why": "see flat_sharding -- ZeRO-3 flattens ALL parameters into one buffer and cuts THAT, so shard boundaries ignore matrix edges"
    }
   },
   {
@@ -4546,8 +4546,8 @@
    },
    "zero3": {
     "mode": "flat-sharded",
-    "per_gpu_elements": 8,
-    "why": "flattened into the parameter buffer and cut into N equal shards, ignoring matrix shape"
+    "per_tensor_ceil": 8,
+    "why": "see flat_sharding -- ZeRO-3 flattens ALL parameters into one buffer and cuts THAT, so shard boundaries ignore matrix edges"
    }
   },
   {
@@ -4595,8 +4595,8 @@
    },
    "zero3": {
     "mode": "flat-sharded",
-    "per_gpu_elements": 8,
-    "why": "flattened into the parameter buffer and cut into N equal shards, ignoring matrix shape"
+    "per_tensor_ceil": 8,
+    "why": "see flat_sharding -- ZeRO-3 flattens ALL parameters into one buffer and cuts THAT, so shard boundaries ignore matrix edges"
    }
   },
   {
@@ -4624,7 +4624,7 @@
       "full": true
      }
     ],
-    "why": ""
+    "why": "needs the whole row to take a mean"
    },
    "pp": {
     "stage": 1,
@@ -4636,8 +4636,8 @@
    },
    "zero3": {
     "mode": "flat-sharded",
-    "per_gpu_elements": 2,
-    "why": "flattened into the parameter buffer and cut into N equal shards, ignoring matrix shape"
+    "per_tensor_ceil": 2,
+    "why": "see flat_sharding -- ZeRO-3 flattens ALL parameters into one buffer and cuts THAT, so shard boundaries ignore matrix edges"
    }
   },
   {
@@ -4665,7 +4665,7 @@
       "full": true
      }
     ],
-    "why": ""
+    "why": "needs the whole row to take a mean"
    },
    "pp": {
     "stage": 1,
@@ -4677,8 +4677,8 @@
    },
    "zero3": {
     "mode": "flat-sharded",
-    "per_gpu_elements": 2,
-    "why": "flattened into the parameter buffer and cut into N equal shards, ignoring matrix shape"
+    "per_tensor_ceil": 2,
+    "why": "see flat_sharding -- ZeRO-3 flattens ALL parameters into one buffer and cuts THAT, so shard boundaries ignore matrix edges"
    }
   },
   {
@@ -4726,8 +4726,8 @@
    },
    "zero3": {
     "mode": "flat-sharded",
-    "per_gpu_elements": 16,
-    "why": "flattened into the parameter buffer and cut into N equal shards, ignoring matrix shape"
+    "per_tensor_ceil": 16,
+    "why": "see flat_sharding -- ZeRO-3 flattens ALL parameters into one buffer and cuts THAT, so shard boundaries ignore matrix edges"
    }
   },
   {
@@ -4775,11 +4775,749 @@
    },
    "zero3": {
     "mode": "flat-sharded",
-    "per_gpu_elements": 16,
-    "why": "flattened into the parameter buffer and cut into N equal shards, ignoring matrix shape"
+    "per_tensor_ceil": 16,
+    "why": "see flat_sharding -- ZeRO-3 flattens ALL parameters into one buffer and cuts THAT, so shard boundaries ignore matrix edges"
    }
   }
  ],
+ "flat_sharding": {
+  "total_elements": 288,
+  "layout": [
+   {
+    "key": "L0.ln1.g",
+    "display": "LayerNorm 1 gain",
+    "layer": 0,
+    "group": "layernorm",
+    "shape": [
+     4
+    ],
+    "elements": 4,
+    "start": 0,
+    "end": 4
+   },
+   {
+    "key": "L0.ln1.b",
+    "display": "LayerNorm 1 bias",
+    "layer": 0,
+    "group": "layernorm",
+    "shape": [
+     4
+    ],
+    "elements": 4,
+    "start": 4,
+    "end": 8
+   },
+   {
+    "key": "L0.Wq",
+    "display": "W_q",
+    "layer": 0,
+    "group": "attention",
+    "shape": [
+     4,
+     4
+    ],
+    "elements": 16,
+    "start": 8,
+    "end": 24
+   },
+   {
+    "key": "L0.Wk",
+    "display": "W_k",
+    "layer": 0,
+    "group": "attention",
+    "shape": [
+     4,
+     4
+    ],
+    "elements": 16,
+    "start": 24,
+    "end": 40
+   },
+   {
+    "key": "L0.Wv",
+    "display": "W_v",
+    "layer": 0,
+    "group": "attention",
+    "shape": [
+     4,
+     4
+    ],
+    "elements": 16,
+    "start": 40,
+    "end": 56
+   },
+   {
+    "key": "L0.Wo",
+    "display": "W_o",
+    "layer": 0,
+    "group": "attention",
+    "shape": [
+     4,
+     4
+    ],
+    "elements": 16,
+    "start": 56,
+    "end": 72
+   },
+   {
+    "key": "L0.ln2.g",
+    "display": "LayerNorm 2 gain",
+    "layer": 0,
+    "group": "layernorm",
+    "shape": [
+     4
+    ],
+    "elements": 4,
+    "start": 72,
+    "end": 76
+   },
+   {
+    "key": "L0.ln2.b",
+    "display": "LayerNorm 2 bias",
+    "layer": 0,
+    "group": "layernorm",
+    "shape": [
+     4
+    ],
+    "elements": 4,
+    "start": 76,
+    "end": 80
+   },
+   {
+    "key": "L0.W1",
+    "display": "W_up (MLP in)",
+    "layer": 0,
+    "group": "mlp",
+    "shape": [
+     4,
+     8
+    ],
+    "elements": 32,
+    "start": 80,
+    "end": 112
+   },
+   {
+    "key": "L0.W2",
+    "display": "W_down (MLP out)",
+    "layer": 0,
+    "group": "mlp",
+    "shape": [
+     8,
+     4
+    ],
+    "elements": 32,
+    "start": 112,
+    "end": 144
+   },
+   {
+    "key": "L1.ln1.g",
+    "display": "LayerNorm 1 gain",
+    "layer": 1,
+    "group": "layernorm",
+    "shape": [
+     4
+    ],
+    "elements": 4,
+    "start": 144,
+    "end": 148
+   },
+   {
+    "key": "L1.ln1.b",
+    "display": "LayerNorm 1 bias",
+    "layer": 1,
+    "group": "layernorm",
+    "shape": [
+     4
+    ],
+    "elements": 4,
+    "start": 148,
+    "end": 152
+   },
+   {
+    "key": "L1.Wq",
+    "display": "W_q",
+    "layer": 1,
+    "group": "attention",
+    "shape": [
+     4,
+     4
+    ],
+    "elements": 16,
+    "start": 152,
+    "end": 168
+   },
+   {
+    "key": "L1.Wk",
+    "display": "W_k",
+    "layer": 1,
+    "group": "attention",
+    "shape": [
+     4,
+     4
+    ],
+    "elements": 16,
+    "start": 168,
+    "end": 184
+   },
+   {
+    "key": "L1.Wv",
+    "display": "W_v",
+    "layer": 1,
+    "group": "attention",
+    "shape": [
+     4,
+     4
+    ],
+    "elements": 16,
+    "start": 184,
+    "end": 200
+   },
+   {
+    "key": "L1.Wo",
+    "display": "W_o",
+    "layer": 1,
+    "group": "attention",
+    "shape": [
+     4,
+     4
+    ],
+    "elements": 16,
+    "start": 200,
+    "end": 216
+   },
+   {
+    "key": "L1.ln2.g",
+    "display": "LayerNorm 2 gain",
+    "layer": 1,
+    "group": "layernorm",
+    "shape": [
+     4
+    ],
+    "elements": 4,
+    "start": 216,
+    "end": 220
+   },
+   {
+    "key": "L1.ln2.b",
+    "display": "LayerNorm 2 bias",
+    "layer": 1,
+    "group": "layernorm",
+    "shape": [
+     4
+    ],
+    "elements": 4,
+    "start": 220,
+    "end": 224
+   },
+   {
+    "key": "L1.W1",
+    "display": "W_up (MLP in)",
+    "layer": 1,
+    "group": "mlp",
+    "shape": [
+     4,
+     8
+    ],
+    "elements": 32,
+    "start": 224,
+    "end": 256
+   },
+   {
+    "key": "L1.W2",
+    "display": "W_down (MLP out)",
+    "layer": 1,
+    "group": "mlp",
+    "shape": [
+     8,
+     4
+    ],
+    "elements": 32,
+    "start": 256,
+    "end": 288
+   }
+  ],
+  "by_world": {
+   "2": {
+    "world": 2,
+    "shard_size": 144,
+    "padded_total": 288,
+    "padding": 0,
+    "shards": [
+     {
+      "gpu": 0,
+      "range": [
+       0,
+       144
+      ],
+      "elements": 144,
+      "spans_tensors": [
+       "L0.ln1.g",
+       "L0.ln1.b",
+       "L0.Wq",
+       "L0.Wk",
+       "L0.Wv",
+       "L0.Wo",
+       "L0.ln2.g",
+       "L0.ln2.b",
+       "L0.W1",
+       "L0.W2"
+      ],
+      "n_tensors_spanned": 10,
+      "cut_through": []
+     },
+     {
+      "gpu": 1,
+      "range": [
+       144,
+       288
+      ],
+      "elements": 144,
+      "spans_tensors": [
+       "L1.ln1.g",
+       "L1.ln1.b",
+       "L1.Wq",
+       "L1.Wk",
+       "L1.Wv",
+       "L1.Wo",
+       "L1.ln2.g",
+       "L1.ln2.b",
+       "L1.W1",
+       "L1.W2"
+      ],
+      "n_tensors_spanned": 10,
+      "cut_through": []
+     }
+    ],
+    "boundaries": 1,
+    "boundaries_cutting_a_matrix": 0,
+    "clean_seam": true
+   },
+   "3": {
+    "world": 3,
+    "shard_size": 96,
+    "padded_total": 288,
+    "padding": 0,
+    "shards": [
+     {
+      "gpu": 0,
+      "range": [
+       0,
+       96
+      ],
+      "elements": 96,
+      "spans_tensors": [
+       "L0.ln1.g",
+       "L0.ln1.b",
+       "L0.Wq",
+       "L0.Wk",
+       "L0.Wv",
+       "L0.Wo",
+       "L0.ln2.g",
+       "L0.ln2.b",
+       "L0.W1"
+      ],
+      "n_tensors_spanned": 9,
+      "cut_through": [
+       "W_up (MLP in) (L0)"
+      ]
+     },
+     {
+      "gpu": 1,
+      "range": [
+       96,
+       192
+      ],
+      "elements": 96,
+      "spans_tensors": [
+       "L0.W1",
+       "L0.W2",
+       "L1.ln1.g",
+       "L1.ln1.b",
+       "L1.Wq",
+       "L1.Wk",
+       "L1.Wv"
+      ],
+      "n_tensors_spanned": 7,
+      "cut_through": [
+       "W_up (MLP in) (L0)",
+       "W_v (L1)"
+      ]
+     },
+     {
+      "gpu": 2,
+      "range": [
+       192,
+       288
+      ],
+      "elements": 96,
+      "spans_tensors": [
+       "L1.Wv",
+       "L1.Wo",
+       "L1.ln2.g",
+       "L1.ln2.b",
+       "L1.W1",
+       "L1.W2"
+      ],
+      "n_tensors_spanned": 6,
+      "cut_through": [
+       "W_v (L1)"
+      ]
+     }
+    ],
+    "boundaries": 2,
+    "boundaries_cutting_a_matrix": 2,
+    "clean_seam": false
+   },
+   "4": {
+    "world": 4,
+    "shard_size": 72,
+    "padded_total": 288,
+    "padding": 0,
+    "shards": [
+     {
+      "gpu": 0,
+      "range": [
+       0,
+       72
+      ],
+      "elements": 72,
+      "spans_tensors": [
+       "L0.ln1.g",
+       "L0.ln1.b",
+       "L0.Wq",
+       "L0.Wk",
+       "L0.Wv",
+       "L0.Wo"
+      ],
+      "n_tensors_spanned": 6,
+      "cut_through": []
+     },
+     {
+      "gpu": 1,
+      "range": [
+       72,
+       144
+      ],
+      "elements": 72,
+      "spans_tensors": [
+       "L0.ln2.g",
+       "L0.ln2.b",
+       "L0.W1",
+       "L0.W2"
+      ],
+      "n_tensors_spanned": 4,
+      "cut_through": []
+     },
+     {
+      "gpu": 2,
+      "range": [
+       144,
+       216
+      ],
+      "elements": 72,
+      "spans_tensors": [
+       "L1.ln1.g",
+       "L1.ln1.b",
+       "L1.Wq",
+       "L1.Wk",
+       "L1.Wv",
+       "L1.Wo"
+      ],
+      "n_tensors_spanned": 6,
+      "cut_through": []
+     },
+     {
+      "gpu": 3,
+      "range": [
+       216,
+       288
+      ],
+      "elements": 72,
+      "spans_tensors": [
+       "L1.ln2.g",
+       "L1.ln2.b",
+       "L1.W1",
+       "L1.W2"
+      ],
+      "n_tensors_spanned": 4,
+      "cut_through": []
+     }
+    ],
+    "boundaries": 3,
+    "boundaries_cutting_a_matrix": 0,
+    "clean_seam": true
+   },
+   "6": {
+    "world": 6,
+    "shard_size": 48,
+    "padded_total": 288,
+    "padding": 0,
+    "shards": [
+     {
+      "gpu": 0,
+      "range": [
+       0,
+       48
+      ],
+      "elements": 48,
+      "spans_tensors": [
+       "L0.ln1.g",
+       "L0.ln1.b",
+       "L0.Wq",
+       "L0.Wk",
+       "L0.Wv"
+      ],
+      "n_tensors_spanned": 5,
+      "cut_through": [
+       "W_v (L0)"
+      ]
+     },
+     {
+      "gpu": 1,
+      "range": [
+       48,
+       96
+      ],
+      "elements": 48,
+      "spans_tensors": [
+       "L0.Wv",
+       "L0.Wo",
+       "L0.ln2.g",
+       "L0.ln2.b",
+       "L0.W1"
+      ],
+      "n_tensors_spanned": 5,
+      "cut_through": [
+       "W_v (L0)",
+       "W_up (MLP in) (L0)"
+      ]
+     },
+     {
+      "gpu": 2,
+      "range": [
+       96,
+       144
+      ],
+      "elements": 48,
+      "spans_tensors": [
+       "L0.W1",
+       "L0.W2"
+      ],
+      "n_tensors_spanned": 2,
+      "cut_through": [
+       "W_up (MLP in) (L0)"
+      ]
+     },
+     {
+      "gpu": 3,
+      "range": [
+       144,
+       192
+      ],
+      "elements": 48,
+      "spans_tensors": [
+       "L1.ln1.g",
+       "L1.ln1.b",
+       "L1.Wq",
+       "L1.Wk",
+       "L1.Wv"
+      ],
+      "n_tensors_spanned": 5,
+      "cut_through": [
+       "W_v (L1)"
+      ]
+     },
+     {
+      "gpu": 4,
+      "range": [
+       192,
+       240
+      ],
+      "elements": 48,
+      "spans_tensors": [
+       "L1.Wv",
+       "L1.Wo",
+       "L1.ln2.g",
+       "L1.ln2.b",
+       "L1.W1"
+      ],
+      "n_tensors_spanned": 5,
+      "cut_through": [
+       "W_v (L1)",
+       "W_up (MLP in) (L1)"
+      ]
+     },
+     {
+      "gpu": 5,
+      "range": [
+       240,
+       288
+      ],
+      "elements": 48,
+      "spans_tensors": [
+       "L1.W1",
+       "L1.W2"
+      ],
+      "n_tensors_spanned": 2,
+      "cut_through": [
+       "W_up (MLP in) (L1)"
+      ]
+     }
+    ],
+    "boundaries": 5,
+    "boundaries_cutting_a_matrix": 4,
+    "clean_seam": false
+   },
+   "8": {
+    "world": 8,
+    "shard_size": 36,
+    "padded_total": 288,
+    "padding": 0,
+    "shards": [
+     {
+      "gpu": 0,
+      "range": [
+       0,
+       36
+      ],
+      "elements": 36,
+      "spans_tensors": [
+       "L0.ln1.g",
+       "L0.ln1.b",
+       "L0.Wq",
+       "L0.Wk"
+      ],
+      "n_tensors_spanned": 4,
+      "cut_through": [
+       "W_k (L0)"
+      ]
+     },
+     {
+      "gpu": 1,
+      "range": [
+       36,
+       72
+      ],
+      "elements": 36,
+      "spans_tensors": [
+       "L0.Wk",
+       "L0.Wv",
+       "L0.Wo"
+      ],
+      "n_tensors_spanned": 3,
+      "cut_through": [
+       "W_k (L0)"
+      ]
+     },
+     {
+      "gpu": 2,
+      "range": [
+       72,
+       108
+      ],
+      "elements": 36,
+      "spans_tensors": [
+       "L0.ln2.g",
+       "L0.ln2.b",
+       "L0.W1"
+      ],
+      "n_tensors_spanned": 3,
+      "cut_through": [
+       "W_up (MLP in) (L0)"
+      ]
+     },
+     {
+      "gpu": 3,
+      "range": [
+       108,
+       144
+      ],
+      "elements": 36,
+      "spans_tensors": [
+       "L0.W1",
+       "L0.W2"
+      ],
+      "n_tensors_spanned": 2,
+      "cut_through": [
+       "W_up (MLP in) (L0)"
+      ]
+     },
+     {
+      "gpu": 4,
+      "range": [
+       144,
+       180
+      ],
+      "elements": 36,
+      "spans_tensors": [
+       "L1.ln1.g",
+       "L1.ln1.b",
+       "L1.Wq",
+       "L1.Wk"
+      ],
+      "n_tensors_spanned": 4,
+      "cut_through": [
+       "W_k (L1)"
+      ]
+     },
+     {
+      "gpu": 5,
+      "range": [
+       180,
+       216
+      ],
+      "elements": 36,
+      "spans_tensors": [
+       "L1.Wk",
+       "L1.Wv",
+       "L1.Wo"
+      ],
+      "n_tensors_spanned": 3,
+      "cut_through": [
+       "W_k (L1)"
+      ]
+     },
+     {
+      "gpu": 6,
+      "range": [
+       216,
+       252
+      ],
+      "elements": 36,
+      "spans_tensors": [
+       "L1.ln2.g",
+       "L1.ln2.b",
+       "L1.W1"
+      ],
+      "n_tensors_spanned": 3,
+      "cut_through": [
+       "W_up (MLP in) (L1)"
+      ]
+     },
+     {
+      "gpu": 7,
+      "range": [
+       252,
+       288
+      ],
+      "elements": 36,
+      "spans_tensors": [
+       "L1.W1",
+       "L1.W2"
+      ],
+      "n_tensors_spanned": 2,
+      "cut_through": [
+       "W_up (MLP in) (L1)"
+      ]
+     }
+    ],
+    "boundaries": 7,
+    "boundaries_cutting_a_matrix": 4,
+    "clean_seam": false
+   }
+  },
+  "note": "ZeRO-3 shards the flat buffer, not the matrices. Shard boundaries land on arithmetic, not meaning -- which is why ZeRO-3 must all-gather a WHOLE tensor before it can be used, and therefore never reduces the peak size of any single layer. Tensor parallelism does the opposite: it cuts along axes the maths understands, so a shard is independently usable. They are complementary."
+ },
  "activations": [
   {
    "layer": 0,
