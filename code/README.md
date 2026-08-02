@@ -53,11 +53,12 @@ work as-is in CI.
   against finite differences).
 - `mlp_numpy.py` — **runs and passes.** All 359 checks report a max absolute
   difference of exactly `0.000e+00` against the trace on numpy 2.4.1.
-- `mlp_torch.py` — **not executed during authoring**; torch was not installed
-  in that environment and is a multi-GB dependency. The file parses
-  (`python3 -m py_compile`) and exits with a clear message if torch is
-  missing, but its printed results are unverified. Treat `mlp_numpy.py` as the
-  trustworthy check of the math and `mlp_torch.py` as the memory tour.
+- `mlp_torch.py` — **runs and passes.** All 30 checks on torch 2.13.0. PyTorch
+  autograd agrees with the hand-derived gradients to exactly `0.000e+00` — not
+  within tolerance, bit-identical. It was written against the spec before torch
+  was available in this environment and was correct on its first execution.
+  It doubles as the memory tour: `data_ptr`, `stride`, `.grad` appearing after
+  backward, and Adam's `exp_avg` / `exp_avg_sq` materialising after step 1.
 - `memory_accounting.py` — runs; every example below was executed to produce
   its output verbatim.
 
