@@ -67,7 +67,7 @@ work as-is in CI.
 Formulas are documented in full in the module docstring — parameter count,
 the four tensor classes, optimizer slot widths, master weights, tp/pp
 sharding, the ZeRO stage table, and the activation coefficient with its
-FlashAttention assumption stated. **Site page 10 (`site/10-scaling.html`) must
+FlashAttention assumption stated. **Site page 11 (`site/11-scaling.html`) must
 agree with that docstring**; it is the tiebreaker if the two ever disagree.
 
 ```sh
@@ -88,7 +88,7 @@ python3 code/memory_accounting.py --params 70B --gpus 64 --layers 80 \
 The first prints **1,128 GiB per GPU → DOES NOT FIT, over by 1,050 GiB**
 (that is the canonical 16 bytes per parameter for bf16 Adam, plus 85 GiB of
 activations). The second prints **21.30 GiB → FITS with 55 GiB to spare**.
-The gap between those two commands is the entire subject of page 10.
+The gap between those two commands is the entire subject of page 11.
 
 Sizes accept suffixes (`70B`, `6.7e9`, `175000000000`). All figures are GiB
 (2³⁰ bytes), never GB.
@@ -96,7 +96,7 @@ Sizes accept suffixes (`70B`, `6.7e9`, `175000000000`). All figures are GiB
 ### Presets
 
 `--model` and `--gpu` read `T.reference_configs` out of `trace.json` — the
-same published architectures and HBM capacities page 10 puts in its
+same published architectures and HBM capacities page 11 puts in its
 dropdowns — so the CLI and the page cannot drift apart on what a "70B" is.
 Explicit flags always beat a preset.
 

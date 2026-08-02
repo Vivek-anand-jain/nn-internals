@@ -43,33 +43,37 @@
       blurb: "Memory rising and falling across a single step." },
 
     /* Part II — a real transformer, on the 288-parameter 2-layer block.
-       Forward and backward come BEFORE the cost and scaling pages: you
-       cannot reason about what a transformer costs until you have seen
-       what it computes. */
+       FlashAttention sits directly after the cost page, because it is the
+       answer to the seq^2 term that page identifies. */
     { n: "07", id: "tfforward",   file: "07-transformer-forward.html", title: "Transformer Forward",
       blurb: "Two real blocks, every matrix, token by token." },
     { n: "08", id: "tfbackward",  file: "08-transformer-backward.html", title: "Transformer Backward",
       blurb: "LayerNorm's two correction terms. Softmax's dense Jacobian." },
     { n: "09", id: "transformer", file: "09-transformer-cost.html", title: "What a Transformer Costs",
       blurb: "Parameter counts, activation memory, and the seq² term." },
-    { n: "10", id: "scaling",     file: "10-scaling.html",     title: "Scaling to 70B",
+    { n: "10", id: "flash",       file: "10-flash-attention.html", title: "FlashAttention",
+      blurb: "The seq² matrix never has to exist. Proven exact." },
+    { n: "11", id: "scaling",     file: "11-scaling.html",     title: "Scaling to 70B",
       blurb: "Why ZeRO, FSDP, TP and PP have to exist." },
 
-    /* Part III — many GPUs. Mechanics on the 193-parameter MLP, then
-       applied back to the transformer in 16. */
-    { n: "11", id: "collectives", file: "11-collectives.html", title: "Collective Operations",
+    /* Part III — many GPUs. Sequence parallelism sits directly after tensor
+       parallelism, because it removes exactly the activations TP leaves
+       replicated. */
+    { n: "12", id: "collectives", file: "12-collectives.html", title: "Collective Operations",
       blurb: "Broadcast, all-gather, reduce-scatter, all-reduce — and the ring." },
-    { n: "12", id: "dataparallel", file: "12-data-parallel.html", title: "Data Parallel",
+    { n: "13", id: "dataparallel", file: "13-data-parallel.html", title: "Data Parallel",
       blurb: "Split the batch, all-reduce the gradients. Proven identical." },
-    { n: "13", id: "zero",        file: "13-zero-fsdp.html",   title: "ZeRO & FSDP",
+    { n: "14", id: "zero",        file: "14-zero-fsdp.html",   title: "ZeRO & FSDP",
       blurb: "Stop replicating what you don't need. Three stages." },
-    { n: "14", id: "tensorpar",   file: "14-tensor-parallel.html", title: "Tensor Parallel",
+    { n: "15", id: "tensorpar",   file: "15-tensor-parallel.html", title: "Tensor Parallel",
       blurb: "Cut the weight matrices themselves. Column then row." },
-    { n: "15", id: "pipelinepar", file: "15-pipeline-parallel.html", title: "Pipeline Parallel",
+    { n: "16", id: "seqpar",      file: "16-sequence-parallel.html", title: "Sequence Parallelism",
+      blurb: "The activations TP leaves replicated — removed for free." },
+    { n: "17", id: "pipelinepar", file: "17-pipeline-parallel.html", title: "Pipeline Parallel",
       blurb: "Split the layers. Live with the bubble." },
-    { n: "16", id: "tfpartition", file: "16-transformer-partitioned.html", title: "Partitioning a Block",
+    { n: "18", id: "tfpartition", file: "18-transformer-partitioned.html", title: "Partitioning a Block",
       blurb: "Every weight matrix of a real transformer, cut four ways." },
-    { n: "17", id: "combining",   file: "17-3d-parallelism.html", title: "3D Parallelism",
+    { n: "19", id: "combining",   file: "19-3d-parallelism.html", title: "3D Parallelism",
       blurb: "Composing TP × PP × DP onto real hardware topology." }
   ];
 

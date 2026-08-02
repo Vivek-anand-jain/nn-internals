@@ -1223,7 +1223,7 @@ td.ok  { color: var(--good); }
       "at the same instant — the instant the optimizer step runs. That model is " +
       MODEL.n_layers + " layers of width d_model = " + MODEL.d_model + ", and the exact " +
       "same " + NSTEP + "-step pattern you stepped through above runs inside every one of " +
-      "them. Page 10 is about what people do instead. " +
+      "them. Page 11 is about what people do instead. " +
       "<br><br>One real mitigation is visible right here: gradients, unlike weights, are " +
       "consumed once and discarded, so they are the natural candidate for a lower-precision " +
       "buffer or for being reduced-and-freed shard by shard, which is exactly what ZeRO " +

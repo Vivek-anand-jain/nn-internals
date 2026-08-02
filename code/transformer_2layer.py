@@ -64,7 +64,7 @@ def det(i, j, salt):
 # X is (seq, d_in), W is (d_in, d_out), Y = X @ W.  This is the Megatron
 # convention: W's COLUMNS are output features, so "column-parallel" really
 # does mean splitting W's columns. (PyTorch's nn.Linear stores the transpose;
-# page 14 covers that naming trap.)
+# page 15 covers that naming trap.)
 
 def mm(A, B):
     m, k, n = len(A), len(B), len(B[0])
@@ -636,7 +636,7 @@ def partitioning(P):
                 "zero3": {"mode": "flat-sharded",
                           # NOTE: this is a PER-TENSOR ceiling and is NOT how
                           # ZeRO-3 actually shards. Kept for comparison only;
-                          # `flat_sharding` below is the real model. Page 16
+                          # `flat_sharding` below is the real model. Page 18
                           # caught that these coincide here only because every
                           # tensor happens to have an even element count.
                           "per_tensor_ceil": -(-n_el // N),
@@ -657,7 +657,7 @@ def flat_sharding(entries, worlds=(2, 3, 4, 6, 8)):
     start of an unrelated one. That is the concrete difference from tensor
     parallelism, which respects what each matrix MEANS.
 
-    (Page 16 pointed out that at world 2 the single boundary happens to land
+    (Page 18 pointed out that at world 2 the single boundary happens to land
     exactly on the layer-0/layer-1 seam, so the straddling is invisible at
     that size. Several world sizes are emitted so the effect is visible from
     the data rather than needing a caveat.)

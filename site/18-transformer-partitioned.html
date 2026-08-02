@@ -187,7 +187,7 @@ details.more > div:last-child { padding-bottom: 12px; }
 
 <main class="wrap">
   <div class="pagehead">
-    <div class="eyebrow">Part 16</div>
+    <div class="eyebrow">Part 18</div>
     <h1>Partitioning a Block: Every Matrix, Cut Four Different Ways</h1>
     <p class="lede">Pages 11–15 argued about parallelism with boxes and arrows, on a 193-parameter MLP.
       This page does it with the actual numbers, on the block you walked forward on page 07 and
@@ -1832,7 +1832,7 @@ details.more > div:last-child { padding-bottom: 12px; }
       "have NVLink. PP = " + NL + " across nodes, where only the residual stream crosses. DP outside " +
       "everything, where the gradient all-reduce can overlap with backward. Every GPU gets three " +
       "coordinates, and those three coordinates determine every byte it holds. " +
-      "<a href='17-3d-parallelism.html'>Page 17</a> takes this same factorisation off the toy and " +
+      "<a href='19-3d-parallelism.html'>Page 19</a> takes this same factorisation off the toy and " +
       "onto real hardware, where which axis lands on which link decides whether it is fast." }));
 
     const ctrl = el("div", { class: "seg" });
@@ -2172,7 +2172,7 @@ details.more > div:last-child { padding-bottom: 12px; }
       NN.count(blk) + " parameters instead of " + (TOTAL / NL) + ", " + nl + " times instead of " + NL +
       ", and the answer is the same every time. Scale removes your ability to print the matrix. It does " +
       "not change which line you cut it on. What is left is choosing the three degrees at once, on a " +
-      "network with real link speeds — <a href=\"17-3d-parallelism.html\">page 17</a>."));
+      "network with real link speeds — <a href=\"19-3d-parallelism.html\">page 19</a>."));
   }
 
   /* ------------------------------------------------------------------ */

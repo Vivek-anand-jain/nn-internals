@@ -81,7 +81,7 @@ table.data tr.hi { background: var(--surface-3); }
 
 <main class="wrap">
   <div class="pagehead">
-    <div class="eyebrow">Part 15</div>
+    <div class="eyebrow">Part 17</div>
     <h1>Pipeline Parallel</h1>
     <p class="lede">Tensor parallelism all-reduces activations at every layer, so it needs a fast
       link and stays inside one node. To go beyond a node you need a strategy that tolerates a slow
@@ -1145,7 +1145,7 @@ table.data tr.hi { background: var(--surface-3); }
       NN.bytes(tpFwdBytes) + " per GPU</b>, roughly " +
       NN.fmt(tpFwdBytes / ppFwdBytes, 0) + "× more, all of it synchronous. " +
       "That ratio is why the two are composed rather than chosen between: TP inside the node " +
-      "where the link is fast, PP across nodes where it is not. Page 17 puts them together."));
+      "where the link is fast, PP across nodes where it is not. Page 19 puts them together."));
 
     /* ---- and on real links ----------------------------------------- */
     const IC = PAR.interconnects;
@@ -1234,7 +1234,7 @@ table.data tr.hi { background: var(--surface-3); }
       "so its time adds directly to the step. PP's boundary send is small enough to finish " +
       "inside the slot, and while it is in flight the stage is already computing the next " +
       "micro-batch, so on a healthy pipeline it costs approximately nothing. That is why a slow " +
-      "link is survivable for PP and disqualifying for TP, and why page 17 does not pick one — " +
+      "link is survivable for PP and disqualifying for TP, and why page 19 does not pick one — " +
       "it maps TP onto the fast dimension and PP onto the slow one."));
   })();
 

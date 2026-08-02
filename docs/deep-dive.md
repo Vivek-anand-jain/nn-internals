@@ -14,11 +14,11 @@ Where the site shows something interactively, the page is named:
 `site/01-memory.html`, `site/02-forward.html`, `site/03-loss.html`,
 `site/04-backward.html`, `site/05-optimizer.html`, `site/06-loop.html`,
 `site/07-transformer-forward.html`, `site/08-transformer-backward.html`,
-`site/09-transformer-cost.html`, `site/10-scaling.html`,
-`site/11-collectives.html`, `site/12-data-parallel.html`,
-`site/13-zero-fsdp.html`, `site/14-tensor-parallel.html`,
-`site/15-pipeline-parallel.html`, `site/16-transformer-partitioned.html`,
-`site/17-3d-parallelism.html`. The two-layer transformer of pages 07, 08 and
+`site/09-transformer-cost.html`, `site/11-scaling.html`,
+`site/12-collectives.html`, `site/13-data-parallel.html`,
+`site/14-zero-fsdp.html`, `site/15-tensor-parallel.html`,
+`site/17-pipeline-parallel.html`, `site/18-transformer-partitioned.html`,
+`site/19-3d-parallelism.html`. The two-layer transformer of pages 07, 08 and
 16 has no section here yet; this document derives the 13-parameter MLP and
 the four-rank distributed toy only.
 
@@ -1482,7 +1482,7 @@ an H100. The model does not fit. Everything below is a different answer to the
 question *which of those tensors do I refuse to replicate, and what does the
 network cost me for refusing*.
 
-`site/11-collectives.html` animates each primitive on four ranks.
+`site/12-collectives.html` animates each primitive on four ranks.
 
 ### 9.0 Notation
 
@@ -1886,7 +1886,7 @@ four times the `α`. That is the entire tension in FSDP's wrapping policy.
 
 ## 10. Data parallelism
 
-`site/12-data-parallel.html` runs the four-rank version step by step.
+`site/13-data-parallel.html` runs the four-rank version step by step.
 
 ### 10.1 The statement
 
@@ -2170,7 +2170,7 @@ sections 11 to 13 all start from this observation.
 
 ## 11. ZeRO and FSDP
 
-`site/13-zero-fsdp.html` steps through the three stages on four ranks.
+`site/14-zero-fsdp.html` steps through the three stages on four ranks.
 
 DDP replicates three things it does not need to. ZeRO (Rajbhandari et al.,
 2020) removes them one at a time, in increasing order of how much
@@ -2493,7 +2493,7 @@ the API do not use the same words.
 
 ## 12. Tensor parallelism
 
-`site/14-tensor-parallel.html` splits the toy's hidden layer four ways and
+`site/15-tensor-parallel.html` splits the toy's hidden layer four ways and
 shows the partial sums arriving.
 
 ZeRO shards *storage* and reassembles the full tensor before every use.
@@ -2864,7 +2864,7 @@ where the model's own structure stops cooperating.
 
 ## 13. Pipeline parallelism
 
-`site/15-pipeline-parallel.html` animates the grid below filling and draining.
+`site/17-pipeline-parallel.html` animates the grid below filling and draining.
 
 Pipeline parallelism splits the model by *depth*. Stage `p` owns a contiguous
 run of layers, holds their weights, gradients and optimizer state, and holds
@@ -3146,7 +3146,7 @@ the payload drops by a further factor of `t` — 0.537 GB per rank per step at
 
 ## 14. Composing them
 
-`site/17-3d-parallelism.html` lets you factor a world size and see the
+`site/19-3d-parallelism.html` lets you factor a world size and see the
 resulting per-GPU budget.
 
 ### 14.1 The factorisation
@@ -3254,7 +3254,7 @@ H100 80GB      hbm_bytes 85,899,345,920  =  85.9 GB decimal  =  80 GiB
 Memory recipe from `T.memory.recipes`, row *"bf16 Adam, fp32 master, bf16
 grads"*: `weight 2 + gradient 2 + optimizer 12 = 16` bytes per parameter.
 
-**Step 0 — the problem.** (`site/10-scaling.html` runs this budget
+**Step 0 — the problem.** (`site/11-scaling.html` runs this budget
 interactively against any row of `T.memory.recipes` and any device in
 `T.reference_configs.gpus`.)
 
