@@ -242,7 +242,21 @@ def flash_attention():
                     "tile_max": tile_max,
                     "m_old": None if m_old == float("-inf") else m_old,
                     "m_new": m_new, "correction": corr,
+                    # `max_moved` is trivially true on the FIRST tile, where
+                    # m starts at -inf and nothing has been accumulated to
+                    # rescale. A page that flags every max_moved would cry
+                    # wolf on one tile per row, so the genuine mid-stream
+                    # rescales are marked separately.
                     "max_moved": m_new != m_old,
+                    "first_tile": m_old == float("-inf"),
+                    "real_rescale": m_old != float("-inf") and m_new != m_old,
+                    # the accumulator before this tile, and after the
+                    # rescale but before this tile's contribution -- so a
+                    # page can show all three states without replaying
+                    "acc_before": [acc[a][d] / corr if corr else 0.0
+                                   for d in range(D_HEAD)]
+                                  if corr else [0.0] * D_HEAD,
+                    "acc_rescaled": list(acc[a]),
                     "l_old": l_old, "l_rescaled": l_res,
                     "p_tile": p, "l_new": l_new,
                     "acc_after": list(acc[a]),

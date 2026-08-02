@@ -461,6 +461,41 @@
    *
    * Keyboard: left/right arrows, space to play/pause.
    */
+  /* --------------------------------------------------- stepper routing */
+  NN._steppers = [];
+  NN._stepperKeysInstalled = false;
+
+  /** The stepper whose control bar is closest to the viewport centre. */
+  NN._activeStepper = function () {
+    const mid = window.innerHeight / 2;
+    let best = null, bestD = Infinity;
+    NN._steppers.forEach(function (s) {
+      if (!s.bar || !s.bar.isConnected) return;
+      const r = s.bar.getBoundingClientRect();
+      // ignore bars scrolled far out of view entirely
+      if (r.bottom < -400 || r.top > window.innerHeight + 400) return;
+      const d = Math.abs((r.top + r.bottom) / 2 - mid);
+      if (d < bestD) { bestD = d; best = s; }
+    });
+    return best;
+  };
+
+  NN._installStepperKeys = function () {
+    if (NN._stepperKeysInstalled) return;
+    NN._stepperKeysInstalled = true;
+    document.addEventListener("keydown", function (e) {
+      if (/input|textarea|select/i.test(e.target.tagName)) return;
+      if (e.target.isContentEditable) return;
+      const s = NN._activeStepper();
+      if (!s) return;
+      if (e.key === "ArrowRight") { s.pause(); s.next(); }
+      else if (e.key === "ArrowLeft") { s.pause(); s.prev(); }
+      else if (e.key === " " && s._spaceToPlay !== false) {
+        e.preventDefault(); s.toggle();
+      }
+    }, true);
+  };
+
   NN.Stepper = function (o) {
     const self = this;
     this.i = 0;
@@ -484,6 +519,7 @@
     const bar = NN.el("div", { class: "controls" }, [prev, next, play, reset, dots, count]);
     if (o.mount) o.mount.appendChild(bar);
     this.bar = bar;
+    this._spaceToPlay = o.spaceToPlay;
 
     const caption = o.captionEl || null;
 
@@ -530,12 +566,14 @@
     play.addEventListener("click", function () { self.toggle(); });
     reset.addEventListener("click", function () { self.reset(); });
 
-    document.addEventListener("keydown", function (e) {
-      if (/input|textarea|select/i.test(e.target.tagName)) return;
-      if (e.key === "ArrowRight") { self.pause(); self.next(); }
-      else if (e.key === "ArrowLeft") { self.pause(); self.prev(); }
-      else if (e.key === " " && o.spaceToPlay !== false) { e.preventDefault(); self.toggle(); }
-    });
+    /* Keyboard routing.
+       Every Stepper used to attach its own document-level listener, so a
+       page with two steppers drove BOTH from one arrow press. Pages 10 and
+       16 each have several. Instead there is one shared listener, and the
+       key goes to whichever stepper's control bar is nearest the centre of
+       the viewport -- i.e. the one the reader is looking at. */
+    NN._steppers.push(self);
+    NN._installStepperKeys();
 
     this.render(0);
   };

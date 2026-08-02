@@ -3263,8 +3263,8 @@ S({
     "re-run the forward pass, and divide the change in loss by 2 epsilon. " +
     "That is the definition of a derivative, evaluated arithmetically. It " +
     "costs two forward passes per parameter — " + (2 * NPARAM) + " here, and " +
-    "of order 10^11 for a 70B model — which is why it is a correctness test " +
-    "and never a training method.",
+    bn(2 * CFG.params) + " for " + MODEL.name + " — which is why it is a " +
+    "correctness test and never a training method.",
   build: function () {
     return [
       kicker("Backward · <b>verification</b>"),
