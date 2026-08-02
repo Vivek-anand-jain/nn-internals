@@ -352,6 +352,15 @@
   }
   function dot(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; }
 
+  /* The reference context length, taken from the site's default model rather
+     than typed, and the row of flash.py's memory table that matches it. */
+  const REF_MODEL = T.reference_configs.models.filter(function (m) {
+    return m.name === T.reference_configs.default_model;
+  })[0] || T.reference_configs.models[T.reference_configs.models.length - 1];
+  const REF_SEQ = REF_MODEL.seq;
+  const REF_ROW = F.memory.table.filter(function (r) { return r.seq === REF_SEQ; })[0]
+    || F.memory.table[F.memory.table.length - 1];
+
   /* A labelled matrix with row and column headers. Values may contain null,
      which renders as a hatched + glyphed "masked" cell (never colour alone). */
   function mat(o) {
@@ -650,7 +659,7 @@
       code(F.memory.formula_standard) + ". Only the " + code("seq²") +
       " factor grows faster than the machine does."));
 
-    const big = F.memory.table.filter(function (r) { return r.seq === 8192; })[0];
+    const big = REF_ROW;
     const tbl = el("table", { class: "data" }, [
       el("thead", {}, el("tr", {}, [
         el("th", {}, "seq"),
@@ -659,7 +668,7 @@
         el("th", {}, "ratio")
       ])),
       el("tbody", {}, F.memory.table.map(function (r) {
-        const hi = r.seq === 8192;
+        const hi = r.seq === REF_SEQ;
         return el("tr", {}, [
           el("td", { class: hi ? "hi" : null }, String(r.seq)),
           el("td", { class: "n" + (hi ? " hi" : "") },
@@ -673,8 +682,8 @@
     out.appendChild(tbl);
 
     out.appendChild(small(
-      "The highlighted row is Llama 3's training context. At " +
-      code("seq 8192") + " the probability matrix is " +
+      "The highlighted row is the training context of " + REF_MODEL.name + ". At " +
+      code("seq " + REF_SEQ) + " the probability matrix is " +
       num(big.standard_elements_per_head, 0) + " elements " +
       "(" + NN.count(big.standard_elements_per_head) + ") <em>per head, per " +
       "layer, per sequence in the batch</em>. §7 lets you drag those " +
@@ -1385,9 +1394,8 @@
       code("seq") + ". The " + num(STD_ELEMS, 0) + " is " + code("seq²") +
       " and grows with the square of it. At this toy size the ratio is " +
       num(STD_ELEMS / TILE_ELEMS, 1) + "× and looks unimpressive; at " +
-      code("seq 8192") + " the standard side is " +
-      NN.count(F.memory.table.filter(function (r) { return r.seq === 8192; })[0]
-               .standard_elements_per_head) +
+      code("seq " + REF_SEQ) + " the standard side is " +
+      NN.count(REF_ROW.standard_elements_per_head) +
       " elements and the tile is still " + num(TILE_ELEMS, 0) + "."));
   })();
 
@@ -1435,7 +1443,8 @@
 
     out.appendChild(NN.formula({
       rule: "max<sub>i,d</sub> |O<sup>standard</sup><sub>i,d</sub> − O<sup>flash</sup><sub>i,d</sub>|",
-      sub: "for reference, the double-precision epsilon near 1.0 is about 2.2e-16",
+      sub: "for reference, the double-precision epsilon near 1.0 is " +
+           Number.EPSILON.toExponential(3),
       result: sci(F.equivalence.output_max_abs_err), cls: "activation"
     }));
 
@@ -1800,7 +1809,7 @@
       " statistics — all linear in " + code("seq") + "."));
 
     const HBM_PASSES = 6;
-    const seqRow = F.memory.table.filter(function (r) { return r.seq === 8192; })[0];
+    const seqRow = REF_ROW;
     const bytesNow = T.memory.dtype_bytes.bf16;
     const stdTraffic = HBM_PASSES * seqRow.standard_elements_per_head * bytesNow;
     const flTraffic = seqRow.flash_elements_per_head * bytesNow;

@@ -1011,8 +1011,12 @@ const SECTIONS = [
   { id: "backward", part: 1, title: "Backward", cls: "gradient",
     q: "Where does a gradient come from, and what does computing one force you to remember?",
     toy: TOY_MLP,
-    say: "The backward pass, and the argument the whole deck rests on. Ask the " +
-      "room to watch the READS line on every step: some steps need only the " +
+    say: "The backward pass, and the argument the whole deck rests on. The run " +
+      "opens by deriving the chain rule rather than invoking it — the path " +
+      "from one weight to the loss, a nudge pushed along it, and the five " +
+      "local derivatives worked out one at a time from the equations the " +
+      "forward pass already wrote down. Only then do we walk the eight steps. " +
+      "Ask the room to watch the READS line on every step: some need only the " +
       "gradient flowing in from the right, and some have to re-read a tensor " +
       "the forward pass produced. The second kind is the entire reason " +
       "activation memory exists. Pause and let people predict which steps " +
@@ -2003,12 +2007,13 @@ function gradNet(o) {
     hidC.push(c);
     txt(p.x, p.y - 3, "a1[" + i + "]", "nname");
     txt(p.x, p.y + 11, f(FWD.a1[i], 2), "nval");
-    txt(p.x - GN.rH - 6, p.y - GN.rH - 4, "z1 " + f(FWD.z1[i], 2), "cap", "start");
+    txt(p.x - 4, p.y - GN.rH - 5, "z1 " + f(FWD.z1[i], 2), "cap", "end");
     hidDa.push(txt(p.x, p.y + GN.rH + 13, "dL/da1 " + fS(BWD.dL_da1[i], 3), "gval"));
     hidDz.push(txt(p.x, p.y + GN.rH + 25, "dL/dz1 " + fS(BWD.dL_dz1[i], 3), "gval"));
     /* the ReLU mask, as a badge you can point at — it is a saved tensor.
-       It sits to the LEFT of the unit, clear of the W2 wire labels. */
-    const bx = p.x - GN.rH - 44, by = p.y - 9;
+       It sits just above the unit, beside its pre-activation and clear of
+       both the W1 and the W2 wire labels. */
+    const bx = p.x + 6, by = p.y - GN.rH - 18;
     const r = SV("rect", { x: bx, y: by, width: 36, height: 18, rx: 5,
       fill: "var(--surface-2)",
       stroke: dead ? "var(--critical)" : "var(--activation)" });
@@ -2040,15 +2045,18 @@ function gradNet(o) {
     txt(lx, ly - 6, "w " + f(T.init.W2[0][i], 2), "wlab");
     return txt(lx, ly + 7, "∇ " + fS(BWD.dL_dW2[0][i], 2), "gval");
   });
+  /* Six W1 wires converge on three nodes, so only the step that actually
+     produces dL/dW1 labels them, and then only with the gradient — the two
+     input columns are staggered along the wire so the labels do not touch. */
   const w1g = [];
   for (let i = 0; i < NHID; i++) {
     w1g.push([]);
     for (let j = 0; j < NINP; j++) {
       const e = w1e[i][j];
-      const t = j === 0 ? 0.34 : 0.62;
+      const t = j === 0 ? 0.28 : 0.72;
       const px = e.p1.x + (e.p2.x - e.p1.x) * t, py = e.p1.y + (e.p2.y - e.p1.y) * t;
-      if (o.w1labels) txt(px, py - 5, "w " + f(T.init.W1[i][j], 2), "wlab");
-      w1g[i].push(o.w1labels ? txt(px, py + 8, "∇ " + fS(BWD.dL_dW1[i][j], 2), "gval") : null);
+      w1g[i].push(o.w1labels
+        ? txt(px, py - 4, "∇ " + fS(BWD.dL_dW1[i][j], 2), "gval") : null);
     }
   }
 
