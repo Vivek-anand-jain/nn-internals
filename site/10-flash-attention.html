@@ -1,0 +1,2136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 10 FlashAttention</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+  /* Page-local layout only. No new tensor hues, no raw hex.
+     Everything colour-bearing reuses --activation (the class of every tensor
+     on this page that is an activation), --gradient (backward), --accent
+     (non-tensor chrome) and --critical / --warning (status, never a class). */
+
+  section.block { scroll-margin-top: 74px; }
+
+  /* ------------------------------------------------------------ matrices */
+  .matwrap { display: inline-block; vertical-align: top; margin: 0 18px 16px 0; }
+  .matname {
+    font-family: var(--mono); font-size: .8rem; margin-bottom: 5px;
+    display: flex; align-items: baseline; gap: 8px;
+  }
+  .matname b { font-weight: 700; }
+  .matname .sh { color: var(--ink-muted); font-size: .74rem; font-weight: 400; }
+  .matgrid { display: grid; gap: 2px; }
+  .mc {
+    font-family: var(--mono); font-size: .74rem; text-align: right;
+    font-variant-numeric: tabular-nums; padding: 5px 7px; border-radius: 3px;
+    background: var(--surface-3); color: var(--ink);
+    border: 1px solid transparent; white-space: nowrap;
+  }
+  .mc.hdr {
+    background: transparent; color: var(--ink-muted); font-size: .66rem;
+    text-align: center; padding: 3px 5px;
+  }
+  .mc.rowhdr { text-align: left; }
+  .mc.is-activation { background: var(--activation-w); color: var(--activation); }
+  .mc.is-gradient   { background: var(--gradient-w);   color: var(--gradient); }
+  .mc.is-weight     { background: var(--weight-w);     color: var(--weight); }
+  .mc.zero { opacity: .42; }
+
+  /* masked / skipped: HATCH plus a glyph, never colour alone */
+  .hatch {
+    background-image: repeating-linear-gradient(45deg,
+      var(--surface-3), var(--surface-3) 3px,
+      var(--surface-1) 3px, var(--surface-1) 7px);
+    background-color: var(--surface-2);
+    color: var(--ink-muted);
+  }
+
+  /* ------------------------------------------------------------- heatmap */
+  .hm { display: grid; gap: 2px; }
+  .hmc {
+    width: 100%; min-width: 44px; height: 34px; border-radius: 3px;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-size: .66rem; font-variant-numeric: tabular-nums;
+    color: var(--ink); cursor: default;
+    border: 1px solid var(--hairline-2);
+    transition: outline-color .15s, transform .15s;
+    outline: 2px solid transparent;
+  }
+  .hmc:hover { outline-color: var(--ink); transform: scale(1.06); z-index: 3; }
+  .hmc.hdr {
+    height: 20px; background: transparent; border: none;
+    color: var(--ink-muted); font-size: .62rem;
+  }
+  .rampbar {
+    height: 12px; border-radius: 3px; border: 1px solid var(--hairline);
+    flex: 1; min-width: 120px;
+  }
+  .ramplegend {
+    display: flex; align-items: center; gap: 10px; margin: 10px 0 0;
+    font-family: var(--mono); font-size: .72rem; color: var(--ink-muted);
+    max-width: 480px;
+  }
+
+  /* --------------------------------------------------------- ghost grid */
+  .ghostwrap { display: grid; gap: 2px; }
+  .gc {
+    width: 100%; min-width: 40px; height: 34px; border-radius: 3px;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-size: .63rem; font-variant-numeric: tabular-nums;
+    border: 1px dashed var(--hairline);
+    background: transparent; color: transparent;
+    transition: background .35s, color .35s, border-color .35s, transform .35s, opacity .35s;
+  }
+  .gc.hdr {
+    height: 18px; border: none; color: var(--ink-muted); font-size: .6rem;
+    background: transparent;
+  }
+  .gc.outside { opacity: .3; }
+  .gc.done {
+    border-style: solid; border-color: var(--hairline-2);
+    color: var(--ink-muted); opacity: .55;
+  }
+  .gc.live {
+    border-style: solid; border-color: var(--activation);
+    background: var(--activation-w); color: var(--activation);
+    font-weight: 700; transform: scale(1.04);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--activation) 26%, transparent);
+  }
+  .gc.livemask {
+    border-style: solid; border-color: var(--hairline);
+    color: var(--ink-muted);
+  }
+  .gc.skip { border-style: solid; border-color: var(--hairline-2); color: var(--ink-muted); }
+
+  .gridkey { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0 0; }
+  .gridkey span {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: var(--mono); font-size: .72rem; color: var(--ink-2);
+  }
+  .gridkey i {
+    width: 20px; height: 14px; border-radius: 3px; display: inline-block;
+    border: 1px dashed var(--hairline);
+  }
+  .gridkey i.k-live { border: 1px solid var(--activation); background: var(--activation-w); }
+  .gridkey i.k-done { border: 1px solid var(--hairline-2); opacity: .55; }
+
+  /* ------------------------------------------------------------- panels */
+  .panel {
+    background: var(--surface-2); border: 1px solid var(--hairline);
+    border-radius: 8px; padding: 12px 14px; margin: 10px 0;
+  }
+  .panel.lit { border-color: var(--warning); box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning) 20%, transparent); }
+  .panel .ph {
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    font-family: var(--mono); font-size: .8rem; font-weight: 700;
+    margin-bottom: 7px;
+  }
+  .kv {
+    display: grid; grid-template-columns: 130px 1fr; gap: 2px 10px;
+    font-family: var(--mono); font-size: .76rem;
+  }
+  .kv .k { color: var(--ink-muted); }
+  .kv .v { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  .badge {
+    font-family: var(--mono); font-size: .64rem; font-weight: 700;
+    letter-spacing: .08em; text-transform: uppercase;
+    padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor;
+    white-space: nowrap;
+  }
+  .badge.moved  { color: var(--warning);  background: color-mix(in srgb, var(--warning) 14%, transparent); }
+  .badge.still  { color: var(--ink-muted); }
+  .badge.masked { color: var(--accent); }
+  .badge.skip   { color: var(--critical); background: color-mix(in srgb, var(--critical) 12%, transparent); }
+  .badge.ok     { color: var(--good);    background: color-mix(in srgb, var(--good) 14%, transparent); }
+
+  @keyframes nnpulse {
+    0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--warning) 55%, transparent); }
+    100% { box-shadow: 0 0 0 12px color-mix(in srgb, var(--warning) 0%, transparent); }
+  }
+  .pulse { animation: nnpulse .85s ease-out 1; }
+
+  /* --------------------------------------------------------- the l bar */
+  .lbar {
+    position: relative; height: 26px; border-radius: 5px;
+    background: var(--surface-3); border: 1px solid var(--hairline);
+    overflow: hidden; margin: 4px 0;
+  }
+  .lbar > i {
+    display: block; height: 100%; width: 0;
+    background: color-mix(in srgb, var(--activation) 62%, transparent);
+    transition: width .62s cubic-bezier(.4,0,.2,1);
+  }
+  .lbar > u {
+    position: absolute; inset: 0; display: flex; align-items: center;
+    padding-left: 8px; font-family: var(--mono); font-size: .74rem;
+    text-decoration: none; color: var(--ink); font-variant-numeric: tabular-nums;
+  }
+  .lbar.rescaling { border-color: var(--warning); }
+  .lrow { display: grid; grid-template-columns: 118px 1fr; gap: 10px; align-items: center; margin: 6px 0; }
+  .lrow > span:first-child { font-family: var(--mono); font-size: .74rem; color: var(--ink-muted); }
+
+  /* ------------------------------------------------------------- xs cells */
+  .xsrow { display: flex; gap: 5px; flex-wrap: wrap; align-items: stretch; }
+  .xsblock {
+    display: flex; gap: 3px; padding: 5px; border-radius: 7px;
+    border: 1px dashed var(--hairline); transition: border-color .3s, background .3s, opacity .3s;
+  }
+  .xsblock.seen { border-style: solid; }
+  .xsblock.now  { border-color: var(--activation); background: var(--activation-w); }
+  .xsblock.future { opacity: .38; }
+  .xsc {
+    min-width: 46px; padding: 8px 10px; border-radius: 4px; text-align: center;
+    font-family: var(--mono); font-size: .86rem; background: var(--surface-3);
+    color: var(--ink); font-variant-numeric: tabular-nums;
+  }
+  .xsc.ismax { background: var(--activation-w); color: var(--activation); font-weight: 700; }
+  .xslabel { font-family: var(--mono); font-size: .64rem; color: var(--ink-muted); text-align: center; }
+
+  /* the star */
+  .star {
+    text-align: center; padding: 16px 12px; border-radius: 9px;
+    background: var(--surface-2); border: 1px solid var(--hairline);
+    border-left: 3px solid var(--warning); margin: 14px 0;
+  }
+  .star .lbl {
+    font-family: var(--mono); font-size: .7rem; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--warning); margin-bottom: 4px;
+  }
+  .star .big {
+    font-family: var(--mono); font-size: 2.1rem; font-weight: 700;
+    line-height: 1.1; font-variant-numeric: tabular-nums;
+  }
+  .star .sub { font-family: var(--mono); font-size: .78rem; color: var(--ink-muted); margin-top: 4px; }
+
+  /* ------------------------------------------------------------- sliders */
+  .sliders { display: grid; gap: 10px; margin: 14px 0; }
+  .sliderrow { display: grid; grid-template-columns: 180px 1fr 190px; gap: 12px; align-items: center; }
+  .sliderrow label { font-family: var(--mono); font-size: .8rem; color: var(--ink-2); }
+  .sliderrow output {
+    font-family: var(--mono); font-size: .82rem; text-align: right;
+    font-variant-numeric: tabular-nums; color: var(--ink);
+  }
+  .segbtns { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+  .segbtn {
+    background: var(--surface-2); color: var(--ink-2);
+    border: 1px solid var(--hairline); border-radius: 7px;
+    padding: 5px 12px; font-size: .8rem; font-family: var(--mono); cursor: pointer;
+  }
+  .segbtn[aria-pressed="true"] {
+    background: var(--surface-3); color: var(--ink);
+    border-color: var(--accent); font-weight: 700;
+  }
+  @media (max-width: 760px) { .sliderrow { grid-template-columns: 1fr; } }
+
+  /* -------------------------------------------------------------- layout */
+  .split { display: grid; grid-template-columns: minmax(0, 420px) minmax(0, 1fr); gap: 22px; align-items: start; }
+  .stickycol { position: sticky; top: 74px; }
+  @media (max-width: 1000px) { .stickycol { position: static; } }
+  .split3 { display: grid; grid-template-columns: minmax(0,1fr) auto minmax(0,1fr); gap: 16px; align-items: center; }
+  @media (max-width: 1000px) { .split { grid-template-columns: 1fr; } .split3 { grid-template-columns: 1fr; } }
+
+  .verdict {
+    display: flex; align-items: center; gap: 11px; padding: 11px 15px;
+    border-radius: 8px; margin: 12px 0; font-family: var(--mono); font-size: .85rem;
+    background: var(--surface-2); border: 1px solid var(--hairline);
+    border-left: 3px solid var(--good);
+  }
+  .verdict .tick { color: var(--good); font-size: 1.15rem; font-weight: 700; }
+  .verdict.bad { border-left-color: var(--critical); }
+  .verdict.bad .tick { color: var(--critical); }
+
+  .meter {
+    display: flex; height: 20px; border-radius: 5px; overflow: hidden;
+    border: 1px solid var(--hairline); background: var(--surface-3);
+  }
+  .meter > i {
+    display: block; height: 100%; transition: width .5s cubic-bezier(.4,0,.2,1);
+  }
+  .meter > i.live { background: var(--activation); }
+  .meter > i.std  { background: var(--accent); }
+
+  table.data td.hi, table.data th.hi { background: color-mix(in srgb, var(--warning) 13%, transparent); }
+</style>
+</head>
+<body>
+
+<noscript>
+  <div class="wrap" style="padding-top:24px">
+    <div class="callout warn"><div class="t">JavaScript required</div>
+    Every number on this page is rendered from the generated traces
+    <code>assets/data/flash.js</code>, <code>assets/data/trace.js</code> and
+    <code>assets/data/tf2.js</code>. With JS disabled there is nothing to read.</div>
+  </div>
+</noscript>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 10</div>
+    <h1>FlashAttention</h1>
+    <p class="lede" id="lede"></p>
+  </div>
+
+  <section class="block" id="problem"></section>
+  <section class="block" id="online"></section>
+  <section class="block" id="tiled"></section>
+  <section class="block" id="proof"></section>
+  <section class="block" id="backward"></section>
+  <section class="block" id="faster"></section>
+  <section class="block" id="calc"></section>
+  <section class="block" id="next"></section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/tf2.js"></script>
+<script src="../assets/data/flash.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T  = NN.T;              /* the 13-parameter MLP trace (pages 01-06)  */
+  const F2 = window.TF2;        /* the two-block transformer (pages 07, 08)  */
+  const F  = window.FLASH;      /* code/flash_attention.py                   */
+
+  if (!F) {
+    document.body.insertBefore(
+      NN.el("div", { class: "wrap" }, [
+        NN.callout("warn", "flash.js did not load",
+          "Run <code>python3 code/flash_attention.py</code> to regenerate " +
+          "<code>assets/data/flash.js</code>.")
+      ]), document.body.firstChild);
+    return;
+  }
+
+  /* ===================================================================== */
+  /*  helpers                                                              */
+  /* ===================================================================== */
+  const el = NN.el, f = NN.fmt;
+
+  const M     = F.meta;
+  const SEQ   = M.seq, DH = M.d_head, BR = M.Br, BC = M.Bc;
+  const SCALE = M.scale;
+  const CAUSAL = M.causal;
+  const NQB = M.n_q_blocks, NKB = M.n_k_blocks;
+  const Q = F.input.Q, K = F.input.K, V = F.input.V, dOut = F.input.dO;
+
+  function h2(t) { return el("h2", {}, t); }
+  function h3(t) { return el("h3", {}, t); }
+  function p(html) { return el("p", { html: html }); }
+  function small(html) { return el("p", { class: "small muted", html: html }); }
+  function code(x) { return "<code>" + x + "</code>"; }
+  function num(x, d, cls) {
+    return '<span class="num' + (cls ? " v-" + cls : "") + '">' + f(x, d) + "</span>";
+  }
+  function sci(x) {
+    if (x === 0) return "0";
+    return Number(x).toExponential(3);
+  }
+  function verdict(pass, text, detail) {
+    return el("div", { class: "verdict" + (pass ? "" : " bad") }, [
+      el("span", { class: "tick" }, pass ? "✓" : "✗"),
+      el("span", { html: text + (detail ? ' <span class="muted">' + detail + "</span>" : "") })
+    ]);
+  }
+  function maxAbsDiff(A, B) {
+    let w = 0;
+    for (let i = 0; i < A.length; i++)
+      for (let j = 0; j < A[i].length; j++)
+        w = Math.max(w, Math.abs(A[i][j] - B[i][j]));
+    return w;
+  }
+  function zeros(m, n) {
+    const o = []; for (let i = 0; i < m; i++) o.push(new Array(n).fill(0)); return o;
+  }
+  function dot(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; }
+
+  /* A labelled matrix with row and column headers. Values may contain null,
+     which renders as a hatched + glyphed "masked" cell (never colour alone). */
+  function mat(o) {
+    const vals = o.values, nr = vals.length, nc = vals[0].length;
+    const rl = o.rowLabels, cl = o.colLabels;
+    const g = el("div", {
+      class: "matgrid",
+      style: { gridTemplateColumns: (rl ? "auto " : "") + "repeat(" + nc + ", auto)" }
+    });
+    if (cl) {
+      if (rl) g.appendChild(el("div", { class: "mc hdr" }, ""));
+      cl.forEach(function (c) { g.appendChild(el("div", { class: "mc hdr" }, c)); });
+    }
+    const cells = [];
+    for (let i = 0; i < nr; i++) {
+      if (rl) g.appendChild(el("div", { class: "mc hdr rowhdr" }, rl[i]));
+      cells.push([]);
+      for (let j = 0; j < nc; j++) {
+        const v = vals[i][j];
+        let c;
+        if (v === null || v === undefined) {
+          c = el("div", {
+            class: "mc hatch",
+            title: (o.name || "") + "[" + i + "][" + j + "] — masked (future token)"
+          }, "✕ mask");
+        } else {
+          c = el("div", {
+            class: "mc" + (o.cls ? " is-" + o.cls : "") + (v === 0 ? " zero" : ""),
+            title: (o.name || "") + "[" + i + "][" + j + "] = " + v
+          }, o.signed ? NN.fmtSigned(v, o.digits) : f(v, o.digits));
+        }
+        g.appendChild(c); cells[i].push(c);
+      }
+    }
+    const root = el("div", { class: "matwrap" }, [
+      el("div", { class: "matname" }, [
+        el("b", { class: o.cls ? "v-" + o.cls : "", html: o.name || "" }),
+        el("span", { class: "sh" }, "(" + nr + "×" + nc + ")" + (o.note ? "  " + o.note : ""))
+      ]),
+      g
+    ]);
+    root.cells = cells;
+    return root;
+  }
+
+  /* Sequential single-hue ramp. NOT rainbow: one hue, monotone lightness.
+     The hue is --activation because every matrix on this page that gets a
+     ramp is an activation. */
+  function ramp(t) {
+    const pct = (5 + 66 * NN.clamp(t, 0, 1)).toFixed(1);
+    return "color-mix(in srgb, var(--activation) " + pct + "%, var(--surface-2))";
+  }
+  function rampCss() {
+    const stops = [];
+    for (let k = 0; k <= 8; k++) stops.push(ramp(k / 8) + " " + (k / 8 * 100).toFixed(0) + "%");
+    return "linear-gradient(90deg," + stops.join(",") + ")";
+  }
+
+  /* ----------------------------------------------------------------------
+     Multiple NN.Steppers on one page each attach a document-level keydown
+     listener, so arrow keys would drive all of them at once. Intercept in
+     the CAPTURE phase (which runs before those bubble-phase listeners) and
+     route the key to whichever stepper's section is nearest the middle of
+     the viewport.
+     ------------------------------------------------------------------- */
+  const STEPPERS = [];
+  document.addEventListener("keydown", function (e) {
+    if (/input|textarea|select/i.test(e.target.tagName)) return;
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight" && e.key !== " ") return;
+    if (!STEPPERS.length) return;
+    e.stopImmediatePropagation();
+    if (e.key === " ") e.preventDefault();
+    const mid = window.innerHeight / 2;
+    let best = null, bd = Infinity;
+    STEPPERS.forEach(function (s) {
+      const r = s.section.getBoundingClientRect();
+      if (r.bottom < 0 || r.top > window.innerHeight) return;
+      const d = Math.abs((r.top + r.bottom) / 2 - mid);
+      if (d < bd) { bd = d; best = s; }
+    });
+    if (!best) return;
+    if (e.key === "ArrowRight") { best.stepper.pause(); best.stepper.next(); }
+    else if (e.key === "ArrowLeft") { best.stepper.pause(); best.stepper.prev(); }
+    else { best.stepper.toggle(); }
+  }, true);
+
+  /* ===================================================================== */
+  /*  INDEPENDENT RE-IMPLEMENTATION                                        */
+  /*  Written against nothing but F.input, so that the page can check the  */
+  /*  Python rather than quote it.                                         */
+  /* ===================================================================== */
+
+  function jsStandardAttention() {
+    const S = zeros(SEQ, SEQ);
+    for (let i = 0; i < SEQ; i++)
+      for (let j = 0; j < SEQ; j++)
+        S[i][j] = (CAUSAL && j > i) ? -Infinity : dot(Q[i], K[j]) * SCALE;
+
+    const P = zeros(SEQ, SEQ), lse = new Array(SEQ).fill(0);
+    for (let i = 0; i < SEQ; i++) {
+      let m = -Infinity;
+      for (let j = 0; j < SEQ; j++) if (S[i][j] > m) m = S[i][j];
+      let l = 0;
+      const e = [];
+      for (let j = 0; j < SEQ; j++) {
+        const v = S[i][j] === -Infinity ? 0 : Math.exp(S[i][j] - m);
+        e.push(v); l += v;
+      }
+      for (let j = 0; j < SEQ; j++) P[i][j] = e[j] / l;
+      lse[i] = m + Math.log(l);
+    }
+    const O = zeros(SEQ, DH);
+    for (let i = 0; i < SEQ; i++)
+      for (let d = 0; d < DH; d++) {
+        let s = 0;
+        for (let j = 0; j < SEQ; j++) s += P[i][j] * V[j][d];
+        O[i][d] = s;
+      }
+    return { S: S, P: P, O: O, lse: lse };
+  }
+
+  /* The tiled version, with the running rescale. Never allocates seq x seq. */
+  function jsFlashAttention() {
+    const O = zeros(SEQ, DH), lse = new Array(SEQ).fill(0);
+    let peakTile = 0;
+    for (let q0 = 0; q0 < SEQ; q0 += BR) {
+      const rows = [];
+      for (let i = q0; i < Math.min(q0 + BR, SEQ); i++) rows.push(i);
+      const m = new Array(rows.length).fill(-Infinity);
+      const l = new Array(rows.length).fill(0);
+      const acc = zeros(rows.length, DH);
+
+      for (let k0 = 0; k0 < SEQ; k0 += BC) {
+        const cols = [];
+        for (let j = k0; j < Math.min(k0 + BC, SEQ); j++) cols.push(j);
+        if (CAUSAL && k0 > rows[rows.length - 1]) continue;   /* skipped tile */
+
+        /* the only seq-independent allocation in the whole loop */
+        const tile = zeros(rows.length, cols.length);
+        peakTile = Math.max(peakTile, rows.length * cols.length);
+        for (let a = 0; a < rows.length; a++)
+          for (let b = 0; b < cols.length; b++)
+            tile[a][b] = (CAUSAL && cols[b] > rows[a])
+              ? -Infinity : dot(Q[rows[a]], K[cols[b]]) * SCALE;
+
+        for (let a = 0; a < rows.length; a++) {
+          let tmax = -Infinity;
+          for (let b = 0; b < cols.length; b++) if (tile[a][b] > tmax) tmax = tile[a][b];
+          if (tmax === -Infinity) continue;               /* whole row masked */
+          const mOld = m[a], mNew = Math.max(mOld, tmax);
+          const corr = mOld === -Infinity ? 0 : Math.exp(mOld - mNew);
+          l[a] = l[a] * corr;
+          for (let d = 0; d < DH; d++) acc[a][d] *= corr;
+          for (let b = 0; b < cols.length; b++) {
+            const pv = tile[a][b] === -Infinity ? 0 : Math.exp(tile[a][b] - mNew);
+            l[a] += pv;
+            for (let d = 0; d < DH; d++) acc[a][d] += pv * V[cols[b]][d];
+          }
+          m[a] = mNew;
+        }
+      }
+      for (let a = 0; a < rows.length; a++) {
+        for (let d = 0; d < DH; d++) O[rows[a]][d] = acc[a][d] / l[a];
+        lse[rows[a]] = m[a] + Math.log(l[a]);
+      }
+    }
+    return { O: O, lse: lse, peakTile: peakTile };
+  }
+
+  const JS_STD   = jsStandardAttention();
+  const JS_FLASH = jsFlashAttention();
+
+  /* ===================================================================== */
+  /*  1 · THE PROBLEM, RESTATED CONCRETELY                                 */
+  /* ===================================================================== */
+  (function () {
+    const out = NN.$("#problem");
+    out.appendChild(h2("1 · The tensor that is too big"));
+
+    out.appendChild(p(
+      "Page 09 counted a transformer's activation memory and found one term " +
+      "that behaves differently from all the others: the attention " +
+      "probabilities. Every other activation is linear in sequence length. " +
+      "That one is quadratic — " + code(F.memory.formula_standard) +
+      " — because attention compares every query against every key, and " +
+      "the standard implementation writes the whole comparison down."));
+
+    out.appendChild(p(
+      "Here is that tensor, for one head, at " + code("seq " + SEQ) + " with " +
+      code("d_head " + DH) + " and causal masking. " + SEQ + "×" + SEQ +
+      " = " + num(F.standard.stored_elements, 0) + " numbers. Hover any cell."));
+
+    out.appendChild(NN.tiles([
+      { k: "sequence", v: String(SEQ), s: "queries and keys", cls: "activation" },
+      { k: "d_head", v: String(DH), s: "channels per head" },
+      { k: "P elements", v: NN.count(F.standard.stored_elements),
+        s: SEQ + " × " + SEQ + ", materialised", cls: "activation" },
+      { k: "tile", v: BR + "×" + BC,
+        s: NQB + " query blocks × " + NKB + " key blocks" },
+      { k: "causal", v: CAUSAL ? "yes" : "no", s: "keys after a query are masked" }
+    ]));
+
+    /* --------------------------------------------------------- heatmap */
+    const modes = [
+      { id: "P", label: "P = softmax(S)  — probabilities", digits: 4,
+        get: function (i, j) { return F.standard.S[i][j] === null ? null : F.standard.P[i][j]; } },
+      { id: "S", label: "S = QKᵀ/√d  — raw scores", digits: 3,
+        get: function (i, j) { return F.standard.S[i][j]; } }
+    ];
+    let mode = 0;
+
+    const segs = el("div", { class: "segbtns" });
+    const hmHost = el("div", { class: "scrollx" });
+    const rampNote = el("div", { class: "ramplegend" });
+
+    function drawHeatmap() {
+      const md = modes[mode];
+      hmHost.innerHTML = "";
+      let lo = Infinity, hi = -Infinity;
+      for (let i = 0; i < SEQ; i++) for (let j = 0; j < SEQ; j++) {
+        const v = md.get(i, j);
+        if (v === null) continue;
+        lo = Math.min(lo, v); hi = Math.max(hi, v);
+      }
+      const g = el("div", {
+        class: "hm",
+        style: { gridTemplateColumns: "auto repeat(" + SEQ + ", minmax(44px, 1fr))",
+                 maxWidth: "620px" }
+      });
+      g.appendChild(el("div", { class: "hmc hdr" }, ""));
+      for (let j = 0; j < SEQ; j++) g.appendChild(el("div", { class: "hmc hdr" }, "k" + j));
+      for (let i = 0; i < SEQ; i++) {
+        g.appendChild(el("div", { class: "hmc hdr" }, "q" + i));
+        for (let j = 0; j < SEQ; j++) {
+          const v = md.get(i, j);
+          if (v === null) {
+            g.appendChild(el("div", {
+              class: "hmc hatch",
+              title: "q" + i + " × k" + j + " — masked: key " + j +
+                     " is in the future of query " + i,
+              onmouseenter: function (e) {
+                NN.tip.show("<b>q" + i + " × k" + j + "</b><br>" +
+                  "<span class='muted'>masked — future token</span>", e.clientX, e.clientY);
+              },
+              onmouseleave: function () { NN.tip.hide(); }
+            }, "✕"));
+            continue;
+          }
+          const t = hi === lo ? 1 : (v - lo) / (hi - lo);
+          g.appendChild(el("div", {
+            class: "hmc",
+            style: { background: ramp(t) },
+            title: md.id + "[" + i + "][" + j + "] = " + v,
+            onmouseenter: function (e) {
+              NN.tip.show("<b>" + md.id + "[q" + i + "][k" + j + "]</b> = " +
+                f(v, 6) + "<br><span class='muted'>row " + i + " of " + SEQ + "</span>",
+                e.clientX, e.clientY);
+            },
+            onmouseleave: function () { NN.tip.hide(); }
+          }, f(v, md.digits === 4 ? 2 : 2)));
+        }
+      }
+      hmHost.appendChild(g);
+      rampNote.innerHTML = "";
+      rampNote.appendChild(el("span", {}, f(lo, 3)));
+      rampNote.appendChild(el("div", { class: "rampbar", style: { background: rampCss() } }));
+      rampNote.appendChild(el("span", {}, f(hi, 3)));
+      rampNote.appendChild(el("span", { class: "badge masked" }, "✕ = masked"));
+    }
+
+    modes.forEach(function (md, k) {
+      const b = el("button", { class: "segbtn", "aria-pressed": k === 0 ? "true" : "false" }, md.label);
+      b.addEventListener("click", function () {
+        mode = k;
+        NN.$$(".segbtn", segs).forEach(function (x, q) {
+          x.setAttribute("aria-pressed", q === k ? "true" : "false");
+        });
+        drawHeatmap();
+      });
+      segs.appendChild(b);
+    });
+    out.appendChild(segs);
+    out.appendChild(hmHost);
+    out.appendChild(rampNote);
+    drawHeatmap();
+    out.appendChild(small(
+      "One hue, monotone lightness — a sequential ramp, not a rainbow, " +
+      "because the quantity is ordered and unsigned. Masked cells are hatched " +
+      "and glyphed, not merely a different colour."));
+
+    /* ------------------------------------------------------ at real scale */
+    out.appendChild(h3("At real scale that table stops being a table"));
+    out.appendChild(p(
+      "The " + num(F.standard.stored_elements, 0) + " numbers above are one " +
+      "head, one layer, one sequence in the batch. The real count is " +
+      code(F.memory.formula_standard) + ". Only the " + code("seq²") +
+      " factor grows faster than the machine does."));
+
+    const big = F.memory.table.filter(function (r) { return r.seq === 8192; })[0];
+    const tbl = el("table", { class: "data" }, [
+      el("thead", {}, el("tr", {}, [
+        el("th", {}, "seq"),
+        el("th", {}, "standard: seq² per head"),
+        el("th", {}, "flash: 2·seq per head"),
+        el("th", {}, "ratio")
+      ])),
+      el("tbody", {}, F.memory.table.map(function (r) {
+        const hi = r.seq === 8192;
+        return el("tr", {}, [
+          el("td", { class: hi ? "hi" : null }, String(r.seq)),
+          el("td", { class: "n" + (hi ? " hi" : "") },
+            r.standard_elements_per_head.toLocaleString("en-US")),
+          el("td", { class: "n" + (hi ? " hi" : "") },
+            r.flash_elements_per_head.toLocaleString("en-US")),
+          el("td", { class: "n" + (hi ? " hi" : "") }, r.ratio + "×")
+        ]);
+      }))
+    ]);
+    out.appendChild(tbl);
+
+    out.appendChild(small(
+      "The highlighted row is Llama 3's training context. At " +
+      code("seq 8192") + " the probability matrix is " +
+      num(big.standard_elements_per_head, 0) + " elements " +
+      "(" + NN.count(big.standard_elements_per_head) + ") <em>per head, per " +
+      "layer, per sequence in the batch</em>. §7 lets you drag those " +
+      "multipliers yourself."));
+
+    out.appendChild(NN.callout("key", "The question this page answers",
+      "Can we compute <code>O = softmax(QKᵀ/√d)·V</code> " +
+      "<b>without ever building P</b>? Not approximate it, not sparsify it, " +
+      "not low-rank it — get the same O, bit for bit up to floating " +
+      "point, while the " + code("seq²") + " matrix never exists as a " +
+      "whole. The answer is yes, and the entire trick is one correction " +
+      "factor, which is §2."));
+
+    out.appendChild(NN.legend(["activation", "gradient"]));
+  })();
+
+  /* ===================================================================== */
+  /*  2 · ONLINE SOFTMAX, IN ONE DIMENSION FIRST                           */
+  /* ===================================================================== */
+  (function () {
+    const out = NN.$("#online");
+    const D = F.online_softmax_demo;
+    const xs = D.xs, BLK = D.block, steps = D.steps;
+    const nblocks = steps.length;
+
+    out.appendChild(h2("2 · Online softmax — the whole idea, in one dimension"));
+
+    out.appendChild(p(
+      "Forget attention for a moment. Take a plain vector of " + xs.length +
+      " numbers and compute its softmax. Nothing here is about matrices; " +
+      "everything here is the reason FlashAttention works."));
+
+    out.appendChild(NN.formula({
+      rule: "softmax(x)<sub>i</sub> = exp(x<sub>i</sub>) / Σ<sub>j</sub> exp(x<sub>j</sub>)",
+      sub: "computed naively this overflows: exp(x) for x in the hundreds is +∞ in fp32 " +
+           "long before the sum is finished",
+      cls: "activation"
+    }));
+    out.appendChild(NN.formula({
+      rule: "softmax(x)<sub>i</sub> = exp(x<sub>i</sub> − m) / Σ<sub>j</sub> exp(x<sub>j</sub> − m),&nbsp;&nbsp; m = max<sub>j</sub> x<sub>j</sub>",
+      sub: "shifting by the max is algebraically free — the shift cancels top and bottom — " +
+           "and it is what every real implementation does. But look at what it demands: " +
+           "<b>m is the max of the WHOLE vector</b>. You cannot write down a single output " +
+           "until you have seen the last element.",
+      cls: "activation"
+    }));
+
+    out.appendChild(p(
+      "That requirement is exactly what forces the " + code("seq²") +
+      " matrix to exist: to normalise row <em>i</em> of the scores you " +
+      "apparently need all " + SEQ + " of its entries at once, so you compute " +
+      "them all, so you have to put them somewhere. Break that requirement " +
+      "and the matrix stops being necessary."));
+
+    out.appendChild(NN.callout("why", "Carry two numbers instead",
+      "Walk the vector in blocks. After every block, keep just:" +
+      "<ul style='margin:8px 0 0 18px;padding:0'>" +
+      "<li><code>m</code> — the largest value seen <em>so far</em></li>" +
+      "<li><code>l</code> — Σ exp(x − m) over everything seen <em>so far</em></li>" +
+      "</ul><p style='margin:8px 0 0'>The catch: <code>l</code> is expressed " +
+      "relative to the <em>current</em> <code>m</code>. When a later block " +
+      "raises the max, every term already inside <code>l</code> was divided " +
+      "by <code>exp(m_old)</code> and now needs to be divided by " +
+      "<code>exp(m_new)</code> instead. Fixing that is one multiply.</p>"));
+
+    out.appendChild(NN.formula({
+      rule: "correction = exp(m<sub>old</sub> − m<sub>new</sub>)",
+      sub: "l<sub>rescaled</sub> = l<sub>old</sub> · correction, then " +
+           "l<sub>new</sub> = l<sub>rescaled</sub> + Σ<sub>block</sub> exp(x − m<sub>new</sub>)",
+      cls: "activation"
+    }));
+
+    /* -------------------------------------------------------- the vector */
+    out.appendChild(h3("Watch it run"));
+    const xsHost = el("div", { class: "xsrow", style: { margin: "12px 0" } });
+    const xsBlocks = [];
+    for (let b = 0; b < nblocks; b++) {
+      const cells = [];
+      const inner = el("div", { class: "xsblock" });
+      for (let t = 0; t < BLK && b * BLK + t < xs.length; t++) {
+        const idx = b * BLK + t;
+        const c = el("div", { class: "xsc", title: "x[" + idx + "] = " + xs[idx] },
+                     f(xs[idx], 2));
+        inner.appendChild(c); cells.push(c);
+      }
+      const col = el("div", {}, [
+        inner, el("div", { class: "xslabel" }, "block " + b)
+      ]);
+      xsHost.appendChild(col);
+      xsBlocks.push({ inner: inner, cells: cells });
+    }
+    out.appendChild(xsHost);
+
+    /* ------------------------------------------------------ the controls */
+    const ctl = el("div");
+    out.appendChild(ctl);
+
+    /* --------------------------------------------------------- the panel */
+    const mPanel = el("div", { class: "panel" });
+    const starHost = el("div");
+    const lHost = el("div", { class: "panel" });
+    const mathHost = el("div");
+
+    out.appendChild(el("div", { class: "split" }, [
+      el("div", {}, [mPanel, lHost]),
+      el("div", {}, [starHost, mathHost])
+    ]));
+
+    const lScale = Math.max.apply(null, steps.map(function (s) {
+      return Math.max(s.l_old, s.l_new, s.l_rescaled);
+    }));
+
+    const lbarOld = el("div", { class: "lbar" }, [el("i"), el("u")]);
+    const lbarNow = el("div", { class: "lbar" }, [el("i"), el("u")]);
+    lHost.appendChild(el("div", { class: "ph", style: { fontFamily: "var(--mono)", fontWeight: "700", fontSize: ".8rem", marginBottom: "8px" } }, "the running sum l"));
+    lHost.appendChild(el("div", { class: "lrow" }, [
+      el("span", {}, "before block"), lbarOld
+    ]));
+    lHost.appendChild(el("div", { class: "lrow" }, [
+      el("span", {}, "live"), lbarNow
+    ]));
+    const lCaption = el("div", { class: "small muted", style: { marginTop: "6px", minHeight: "2.6em" } });
+    lHost.appendChild(lCaption);
+
+    let animTimers = [];
+    function setBar(bar, v, label) {
+      bar.querySelector("i").style.width = NN.clamp(v / lScale * 100, 0, 100) + "%";
+      bar.querySelector("u").textContent = label;
+    }
+
+    function renderStep(i) {
+      const s = steps[i];
+      /* the first block's max always "moves" (from −∞), but l_old is 0,
+         so nothing is rescaled. Distinguish it from a real rescale. */
+      const first = s.m_old === null;
+      const realRescale = s.max_moved && !first;
+      animTimers.forEach(clearTimeout); animTimers = [];
+
+      /* vector state */
+      xsBlocks.forEach(function (b, k) {
+        b.inner.classList.toggle("seen", k <= i);
+        b.inner.classList.toggle("now", k === i);
+        b.inner.classList.toggle("future", k > i);
+        b.cells.forEach(function (c, t) {
+          c.classList.toggle("ismax", k <= i && xs[k * BLK + t] === s.m_new);
+        });
+      });
+
+      /* running max */
+      mPanel.innerHTML = "";
+      mPanel.className = "panel" + (realRescale ? " lit" : "");
+      mPanel.appendChild(el("div", { class: "ph" }, [
+        el("span", {}, "block " + s.block + "  —  values [" +
+          s.values.map(function (v) { return f(v, 2); }).join(", ") + "]"),
+        el("span", {
+          class: "badge " + (realRescale ? "moved" : "still")
+        }, first ? "first block — m initialised"
+           : (realRescale ? "⚠ max moved" : "max unchanged"))
+      ]));
+      const kv = el("div", { class: "kv" });
+      function row(k, v) {
+        kv.appendChild(el("div", { class: "k" }, k));
+        kv.appendChild(el("div", { class: "v", html: v }));
+      }
+      row("m_old", s.m_old === null
+        ? '<span class="muted">−∞  (nothing seen yet)</span>' : f(s.m_old, 6));
+      row("block max", f(Math.max.apply(null, s.values), 6));
+      row("m_new", '<b>' + f(s.m_new, 6) + "</b>");
+      row("l_old", f(s.l_old, 8));
+      row("l_rescaled", f(s.l_rescaled, 8));
+      row("+ this block", f(s.added, 8));
+      row("l_new", "<b>" + f(s.l_new, 8) + "</b>");
+      mPanel.appendChild(kv);
+
+      /* the star: the correction factor */
+      starHost.innerHTML = "";
+      const st = el("div", { class: "star" }, [
+        el("div", { class: "lbl" }, "the correction factor"),
+        el("div", { class: "big v-activation" },
+          s.m_old === null ? "—" : f(s.correction, 6)),
+        el("div", { class: "sub" }, s.m_old === null
+          ? "first block: l_old is 0, so there is nothing to correct"
+          : "exp(" + f(s.m_old, 4) + " − " + f(s.m_new, 4) + ")")
+      ]);
+      starHost.appendChild(st);
+      if (realRescale) {
+        st.classList.add("pulse");
+        setTimeout(function () { st.classList.remove("pulse"); }, 900);
+      }
+
+      mathHost.innerHTML = "";
+      if (first) {
+        mathHost.appendChild(NN.formula({
+          rule: "l ← 0 · correction + Σ exp(x − m_new)",
+          sub: "there is no history yet, so the running sum simply starts at " +
+               f(s.added, 8),
+          result: f(s.l_new, 8), cls: "activation"
+        }));
+      } else if (realRescale) {
+        mathHost.appendChild(NN.formula({
+          rule: "l ← l_old · exp(m_old − m_new) + Σ exp(x − m_new)",
+          sub: f(s.l_old, 8) + " · " + f(s.correction, 8) + " + " + f(s.added, 8) +
+               " = " + f(s.l_rescaled, 8) + " + " + f(s.added, 8),
+          result: f(s.l_new, 8), cls: "activation"
+        }));
+        mathHost.appendChild(NN.callout("key", "This is the moment",
+          "The max jumped from " + num(s.m_old, 4) + " to " + num(s.m_new, 4) +
+          ". Everything already inside <code>l</code> was measured against " +
+          "the old max, so it is multiplied by " + num(s.correction, 6) +
+          " — <b>" + num(s.l_old, 6) + " collapses to " +
+          num(s.l_rescaled, 6) + "</b> — and only then does the new " +
+          "block's contribution of " + num(s.added, 6) + " get added. " +
+          "Watch the top bar shrink into the bottom one."));
+      } else {
+        mathHost.appendChild(NN.formula({
+          rule: "l ← l_old · exp(m_old − m_new) + Σ exp(x − m_new)",
+          sub: "the max did not move, so <code>exp(m_old − m_new) = exp(0) = 1</code> " +
+               "and the rescale is a no-op: " + f(s.l_old, 8) + " + " + f(s.added, 8),
+          result: f(s.l_new, 8), cls: "activation"
+        }));
+        mathHost.appendChild(small(
+          "Every block pays for the correction whether or not it is needed. " +
+          "That is deliberate: a branch per row would cost more than a " +
+          "multiply by 1 on a GPU."));
+      }
+
+      /* ------------------------------------------------- the animation */
+      setBar(lbarOld, s.l_old, "l_old = " + f(s.l_old, 6));
+      /* phase 1: start from l_old */
+      setBar(lbarNow, s.l_old, "l = " + f(s.l_old, 6));
+      lbarNow.classList.remove("rescaling");
+      /* phase 2: rescale */
+      animTimers.push(setTimeout(function () {
+        lbarNow.classList.toggle("rescaling", realRescale);
+        setBar(lbarNow, s.l_rescaled,
+          "l × " + (first ? "0" : f(s.correction, 6)) +
+          " = " + f(s.l_rescaled, 6));
+        lCaption.innerHTML = first
+          ? "Nothing accumulated yet — the running sum starts from zero."
+          : (realRescale
+              ? "<b>Rescale.</b> l × " + f(s.correction, 6) + " → " +
+                f(s.l_rescaled, 6) + "  (the bar shrinks)"
+              : "Rescale by exp(0) = 1 — nothing changes.");
+      }, 260));
+      /* phase 3: add the block */
+      animTimers.push(setTimeout(function () {
+        lbarNow.classList.remove("rescaling");
+        setBar(lbarNow, s.l_new, "l_new = " + f(s.l_new, 6));
+        lCaption.innerHTML += "<br><b>Add.</b> + " + f(s.added, 6) +
+          " from block " + s.block + " → l = " + f(s.l_new, 6);
+      }, 1060));
+    }
+
+    const stepper = new NN.Stepper({
+      mount: ctl, count: nblocks,
+      labels: steps.map(function (s) {
+        return "block " + s.block + " = [" +
+          s.values.map(function (v) { return f(v, 1); }).join(", ") + "]" +
+          (s.max_moved && s.m_old !== null ? "  — max moves, rescale"
+            : (s.m_old === null ? "  — m initialised" : "  — max unchanged"));
+      }),
+      onStep: function (i) { renderStep(i); },
+      autoplayMs: 2200,
+      spaceToPlay: false
+    });
+    STEPPERS.push({ stepper: stepper, section: out });
+
+    /* --------------------------------------------------------- the proof */
+    out.appendChild(h3("Did it work?"));
+    out.appendChild(p(
+      "After the last block, <code>m</code> and <code>l</code> are exactly " +
+      "what a single pass over the whole vector would have produced, so " +
+      "<code>exp(xᵢ − m) / l</code> is the softmax. Compare, " +
+      "element by element:"));
+
+    const cmp = el("table", { class: "data" }, [
+      el("thead", {}, el("tr", {}, [
+        el("th", {}, "i"), el("th", {}, "x"),
+        el("th", {}, "online (blocked)"), el("th", {}, "direct (one pass)"),
+        el("th", {}, "|difference|")
+      ])),
+      el("tbody", {}, xs.map(function (x, i) {
+        return el("tr", {}, [
+          el("td", {}, String(i)),
+          el("td", { class: "n" }, f(x, 2)),
+          el("td", { class: "n v-activation" }, f(D.online[i], 10)),
+          el("td", { class: "n" }, f(D.direct[i], 10)),
+          el("td", { class: "n muted" }, sci(Math.abs(D.online[i] - D.direct[i])))
+        ]);
+      }))
+    ]);
+    out.appendChild(cmp);
+
+    /* independent JS recomputation of the same thing */
+    let jm = -Infinity, jl = 0;
+    for (let b = 0; b < xs.length; b += BLK) {
+      const chunk = xs.slice(b, b + BLK);
+      const mNew = Math.max(jm, Math.max.apply(null, chunk));
+      const corr = jm === -Infinity ? 0 : Math.exp(jm - mNew);
+      jl = jl * corr + chunk.reduce(function (a, v) { return a + Math.exp(v - mNew); }, 0);
+      jm = mNew;
+    }
+    const jsOnline = xs.map(function (v) { return Math.exp(v - jm) / jl; });
+    const mm = Math.max.apply(null, xs);
+    const den = xs.reduce(function (a, v) { return a + Math.exp(v - mm); }, 0);
+    const jsDirect = xs.map(function (v) { return Math.exp(v - mm) / den; });
+    const jsErr = Math.max.apply(null, jsOnline.map(function (v, i) {
+      return Math.abs(v - jsDirect[i]);
+    }));
+
+    out.appendChild(verdict(D.passed,
+      "blocked online softmax == direct softmax, max |Δ| = <b>" +
+      sci(D.max_abs_err) + "</b>",
+      "(from flash.py; recomputed in this page's JS: " + sci(jsErr) + ")"));
+
+    out.appendChild(NN.callout("key", "If you understood that, you understand FlashAttention",
+      "The rest of this page is the same three lines applied to a matrix: " +
+      "carry <code>m</code> and <code>l</code> per <em>row</em>, walk the " +
+      "keys in blocks, and multiply the accumulated result by " +
+      "<code>exp(m_old − m_new)</code> whenever a block raises that " +
+      "row's max. The only new thing in §3 is that the output vector " +
+      "<code>O</code> is carried along and rescaled too."));
+  })();
+
+  /* ===================================================================== */
+  /*  3 · THE CENTREPIECE: TILED ATTENTION                                 */
+  /* ===================================================================== */
+  (function () {
+    const out = NN.$("#tiled");
+    out.appendChild(h2("3 · Tiled attention, one tile at a time"));
+
+    out.appendChild(p(
+      "Two loops. The outer one walks query blocks of " + BR + " rows; the " +
+      "inner one walks key/value blocks of " + BC + " columns. " + NQB +
+      " × " + NKB + " = " + (NQB * NKB) + " inner steps in total. Per " +
+      "query block the kernel carries three small things, none of which " +
+      "depend on " + code("seq") + ":"));
+
+    out.appendChild(NN.formula({
+      rule: "O_acc  (" + BR + "×" + DH + ")&nbsp;&nbsp; — unnormalised output accumulator<br>" +
+            "m  (" + BR + ")&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;— running row max<br>" +
+            "l  (" + BR + ")&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;— running row sum of exp(s − m)",
+      sub: "on every inner step: compute the " + BR + "×" + BC +
+           " tile of scores, rescale BOTH l and O_acc by exp(m_old − m_new), " +
+           "add the tile's contribution. At the end, O = O_acc / l.",
+      cls: "activation"
+    }));
+
+    /* ------------------------------------------------ augment the trace */
+    /* flash.py records acc_after per row; the accumulator BEFORE the step
+       and its rescaled value are derived here by replaying the sequence. */
+    const TRACE = F.flash.trace.map(function (qb) {
+      const prev = {};
+      qb.rows.forEach(function (r) { prev[r] = new Array(DH).fill(0); });
+      const steps = qb.steps.map(function (st) {
+        if (st.skipped) return st;
+        const rows = st.rows.map(function (r) {
+          const before = prev[r.row].slice();
+          if (r.all_masked) {
+            return Object.assign({}, r, {
+              acc_before: before, acc_rescaled: before, acc_after: before
+            });
+          }
+          const resc = before.map(function (v) { return v * r.correction; });
+          prev[r.row] = r.acc_after.slice();
+          return Object.assign({}, r, { acc_before: before, acc_rescaled: resc });
+        });
+        return Object.assign({}, st, { rows: rows });
+      });
+      return Object.assign({}, qb, { steps: steps });
+    });
+
+    const FLAT = [];
+    TRACE.forEach(function (qb, qi) {
+      qb.steps.forEach(function (st, ki) {
+        FLAT.push({ qi: qi, ki: ki, qb: qb, st: st,
+                    last: ki === qb.steps.length - 1 });
+      });
+    });
+
+    /* ------------------------------------------------------- ghost grid */
+    const gridHost = el("div", { class: "scrollx" });
+    const gcells = [];
+    const g = el("div", {
+      class: "ghostwrap",
+      style: { gridTemplateColumns: "auto repeat(" + SEQ + ", minmax(40px, 1fr))",
+               maxWidth: "420px" }
+    });
+    g.appendChild(el("div", { class: "gc hdr" }, ""));
+    for (let j = 0; j < SEQ; j++) g.appendChild(el("div", { class: "gc hdr" }, "k" + j));
+    for (let i = 0; i < SEQ; i++) {
+      g.appendChild(el("div", { class: "gc hdr" }, "q" + i));
+      gcells.push([]);
+      for (let j = 0; j < SEQ; j++) {
+        const c = el("div", { class: "gc", "data-r": i, "data-c": j });
+        g.appendChild(c); gcells[i].push(c);
+      }
+    }
+    gridHost.appendChild(g);
+
+    const gridKey = el("div", { class: "gridkey" }, [
+      el("span", {}, [el("i", {}), "never materialised (ghost)"]),
+      el("span", {}, [el("i", { class: "k-live" }), "the tile in SRAM right now"]),
+      el("span", {}, [el("i", { class: "k-done" }), "computed, used, discarded"]),
+      el("span", {}, [
+        el("i", { class: "hatch", style: { borderStyle: "solid" } }),
+        "✕ masked / skipped"
+      ])
+    ]);
+
+    const memHost = el("div", { class: "panel" });
+    const ctl = el("div");
+    const stepHead = el("div", { class: "panel" });
+    const rowHost = el("div");
+
+    out.appendChild(ctl);
+    out.appendChild(el("div", { class: "split" }, [
+      el("div", { style: { alignSelf: "stretch" } }, [
+        el("div", { class: "stickycol" }, [
+          el("div", { class: "matname" }, [
+            el("b", { class: "v-activation" }, "S  (" + SEQ + "×" + SEQ + ")"),
+            el("span", { class: "sh" }, "— drawn as an outline, because it never exists")
+          ]),
+          gridHost, gridKey, memHost
+        ])
+      ]),
+      el("div", {}, [stepHead, rowHost])
+    ]));
+
+    const STD_ELEMS = F.standard.stored_elements;
+    const TILE_ELEMS = F.flash.peak_tile_elements;
+
+    function fmtVec(v, digits) {
+      return "[" + v.map(function (x) { return f(x, digits === undefined ? 4 : digits); }).join(", ") + "]";
+    }
+
+    function renderStep(idx) {
+      const S = FLAT[idx], qb = S.qb, st = S.st;
+      const rows = qb.rows, cols = st.cols;
+      const rowSet = {}, colSet = {};
+      rows.forEach(function (r) { rowSet[r] = 1; });
+      cols.forEach(function (c) { colSet[c] = 1; });
+
+      /* ---- the grid ---- */
+      for (let i = 0; i < SEQ; i++) for (let j = 0; j < SEQ; j++) {
+        const c = gcells[i][j];
+        c.className = "gc";
+        c.textContent = "";
+        c.title = "S[" + i + "][" + j + "] — never stored";
+        if (!rowSet[i]) { c.classList.add("outside"); continue; }
+
+        /* which inner step of THIS query block does column j belong to? */
+        const kOf = Math.floor(j / BC);
+        if (colSet[j]) {
+          if (st.skipped) {
+            c.classList.add("hatch", "skip");
+            c.textContent = "✕";
+            c.title = "q" + i + " × k" + j + " — tile skipped: " + st.why;
+          } else {
+            const a = rows.indexOf(i), b = cols.indexOf(j);
+            const v = st.tile[a][b];
+            if (v === null) {
+              c.classList.add("hatch", "livemask");
+              c.textContent = "✕";
+              c.title = "q" + i + " × k" + j + " — masked: key is in the future";
+            } else {
+              c.classList.add("live");
+              c.textContent = f(v, 2);
+              c.title = "s[" + i + "][" + j + "] = " + v + "  (live in SRAM)";
+            }
+          }
+        } else if (kOf < S.ki) {
+          const past = qb.steps[kOf];
+          if (past.skipped) {
+            c.classList.add("hatch", "skip");
+            c.textContent = "✕";
+            c.title = "tile skipped entirely";
+          } else {
+            c.classList.add("done");
+            c.textContent = "·";
+            c.title = "computed on step " + (kOf + 1) + ", folded into m/l/O_acc, then discarded";
+          }
+        } else {
+          c.title = "not computed yet";
+        }
+      }
+
+      /* ---- peak memory readout ---- */
+      const liveTile = st.skipped ? 0 : rows.length * cols.length;
+      const liveAcc = rows.length * DH;
+      const liveML = 2 * rows.length;
+      const liveTotal = liveTile + liveAcc + liveML;
+      memHost.innerHTML = "";
+      memHost.appendChild(el("div", { class: "ph" }, "peak live memory, this step"));
+      const meter = el("div", { class: "meter" }, [
+        el("i", { class: "live", style: { width: (liveTotal / STD_ELEMS * 100) + "%" } })
+      ]);
+      memHost.appendChild(meter);
+      const kv = el("div", { class: "kv", style: { marginTop: "8px" } });
+      function row(k, v) {
+        kv.appendChild(el("div", { class: "k" }, k));
+        kv.appendChild(el("div", { class: "v", html: v }));
+      }
+      row("score tile", (st.skipped
+        ? "<span class='muted'>0 — tile skipped</span>"
+        : rows.length + "×" + cols.length + " = <b>" + liveTile + "</b> elements"));
+      row("O_acc", rows.length + "×" + DH + " = " + liveAcc);
+      row("m and l", "2×" + rows.length + " = " + liveML);
+      row("live total", "<b>" + liveTotal + "</b> elements");
+      row("standard holds", "<b>" + SEQ + "×" + SEQ + " = " + STD_ELEMS +
+        "</b> elements, all of them, all at once");
+      memHost.appendChild(kv);
+      memHost.appendChild(el("div", { class: "small muted", style: { marginTop: "6px" } , html:
+        "The tile is <b>" + TILE_ELEMS + "</b> elements at its peak (" + BR +
+        "×" + BC + "). Every term above is a function of the tile size " +
+        "and <code>d_head</code>. None of them contains <code>seq</code>. " +
+        "That is the whole point."
+      }));
+
+      /* ---- step header ---- */
+      stepHead.innerHTML = "";
+      stepHead.className = "panel";
+      stepHead.appendChild(el("div", { class: "ph" }, [
+        el("span", {}, "Q-block " + S.qi + " (rows " + rows[0] + "–" +
+          rows[rows.length - 1] + ")  ×  K-block " + S.ki +
+          " (cols " + cols[0] + "–" + cols[cols.length - 1] + ")"),
+        st.skipped ? el("span", { class: "badge skip" }, "✕ skipped") : null
+      ]));
+
+      rowHost.innerHTML = "";
+
+      if (st.skipped) {
+        stepHead.appendChild(el("div", { class: "small", html:
+          "<b>Nothing is computed.</b> " + st.why + " — keys " +
+          cols.join(", ") + " all sit after queries " + rows.join(", ") +
+          ", so every entry of this " + BR + "×" + BC +
+          " tile would be masked."
+        }));
+        rowHost.appendChild(NN.callout("why", "This is where causal masking actually saves work",
+          "In the standard implementation the causal mask is applied " +
+          "<em>after</em> the scores are computed: you build the full " +
+          code(SEQ + "×" + SEQ) + " matrix and then set half of it to " +
+          "−∞. The FLOPs are spent and the memory is allocated; " +
+          "the mask only throws the result away. Tiled attention checks the " +
+          "block bounds first and never issues the matmul at all. For a " +
+          "causal model that is close to half the attention work, not " +
+          "half the attention <em>output</em>."));
+        return;
+      }
+
+      stepHead.appendChild(mat({
+        name: "tile", values: st.tile, cls: "activation", digits: 4,
+        rowLabels: rows.map(function (r) { return "q" + r; }),
+        colLabels: cols.map(function (c) { return "k" + c; }),
+        note: "computed here, discarded before the next step"
+      }));
+
+      /* ---- per-row detail ---- */
+      st.rows.forEach(function (r) {
+        /* the first tile a row ever sees has m_old = −∞: the max "moves",
+           but there is nothing accumulated to rescale. That is a different
+           event from a genuine mid-stream rescale, and is labelled as one. */
+        const firstTouch = !r.all_masked && r.m_old === null;
+        const realRescale = r.max_moved && !firstTouch;
+        const pan = el("div", { class: "panel" + (realRescale ? " lit" : "") });
+        if (r.all_masked) {
+          pan.appendChild(el("div", { class: "ph" }, [
+            el("span", {}, "row q" + r.row),
+            el("span", { class: "badge masked" }, "✕ all masked")
+          ]));
+          pan.appendChild(el("div", { class: "small muted" },
+            "Every key in this tile is in the future of query " + r.row +
+            ". m, l and O_acc are untouched."));
+          rowHost.appendChild(pan);
+          return;
+        }
+        pan.appendChild(el("div", { class: "ph" }, [
+          el("span", {}, "row q" + r.row),
+          el("span", { class: "badge " + (realRescale ? "moved" : "still") },
+            firstTouch ? "first tile — m initialised"
+              : (realRescale ? "⚠ max moved — rescale" : "max unchanged"))
+        ]));
+        const kv2 = el("div", { class: "kv" });
+        function rr(k, v) {
+          kv2.appendChild(el("div", { class: "k" }, k));
+          kv2.appendChild(el("div", { class: "v", html: v }));
+        }
+        rr("tile max", f(r.tile_max, 6));
+        rr("m: old → new", (r.m_old === null
+            ? "<span class='muted'>−∞</span>" : f(r.m_old, 6)) +
+          " → <b>" + f(r.m_new, 6) + "</b>");
+        rr("correction", (r.m_old === null
+            ? "<span class='muted'>— (nothing accumulated)</span>"
+            : "<b class='v-activation'>" + f(r.correction, 6) + "</b>" +
+              " = exp(" + f(r.m_old, 4) + " − " + f(r.m_new, 4) + ")"));
+        rr("l: old → resc", f(r.l_old, 6) + " → " + f(r.l_rescaled, 6));
+        rr("l_new", "<b>" + f(r.l_new, 6) + "</b>  (+" +
+          f(r.l_new - r.l_rescaled, 6) + " from this tile)");
+        rr("p tile", fmtVec(r.p_tile, 5));
+        rr("O_acc before", '<span class="muted">' + fmtVec(r.acc_before, 4) + "</span>");
+        if (realRescale) {
+          rr("O_acc × corr", fmtVec(r.acc_rescaled, 4));
+        }
+        rr("O_acc after", "<b>" + fmtVec(r.acc_after, 4) + "</b>");
+        pan.appendChild(kv2);
+
+        if (realRescale) {
+          pan.appendChild(el("div", { class: "small", style: { marginTop: "7px" }, html:
+            "<b>Both</b> l and the output accumulator are multiplied by " +
+            "<code>" + f(r.correction, 6) + "</code> before this tile is " +
+            "added. Rescaling l alone would give the wrong denominator; " +
+            "rescaling O_acc alone would give the wrong numerator. They " +
+            "move together, which is why the final ratio is exact."
+          }));
+          pan.classList.add("pulse");
+          setTimeout(function () { pan.classList.remove("pulse"); }, 900);
+        }
+        rowHost.appendChild(pan);
+      });
+
+      /* ---- end of a query block ---- */
+      if (S.last) {
+        const fin = el("div", { class: "panel" });
+        fin.appendChild(el("div", { class: "ph" }, [
+          el("span", {}, "Q-block " + S.qi + " complete — normalise"),
+          el("span", { class: "badge ok" }, "✓ rows " + rows[0] + "–" +
+            rows[rows.length - 1] + " final")
+        ]));
+        fin.appendChild(NN.formula({
+          rule: "O[i] = O_acc[i] / l[i]&nbsp;&nbsp;&nbsp;&nbsp;lse[i] = m[i] + log l[i]",
+          sub: "the division happens exactly once per row, at the end — " +
+               "which is why the intermediate accumulator can stay unnormalised " +
+               "and be rescaled freely",
+          cls: "activation"
+        }));
+        const tb = el("table", { class: "data" }, [
+          el("thead", {}, el("tr", {}, [
+            el("th", {}, "row"), el("th", {}, "final m"), el("th", {}, "final l"),
+            el("th", {}, "O = O_acc / l"), el("th", {}, "lse saved for backward")
+          ])),
+          el("tbody", {}, rows.map(function (i, a) {
+            return el("tr", {}, [
+              el("td", {}, "q" + i),
+              el("td", { class: "n" }, f(qb.final_m[a], 6)),
+              el("td", { class: "n" }, f(qb.final_l[a], 6)),
+              el("td", { class: "n v-activation" }, fmtVec(F.flash.O[i], 4)),
+              el("td", { class: "n" }, f(F.flash.lse[i], 6))
+            ]);
+          }))
+        ]);
+        fin.appendChild(tb);
+        fin.appendChild(el("div", { class: "small muted", html:
+          "Two numbers per row leave this block: <code>m</code> and " +
+          "<code>l</code>, folded into one <code>lse</code>. " +
+          num(F.flash.saved_elements, 0) + " numbers for the whole sequence " +
+          "(" + F.flash.saved_what + ") against the " + STD_ELEMS +
+          " the standard version would have kept. §5 shows those two " +
+          "numbers rebuilding the entire probability matrix."
+        }));
+        rowHost.appendChild(fin);
+      }
+    }
+
+    const stepper = new NN.Stepper({
+      mount: ctl, count: FLAT.length,
+      labels: FLAT.map(function (S) {
+        return "Q-block " + S.qi + " × K-block " + S.ki +
+          (S.st.skipped ? "  — skipped (causal)" : "");
+      }),
+      onStep: function (i) { renderStep(i); },
+      autoplayMs: 2100,
+      spaceToPlay: false
+    });
+    STEPPERS.push({ stepper: stepper, section: out });
+
+    /* --------------------------------------------------------- summary */
+    let tilesTotal = 0, tilesSkipped = 0, scoresComputed = 0, scoresMasked = 0;
+    TRACE.forEach(function (qb) {
+      qb.steps.forEach(function (st) {
+        tilesTotal++;
+        if (st.skipped) { tilesSkipped++; return; }
+        st.tile.forEach(function (r) {
+          r.forEach(function (v) {
+            scoresComputed++;
+            if (v === null) scoresMasked++;
+          });
+        });
+      });
+    });
+
+    out.appendChild(h3("What the loop actually cost"));
+    out.appendChild(NN.tiles([
+      { k: "inner steps", v: String(tilesTotal), s: NQB + " × " + NKB },
+      { k: "tiles skipped", v: String(tilesSkipped),
+        s: "entirely in the causal future" },
+      { k: "scores computed", v: String(scoresComputed),
+        s: "of " + STD_ELEMS + " a dense pass would do", cls: "activation" },
+      { k: "… of which masked", v: String(scoresMasked),
+        s: "wasted inside surviving tiles" },
+      { k: "peak tile", v: String(TILE_ELEMS), s: BR + "×" + BC + " elements",
+        cls: "activation" },
+      { k: "peak, standard", v: String(STD_ELEMS), s: SEQ + "×" + SEQ + " elements" }
+    ]));
+
+    out.appendChild(NN.callout("mem", "Read the two peak numbers carefully",
+      "The " + num(TILE_ELEMS, 0) + " is a <em>tile</em>, chosen by the " +
+      "kernel author to fit in on-chip SRAM. It does not grow with " +
+      code("seq") + ". The " + num(STD_ELEMS, 0) + " is " + code("seq²") +
+      " and grows with the square of it. At this toy size the ratio is " +
+      num(STD_ELEMS / TILE_ELEMS, 1) + "× and looks unimpressive; at " +
+      code("seq 8192") + " the standard side is " +
+      NN.count(F.memory.table.filter(function (r) { return r.seq === 8192; })[0]
+               .standard_elements_per_head) +
+      " elements and the tile is still " + num(TILE_ELEMS, 0) + "."));
+  })();
+
+  /* ===================================================================== */
+  /*  4 · THE PROOF                                                        */
+  /* ===================================================================== */
+  (function () {
+    const out = NN.$("#proof");
+    out.appendChild(h2("4 · The proof: it is exact, not an approximation"));
+
+    out.appendChild(p(
+      "This is the fact that prose usually fudges, with words like " +
+      "“negligible difference” or “numerically equivalent”. " +
+      "It deserves better than that. Tiled attention with online softmax is " +
+      "an <b>algebraic rearrangement</b>: it computes exactly the same sum " +
+      "in a different order, with a scale factor that cancels. The only " +
+      "difference between the two outputs is floating-point rounding, and it " +
+      "shows up at the last bit."));
+
+    const stdO = F.standard.O, flO = F.flash.O;
+    const diff = stdO.map(function (r, i) {
+      return r.map(function (v, d) { return Math.abs(v - flO[i][d]); });
+    });
+
+    const rowL = []; for (let i = 0; i < SEQ; i++) rowL.push("q" + i);
+    const colL = []; for (let d = 0; d < DH; d++) colL.push("d" + d);
+
+    out.appendChild(el("div", { class: "scrollx" }, [
+      el("div", {}, [
+        mat({ name: "O  standard", values: stdO, cls: "activation", digits: 6,
+              rowLabels: rowL, colLabels: colL, signed: true,
+              note: "built the full " + SEQ + "×" + SEQ + " P" }),
+        mat({ name: "O  flash", values: flO, cls: "activation", digits: 6,
+              rowLabels: rowL, colLabels: colL, signed: true,
+              note: "never built P" }),
+        mat({ name: "|difference|", values: diff, digits: 0,
+              rowLabels: rowL, colLabels: colL,
+              note: "elementwise" })
+      ])
+    ]));
+    out.appendChild(small(
+      "The difference grid renders exact zeros faded. The non-zero entries " +
+      "are all in the last representable bit of a double: hover any cell for " +
+      "the full value."));
+
+    out.appendChild(NN.formula({
+      rule: "max<sub>i,d</sub> |O<sup>standard</sup><sub>i,d</sub> − O<sup>flash</sup><sub>i,d</sub>|",
+      sub: "for reference, the double-precision epsilon near 1.0 is about 2.2e-16",
+      result: sci(F.equivalence.output_max_abs_err), cls: "activation"
+    }));
+
+    /* independent verification, in this page's JS */
+    const eStdVsPy   = maxAbsDiff(JS_STD.O, F.standard.O);
+    const eFlashVsPy = maxAbsDiff(JS_FLASH.O, F.flash.O);
+    const eJsVsJs    = maxAbsDiff(JS_STD.O, JS_FLASH.O);
+    const eCross     = maxAbsDiff(F.standard.O, F.flash.O);
+    const TOL = 1e-12;
+
+    out.appendChild(h3("Verified again, here, in the browser"));
+    out.appendChild(p(
+      "The numbers above come from <code>code/flash_attention.py</code>. " +
+      "This page does not take its word for it: it re-implements both " +
+      "algorithms in JavaScript from " + code("FLASH.input") + " alone — " +
+      "Q, K and V and nothing else — and re-runs the comparison."));
+
+    const checks = [
+      ["JS standard attention == flash.py standard O", eStdVsPy],
+      ["JS tiled attention == flash.py flash O", eFlashVsPy],
+      ["JS standard == JS tiled  (the claim, independently)", eJsVsJs],
+      ["flash.py standard == flash.py flash (recomputed here)", eCross]
+    ];
+    const allPass = checks.every(function (c) { return c[1] < TOL; });
+    checks.forEach(function (c) {
+      out.appendChild(verdict(c[1] < TOL, c[0], "max |Δ| = " + sci(c[1]) +
+        "  &lt; " + sci(TOL)));
+    });
+
+    out.appendChild(NN.tiles([
+      { k: "peak tile, flash", v: NN.count(JS_FLASH.peakTile),
+        s: "largest tile the JS version allocated", cls: "activation" },
+      { k: "peak P, standard", v: NN.count(F.standard.stored_elements),
+        s: "seq × seq, allocated once" },
+      { k: "max |Δ| output", v: sci(F.equivalence.output_max_abs_err),
+        s: allPass ? "all four checks pass" : "CHECK FAILED",
+        cls: allPass ? "activation" : null }
+    ]));
+
+    out.appendChild(NN.callout("key", "FlashAttention is exact",
+      F.equivalence.claim + " It is not linear attention, not a kernel " +
+      "approximation, not a sparsity pattern. Swapping it in changes your " +
+      "loss curve only through floating-point noise, which is why it became " +
+      "the default in every framework rather than an option people " +
+      "benchmark against quality."));
+
+    out.appendChild(NN.callout("why", "Why the rearrangement is legal",
+      "Softmax's shift invariance is the load-bearing property: " +
+      "<code>softmax(x + c) = softmax(x)</code> for any scalar c, because " +
+      "<code>exp(c)</code> factors out of numerator and denominator alike. " +
+      "The online algorithm exploits it in reverse — it computes " +
+      "everything relative to whatever max it happens to have seen, then " +
+      "corrects the shift retroactively with a multiply. The final division " +
+      "by <code>l</code> removes the last of it. Nothing is dropped, so " +
+      "nothing is approximated."));
+  })();
+
+  /* ===================================================================== */
+  /*  5 · BACKWARD: RECOMPUTE, DON'T STORE                                 */
+  /* ===================================================================== */
+  (function () {
+    const out = NN.$("#backward");
+    const B = F.backward;
+    out.appendChild(h2("5 · Backward: recompute, don't store"));
+
+    out.appendChild(p(
+      "Page 04 established the rule that makes training expensive: backward " +
+      "needs what forward produced, so forward has to keep it. Attention's " +
+      "backward pass needs <code>P</code>. FlashAttention has not got one. " +
+      "It kept " + num(F.flash.saved_elements, 0) + " numbers — one " +
+      "<code>lse</code> per row — and rebuilds every probability it " +
+      "needs, one tile at a time, from Q and K."));
+
+    out.appendChild(NN.formula({
+      rule: "lse<sub>i</sub> = m<sub>i</sub> + log l<sub>i</sub>&nbsp;&nbsp;&nbsp;→&nbsp;&nbsp;&nbsp; p<sub>ij</sub> = exp(s<sub>ij</sub> − lse<sub>i</sub>)",
+      sub: "the whole recovery. exp(s − m) / l is exactly exp(s − (m + log l)), " +
+           "so the running max and the running sum collapse into a single stored number per row.",
+      cls: "activation"
+    }));
+
+    /* row picker */
+    out.appendChild(h3("Rebuild one row"));
+    const rowSegs = el("div", { class: "segbtns" });
+    const rowOut = el("div");
+    let sel = SEQ - 1;
+
+    function drawRow(i) {
+      const d = B.detail[i];
+      rowOut.innerHTML = "";
+      const kv = el("div", { class: "kv", style: { marginBottom: "10px" } });
+      function rr(k, v) {
+        kv.appendChild(el("div", { class: "k" }, k));
+        kv.appendChild(el("div", { class: "v", html: v }));
+      }
+      rr("stored lse[" + i + "]", "<b>" + f(d.lse, 8) + "</b>");
+      rr("keys visible", d.entries.length + " of " + SEQ +
+         (CAUSAL ? "  (causal)" : ""));
+      rr("Σ p, rebuilt", "<b>" + f(d.sum, 12) + "</b>" +
+         '  <span class="muted">(must be 1)</span>');
+      rowOut.appendChild(kv);
+
+      const tb = el("table", { class: "data" }, [
+        el("thead", {}, el("tr", {}, [
+          el("th", {}, "key j"),
+          el("th", {}, "s = q·k/√d  (recomputed)"),
+          el("th", {}, "p = exp(s − lse)"),
+          el("th", {}, "stored P[" + i + "][j]"),
+          el("th", {}, "|Δ|")
+        ])),
+        el("tbody", {}, d.entries.map(function (e) {
+          const stored = F.standard.P[i][e.j];
+          return el("tr", {}, [
+            el("td", {}, "k" + e.j),
+            el("td", { class: "n" }, f(e.s, 8)),
+            el("td", { class: "n v-activation" }, f(e.p, 10)),
+            el("td", { class: "n" }, f(stored, 10)),
+            el("td", { class: "n muted" }, sci(Math.abs(e.p - stored)))
+          ]);
+        }))
+      ]);
+      rowOut.appendChild(tb);
+    }
+
+    for (let i = 0; i < SEQ; i++) {
+      (function (i) {
+        const b = el("button", {
+          class: "segbtn", "aria-pressed": i === sel ? "true" : "false"
+        }, "row q" + i);
+        b.addEventListener("click", function () {
+          sel = i;
+          NN.$$(".segbtn", rowSegs).forEach(function (x, q) {
+            x.setAttribute("aria-pressed", q === i ? "true" : "false");
+          });
+          drawRow(i);
+        });
+        rowSegs.appendChild(b);
+      })(i);
+    }
+    out.appendChild(rowSegs);
+    out.appendChild(rowOut);
+    drawRow(sel);
+
+    /* whole-matrix comparison */
+    out.appendChild(h3("The whole matrix, rebuilt"));
+    const rowL = [], colL = [];
+    for (let i = 0; i < SEQ; i++) { rowL.push("q" + i); colL.push("k" + i); }
+    const perr = F.standard.P.map(function (r, i) {
+      return r.map(function (v, j) { return Math.abs(v - B.P_recomputed[i][j]); });
+    });
+
+    out.appendChild(el("div", { class: "scrollx" }, [
+      el("div", {}, [
+        mat({ name: "P  stored (standard)", values: F.standard.P, cls: "activation",
+              digits: 4, rowLabels: rowL, colLabels: colL }),
+        mat({ name: "P  recomputed from lse", values: B.P_recomputed, cls: "activation",
+              digits: 4, rowLabels: rowL, colLabels: colL })
+      ])
+    ]));
+    out.appendChild(el("div", { class: "scrollx" }, [
+      mat({ name: "|difference|", values: perr, digits: 0,
+            rowLabels: rowL, colLabels: colL,
+            note: "elementwise" })
+    ]));
+
+    /* independent JS check of the recomputation */
+    let jsPerr = 0;
+    for (let i = 0; i < SEQ; i++) for (let j = 0; j < SEQ; j++) {
+      const v = (CAUSAL && j > i) ? 0
+        : Math.exp(dot(Q[i], K[j]) * SCALE - F.flash.lse[i]);
+      jsPerr = Math.max(jsPerr, Math.abs(v - F.standard.P[i][j]));
+    }
+    out.appendChild(verdict(B.recompute_passed,
+      "P rebuilt from Q, K and the saved lse == the P the standard version stored",
+      "max |Δ| = <b>" + sci(B.recompute_max_err) + "</b> " +
+      "(recomputed in this page's JS: " + sci(jsPerr) + ")"));
+
+    /* the gradients */
+    out.appendChild(h3("And then the gradients"));
+    out.appendChild(p(
+      "With P back in hand — a tile at a time, never all of it — " +
+      "backward is the usual three products with the softmax Jacobian in " +
+      "the middle. " + code("dO") + " here is the incoming gradient from " +
+      "whatever consumed the attention output."));
+
+    out.appendChild(NN.formula({
+      rule: "dV = Pᵀ dO&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;dP = dO Vᵀ&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;" +
+            "dS<sub>ij</sub> = p<sub>ij</sub> (dP<sub>ij</sub> − D<sub>i</sub>)",
+      sub: "D<sub>i</sub> = Σ<sub>j</sub> dP<sub>ij</sub> p<sub>ij</sub> — " +
+           "one scalar per row, the contraction of the dense softmax Jacobian " +
+           "that page 08 §5 derives. Then dQ = dS·K / √d and dK = dSᵀ·Q / √d.",
+      cls: "gradient"
+    }));
+
+    out.appendChild(el("div", { class: "scrollx" }, [
+      el("div", {}, [
+        mat({ name: "dO  (given)", values: dOut, cls: "gradient", digits: 4,
+              signed: true, rowLabels: rowL,
+              colLabels: (function () { const c = []; for (let d = 0; d < DH; d++) c.push("d" + d); return c; })() }),
+        mat({ name: "dQ", values: B.dQ, cls: "gradient", digits: 6, signed: true,
+              rowLabels: rowL,
+              colLabels: (function () { const c = []; for (let d = 0; d < DH; d++) c.push("d" + d); return c; })() }),
+        mat({ name: "dK", values: B.dK, cls: "gradient", digits: 6, signed: true,
+              rowLabels: rowL,
+              colLabels: (function () { const c = []; for (let d = 0; d < DH; d++) c.push("d" + d); return c; })() }),
+        mat({ name: "dV", values: B.dV, cls: "gradient", digits: 6, signed: true,
+              rowLabels: rowL,
+              colLabels: (function () { const c = []; for (let d = 0; d < DH; d++) c.push("d" + d); return c; })() })
+      ])
+    ]));
+
+    /* row_dots <-> page 08 softmax_dots */
+    out.appendChild(h3("Dᵢ is the same term page 08 called softmax_dots"));
+    const dotsTbl = el("table", { class: "data" }, [
+      el("thead", {}, el("tr", {}, [
+        el("th", {}, "row i"),
+        el("th", {}, "Dᵢ = Σⱼ dPᵢⱼ pᵢⱼ"),
+        el("th", {}, "Σⱼ of dS row"),
+        el("th", {}, "(must be 0)")
+      ])),
+      el("tbody", {}, B.row_dots.map(function (v, i) {
+        const s = B.dS[i].reduce(function (a, x) { return a + x; }, 0);
+        return el("tr", {}, [
+          el("td", {}, "q" + i),
+          el("td", { class: "n v-gradient" }, f(v, 10)),
+          el("td", { class: "n" }, sci(s)),
+          el("td", { class: "n muted" }, Math.abs(s) < 1e-14 ? "✓" : "✗")
+        ]);
+      }))
+    ]);
+    out.appendChild(dotsTbl);
+
+    if (F2 && F2.backward_steps) {
+      const st = F2.backward_steps.filter(function (s) {
+        return s.heads && s.heads[0] && s.heads[0].softmax_dots;
+      })[0];
+      if (st) {
+        out.appendChild(small(
+          "Page 08 computes the same quantity on the two-block transformer and " +
+          "stores it as <code>softmax_dots</code>. Its first attention head's " +
+          "values are [" + st.heads[0].softmax_dots.map(function (v) {
+            return f(v, 8);
+          }).join(", ") + "] — one scalar per query row, exactly as here. " +
+          "The softmax Jacobian is dense, but its contraction with dP collapses " +
+          "to a single number per row, and that is the only reason a tiled " +
+          "backward pass is possible at all: <code>Dᵢ</code> can be " +
+          "accumulated across key blocks just like <code>l</code> can."));
+      }
+    }
+
+    out.appendChild(NN.callout("mem", "The trade, stated plainly",
+      "<b>Cost:</b> " + F.memory.compute_cost + ". Each tile's " +
+      "<code>QKᵀ</code> is done twice — once in forward, once in " +
+      "backward.<br><br><b>Benefit:</b> the " + code("seq²") + " term " +
+      "leaves the activation budget entirely. Per head, per layer, per " +
+      "sequence: " + code(F.memory.formula_standard) + " becomes " +
+      code(F.memory.formula_flash) + ".<br><br>Arithmetic is the resource " +
+      "that has been getting cheaper; memory bandwidth and capacity are the " +
+      "ones that have not. Trading the abundant one for the scarce one is " +
+      "the whole design, and it is the same instinct as gradient " +
+      "checkpointing — except that here, as §6 shows, you do not " +
+      "even pay in wall-clock time."));
+  })();
+
+  /* ===================================================================== */
+  /*  6 · WHY IT IS ALSO FASTER                                            */
+  /* ===================================================================== */
+  (function () {
+    const out = NN.$("#faster");
+    out.appendChild(h2("6 · Why it is also faster"));
+
+    out.appendChild(p(
+      "The obvious reading of §5 is that FlashAttention buys memory " +
+      "with compute, and that on a machine with spare memory you would not " +
+      "bother. That reading is wrong, and it is the part people most often " +
+      "get backwards."));
+
+    out.appendChild(NN.callout("why", "From code/flash_attention.py",
+      F.memory.why_it_is_also_faster));
+
+    out.appendChild(p(
+      "The reason is arithmetic intensity. A GPU's peak FLOP rate and its " +
+      "HBM bandwidth give a ratio: how many floating-point operations the " +
+      "machine can do in the time it takes to move one byte. A kernel below " +
+      "that ratio is bandwidth-bound — the arithmetic units idle while " +
+      "they wait. These are the published figures for the devices page 11 " +
+      "uses:"));
+
+    const gpus = T.reference_configs.gpus;
+    const dtSeg = el("div", { class: "segbtns" });
+    const gpuTbl = el("div");
+    const dtypes = Object.keys(T.memory.dtype_bytes);
+    let dt = dtypes.indexOf("bf16") >= 0 ? "bf16" : dtypes[0];
+
+    /* A materialised softmax over P: read one element, write one element,
+       spend a handful of FLOPs on it. Count generously at 3 FLOPs per
+       element (subtract, exp, divide) -- being generous only strengthens
+       the conclusion, since it still lands orders of magnitude below the
+       machine balance. */
+    const FLOPS_PER_ELEM = 3;
+
+    function drawGpus() {
+      const bytes = T.memory.dtype_bytes[dt];
+      const intensity = FLOPS_PER_ELEM / (2 * bytes);
+      gpuTbl.innerHTML = "";
+      gpuTbl.appendChild(el("table", { class: "data" }, [
+        el("thead", {}, el("tr", {}, [
+          el("th", {}, "GPU"),
+          el("th", {}, "bf16 dense peak"),
+          el("th", {}, "HBM bandwidth"),
+          el("th", {}, "machine balance"),
+          el("th", {}, "softmax-over-P reaches")
+        ])),
+        el("tbody", {}, gpus.map(function (g) {
+          const bal = g.bf16_dense_tflops * 1e12 / g.hbm_bw_bytes_per_s;
+          const frac = intensity / bal;
+          return el("tr", {}, [
+            el("td", {}, g.name),
+            el("td", { class: "n" }, f(g.bf16_dense_tflops, 0) + " TFLOP/s"),
+            el("td", { class: "n" }, NN.bytes(g.hbm_bw_bytes_per_s) + "/s"),
+            el("td", { class: "n" }, f(bal, 1) + " FLOP/byte"),
+            el("td", { class: "n v-gradient" }, f(frac * 100, 2) + "% of peak")
+          ]);
+        }))
+      ]));
+      gpuTbl.appendChild(el("div", { class: "small muted", html:
+        "A softmax pass over a materialised " + code("P") + " in " +
+        code(dt) + " moves 2 × " + bytes + " bytes per element " +
+        "(one read, one write) and spends roughly " + FLOPS_PER_ELEM +
+        " FLOPs on it: <b>" + f(intensity, 3) + " FLOP/byte</b>. Every " +
+        "device in the table wants two to three orders of magnitude more. " +
+        "The kernel is not compute-bound; it is a bandwidth test."
+      }));
+    }
+
+    dtypes.forEach(function (d) {
+      const b = el("button", { class: "segbtn", "aria-pressed": d === dt ? "true" : "false" },
+        d + " (" + T.memory.dtype_bytes[d] + "B)");
+      b.addEventListener("click", function () {
+        dt = d;
+        NN.$$(".segbtn", dtSeg).forEach(function (x) {
+          x.setAttribute("aria-pressed", x === b ? "true" : "false");
+        });
+        drawGpus();
+      });
+      dtSeg.appendChild(b);
+    });
+    out.appendChild(dtSeg);
+    out.appendChild(gpuTbl);
+    drawGpus();
+    out.appendChild(small("Device figures from <code>T.reference_configs.gpus</code> — " +
+      T.reference_configs._source + "."));
+
+    out.appendChild(h3("So what does the traffic look like?"));
+    out.appendChild(p(
+      "The standard implementation writes " + code("S") + " to HBM, reads " +
+      "it back to softmax it, writes " + code("P") + ", reads " +
+      code("P") + " again for " + code("PV") + ", and in backward reads " +
+      code("P") + " once more and writes " + code("dS") + ". That is six " +
+      "passes over a " + code("seq²") + " tensor. FlashAttention does " +
+      "zero: the tile is produced, consumed and dropped inside SRAM, and the " +
+      "only things crossing HBM are Q, K, V, O and the " + code("2·seq") +
+      " statistics — all linear in " + code("seq") + "."));
+
+    const HBM_PASSES = 6;
+    const seqRow = F.memory.table.filter(function (r) { return r.seq === 8192; })[0];
+    const bytesNow = T.memory.dtype_bytes.bf16;
+    const stdTraffic = HBM_PASSES * seqRow.standard_elements_per_head * bytesNow;
+    const flTraffic = seqRow.flash_elements_per_head * bytesNow;
+    /* The two figures differ by ~4 orders of magnitude, which a bar chart
+       renders as one full bar and one invisible one. A table says it. */
+    out.appendChild(el("table", { class: "data" }, [
+      el("thead", {}, el("tr", {}, [
+        el("th", {}, "HBM traffic for the score/prob matrix"),
+        el("th", {}, "elements"),
+        el("th", {}, "bytes in bf16"),
+        el("th", {}, "grows as")
+      ])),
+      el("tbody", {}, [
+        el("tr", {}, [
+          el("td", {}, "standard — " + HBM_PASSES + " passes over seq²"),
+          el("td", { class: "n" },
+            (HBM_PASSES * seqRow.standard_elements_per_head).toLocaleString("en-US")),
+          el("td", { class: "n" }, NN.bytes(stdTraffic)),
+          el("td", { class: "n" }, "seq²")
+        ]),
+        el("tr", {}, [
+          el("td", {}, "flash — the 2·seq statistics"),
+          el("td", { class: "n v-activation" },
+            seqRow.flash_elements_per_head.toLocaleString("en-US")),
+          el("td", { class: "n v-activation" }, NN.bytes(flTraffic)),
+          el("td", { class: "n" }, "seq")
+        ]),
+        el("tr", {}, [
+          el("td", {}, "ratio"),
+          el("td", { class: "n" },
+            f(HBM_PASSES * seqRow.standard_elements_per_head /
+              seqRow.flash_elements_per_head, 0) + "×"),
+          el("td", { class: "n" },
+            f(stdTraffic / flTraffic, 0) + "×"),
+          el("td", { class: "n muted" }, "at seq " + seqRow.seq)
+        ])
+      ])
+    ]));
+    out.appendChild(small(
+      "At " + code("seq " + seqRow.seq) + " in " + code("bf16") + ", one head " +
+      "of one layer. Both rows exclude Q, K, V and O, which both " +
+      "implementations must move and which are linear in " + code("seq") +
+      ". The six-pass figure is a model of the standard kernel's traffic, " +
+      "not a measurement — a fused softmax can do better, and a real " +
+      "kernel may re-read tiles. The point is the shape of it: one side " +
+      "scales with " + code("seq²") + ", the other does not."));
+
+    out.appendChild(NN.callout("warn", "Be precise about the claim",
+      "FlashAttention does <b>more</b> arithmetic than the standard " +
+      "implementation — " + F.memory.compute_cost + ". It is faster " +
+      "anyway <em>when attention is bandwidth-bound</em>, which is the " +
+      "normal case at long sequence length. At short sequences, or when " +
+      "attention is a small fraction of a step's time, the win shrinks " +
+      "toward nothing and can in principle go the other way. What does not " +
+      "change with sequence length is the memory argument: the " +
+      code("seq²") + " activation term is gone either way. That is why " +
+      "it is not a trade-off anyone agonises over."));
+  })();
+
+  /* ===================================================================== */
+  /*  7 · SCALING CALCULATOR                                               */
+  /* ===================================================================== */
+  (function () {
+    const out = NN.$("#calc");
+    out.appendChild(h2("7 · Drag it yourself"));
+    out.appendChild(p(
+      "Activation memory for the attention probabilities alone, both ways. " +
+      "Standard is " + code(F.memory.formula_standard) + "; flash is " +
+      code(F.memory.formula_flash) + ". Nothing else about the model is " +
+      "included — page 09 does the full budget — because the " +
+      "point here is one term."));
+
+    /* Control domains are powers of two spanning the range flash.py's own
+       memory table covers. */
+    function powers(lo, hi) {
+      const o = [];
+      for (let v = lo; v <= hi; v *= 2) o.push(v);
+      return o;
+    }
+    const seqLo = Math.min.apply(null, F.memory.table.map(function (r) { return r.seq; }));
+    const seqHi = Math.max.apply(null, F.memory.table.map(function (r) { return r.seq; }));
+    const SEQS   = powers(seqLo, seqHi);
+    const BATCHES = powers(1, 64);
+    const modelsAll = T.reference_configs.models;
+    const headsHi = Math.max.apply(null, modelsAll.map(function (m) { return m.n_heads; }));
+    const layersHi = Math.max.apply(null, modelsAll.map(function (m) { return m.n_layers; }));
+
+    const dtypes = Object.keys(T.memory.dtype_bytes);
+    const def = modelsAll.filter(function (m) {
+      return m.name === T.reference_configs.default_model;
+    })[0] || modelsAll[modelsAll.length - 1];
+
+    const state = {
+      batchI: BATCHES.indexOf(1),
+      heads: def.n_heads,
+      seqI: SEQS.indexOf(def.seq) >= 0 ? SEQS.indexOf(def.seq) : SEQS.length - 3,
+      layers: def.n_layers,
+      dtype: dtypes.indexOf("bf16") >= 0 ? "bf16" : dtypes[0]
+    };
+
+    const sliders = el("div", { class: "sliders" });
+    const readouts = {};
+    function slider(key, label, min, max, step, fmtOut, onset) {
+      const inp = el("input", { type: "range", min: min, max: max, step: step,
+                                value: state[key] });
+      const outp = el("output", {});
+      readouts[key] = function () { outp.textContent = fmtOut(state[key]); };
+      inp.addEventListener("input", function () {
+        state[key] = Number(inp.value);
+        if (onset) onset();
+        update();
+      });
+      sliders.appendChild(el("div", { class: "sliderrow" }, [
+        el("label", {}, label), inp, outp
+      ]));
+      readouts[key]();
+      return inp;
+    }
+
+    const inBatch = slider("batchI", "batch", 0, BATCHES.length - 1, 1,
+      function (i) { return String(BATCHES[i]); });
+    const inHeads = slider("heads", "attention heads", 1, headsHi, 1,
+      function (v) { return String(v); });
+    const inSeq = slider("seqI", "sequence length", 0, SEQS.length - 1, 1,
+      function (i) { return SEQS[i].toLocaleString("en-US") + "  (2^" +
+        Math.round(Math.log2(SEQS[i])) + ")"; });
+    const inLayers = slider("layers", "layers", 1, layersHi, 1,
+      function (v) { return String(v); });
+    out.appendChild(sliders);
+
+    const dtSeg = el("div", { class: "segbtns" });
+    dtypes.forEach(function (d) {
+      const b = el("button", { class: "segbtn",
+        "aria-pressed": d === state.dtype ? "true" : "false" },
+        d + " · " + T.memory.dtype_bytes[d] + " B");
+      b.addEventListener("click", function () {
+        state.dtype = d;
+        NN.$$(".segbtn", dtSeg).forEach(function (x) {
+          x.setAttribute("aria-pressed", x === b ? "true" : "false");
+        });
+        update();
+      });
+      dtSeg.appendChild(b);
+    });
+    out.appendChild(el("div", { class: "small muted", html: "dtype of the probability matrix" }));
+    out.appendChild(dtSeg);
+
+    const presets = el("div", { class: "segbtns" });
+    modelsAll.forEach(function (m) {
+      const b = el("button", { class: "segbtn" }, m.name);
+      b.addEventListener("click", function () {
+        state.heads = NN.clamp(m.n_heads, 1, headsHi);
+        state.layers = NN.clamp(m.n_layers, 1, layersHi);
+        let si = SEQS.indexOf(m.seq);
+        if (si < 0) {
+          si = 0;
+          SEQS.forEach(function (s, k) { if (s <= m.seq) si = k; });
+        }
+        state.seqI = si;
+        inHeads.value = state.heads;
+        inLayers.value = state.layers;
+        inSeq.value = state.seqI;
+        update();
+      });
+      presets.appendChild(b);
+    });
+    out.appendChild(el("div", { class: "small muted", html:
+      "jump to a real configuration — " + T.reference_configs._source }));
+    out.appendChild(presets);
+
+    const tileHost = el("div");
+    const barHost = el("div");
+    const chartHost = el("div");
+    const noteHost = el("div");
+    out.appendChild(tileHost);
+    out.appendChild(barHost);
+    out.appendChild(chartHost);
+    out.appendChild(noteHost);
+
+    function calc(b, h, s, L, bytes) {
+      const stdEl = b * h * s * s * L;
+      const flEl = b * h * 2 * s * L;
+      return { stdEl: stdEl, flEl: flEl,
+               stdB: stdEl * bytes, flB: flEl * bytes,
+               ratio: stdEl / flEl };
+    }
+
+    function update() {
+      Object.keys(readouts).forEach(function (k) { readouts[k](); });
+      const b = BATCHES[state.batchI], h = state.heads;
+      const s = SEQS[state.seqI], L = state.layers;
+      const bytes = T.memory.dtype_bytes[state.dtype];
+      const r = calc(b, h, s, L, bytes);
+
+      tileHost.innerHTML = "";
+      tileHost.appendChild(NN.tiles([
+        { k: "standard", v: NN.bytes(r.stdB),
+          s: NN.count(r.stdEl) + " elements" },
+        { k: "flashattention", v: NN.bytes(r.flB),
+          s: NN.count(r.flEl) + " elements", cls: "activation" },
+        { k: "ratio", v: f(r.ratio, 0) + "×",
+          s: "= seq / 2 = " + (s / 2).toLocaleString("en-US") },
+        { k: "removed", v: NN.bytes(r.stdB - r.flB),
+          s: "of activation memory, per step" }
+      ]));
+
+      barHost.innerHTML = "";
+      barHost.appendChild(NN.chart.bars({
+        items: [
+          { label: "standard  — batch×heads×seq²×layers",
+            value: r.stdB / 1e9, color: "var(--accent)",
+            sub: "(" + b + "×" + h + "×" + s + "²×" + L + ")" },
+          { label: "flash  — batch×heads×2·seq×layers",
+            value: r.flB / 1e9, color: "var(--activation)",
+            sub: "(" + b + "×" + h + "×2·" + s + "×" + L + ")" }
+        ],
+        unit: "GB"
+      }));
+
+      /* bytes vs seq, both series in the same unit -> one chart, log Y */
+      const stdPts = [], flPts = [];
+      SEQS.forEach(function (sv) {
+        const rr = calc(b, h, sv, L, bytes);
+        stdPts.push([Math.round(Math.log2(sv)), Math.max(rr.stdB, 1)]);
+        flPts.push([Math.round(Math.log2(sv)), Math.max(rr.flB, 1)]);
+      });
+      chartHost.innerHTML = "";
+      chartHost.appendChild(el("div", { class: "small muted", html:
+        "bytes for the attention probabilities against sequence length, " +
+        "log scale, at the batch / heads / layers / dtype set above" }));
+      chartHost.appendChild(NN.chart.line({
+        series: [
+          { name: "standard", color: "var(--accent)", points: stdPts },
+          { name: "flash", color: "var(--activation)", points: flPts, dash: "5 4" }
+        ],
+        width: 720, height: 260, logY: true,
+        xlabel: "log₂(seq)", ylabel: "bytes"
+      }));
+
+      noteHost.innerHTML = "";
+      const gpu = T.reference_configs.gpus.filter(function (g) {
+        return g.name === T.reference_configs.default_gpu;
+      })[0] || T.reference_configs.gpus[0];
+      const nGpuStd = r.stdB / gpu.hbm_bytes;
+      noteHost.appendChild(NN.callout(
+        r.stdB > gpu.hbm_bytes ? "warn" : "mem",
+        "At this setting",
+        "The probability matrices alone would take <b>" + NN.bytes(r.stdB) +
+        "</b> the standard way and <b>" + NN.bytes(r.flB) + "</b> with " +
+        "FlashAttention — a factor of " + f(r.ratio, 0) + ", which is " +
+        "exactly <code>seq / 2</code> and does not depend on batch, heads " +
+        "or layers.<br><br>An " + gpu.name + " has " +
+        NN.gibytes(gpu.hbm_bytes) + " of HBM (" + NN.bytes(gpu.hbm_bytes) +
+        " decimal). The standard version's probabilities alone would need " +
+        "<b>" + f(nGpuStd, nGpuStd < 10 ? 2 : 0) + "×</b> that, before " +
+        "a single weight, gradient or optimizer state is placed — and " +
+        "before the other activations page 09 counts. With FlashAttention " +
+        "the same term is " + f(r.flB / gpu.hbm_bytes * 100, 3) +
+        "% of one device."));
+    }
+    update();
+
+    out.appendChild(NN.callout("key", "Drag seq to the far right",
+      "Nothing else on the page changes shape the way this does. The " +
+      "standard line climbs by a factor of four every time you double the " +
+      "sequence; the flash line doubles. At " +
+      SEQS[SEQS.length - 1].toLocaleString("en-US") + " tokens the ratio is " +
+      (SEQS[SEQS.length - 1] / 2).toLocaleString("en-US") + "×. " +
+      "Long-context models do not exist because someone found more memory; " +
+      "they exist because this term stopped being quadratic."));
+  })();
+
+  /* ===================================================================== */
+  /*  8 · WHERE THIS GOES                                                  */
+  /* ===================================================================== */
+  (function () {
+    const out = NN.$("#next");
+    out.appendChild(h2("8 · Where this goes"));
+
+    out.appendChild(NN.callout("why", "Back to 09 — what a transformer costs",
+      "Page 09's activation budget has a checkbox marked " +
+      "<em>FlashAttention</em> that deletes the " + code("a·s²·b") +
+      " term. This page is what that checkbox does: not an estimate, not a " +
+      "modelling assumption, but " + num(F.flash.saved_elements, 0) +
+      " numbers kept instead of " + num(F.standard.stored_elements, 0) +
+      " at " + code("seq " + SEQ) + ", and an output that matches to " +
+      sci(F.equivalence.output_max_abs_err) + ". Go back and tick it knowing " +
+      "what it means. <a href='09-transformer-cost.html'>09 · What a " +
+      "Transformer Costs →</a>"));
+
+    out.appendChild(NN.callout("mem", "Forward to 11 — scaling to 70B",
+      "With the quadratic term removed, activation memory is linear in " +
+      "sequence length and the remaining problem is the one page 11 opens " +
+      "with: a " + T.reference_configs.default_model + " model's parameters, " +
+      "gradients and optimizer states do not fit on any single device, no " +
+      "matter how the activations behave. FlashAttention is the last thing " +
+      "you can do on one GPU. Everything after it needs more than one. " +
+      "<a href='11-scaling.html'>11 · Scaling to 70B →</a>"));
+
+    out.appendChild(NN.callout("key", "The three sentences worth keeping",
+      "<ol style='margin:8px 0 0 18px;padding:0'>" +
+      "<li>Softmax can be computed incrementally if you carry a running max " +
+      "and a running sum, and multiply what you have already accumulated by " +
+      "<code>exp(m_old − m_new)</code> whenever the max moves.</li>" +
+      "<li>Applying that per row, over tiles of keys, computes attention " +
+      "without ever allocating the <code>seq²</code> matrix — " +
+      "peak live memory is one tile, " + num(F.flash.peak_tile_elements, 0) +
+      " elements here, independent of sequence length.</li>" +
+      "<li>The result is <b>exact</b>: " +
+      sci(F.equivalence.output_max_abs_err) + " max absolute difference, " +
+      "which is floating-point rounding and nothing else.</li></ol>"));
+
+    out.appendChild(small(
+      "Generated by <code>code/flash_attention.py</code>: " + M.description +
+      " — seq " + M.seq + ", d_head " + M.d_head + ", tiles " + M.Br +
+      "×" + M.Bc + ", causal " + M.causal + ", scale 1/√" + M.d_head +
+      " = " + f(M.scale, 6) + "."));
+  })();
+
+  /* ---------------------------------------------------------------- lede */
+  NN.$("#lede").innerHTML =
+    "Attention appears to require an " + SEQ + "×" + SEQ +
+    " probability matrix — " + code(F.memory.formula_standard) +
+    " at real scale. It does not. One correction factor, " +
+    "<code>exp(m_old − m_new)</code>, lets the whole thing be computed " +
+    "a " + BR + "×" + BC + " tile at a time, and the answer is not an " +
+    "approximation: it matches to " + sci(F.equivalence.output_max_abs_err) + ".";
+
+  NN.page("flash");
+})();
+</script>
+</body>
+</html>

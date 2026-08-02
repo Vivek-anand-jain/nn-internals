@@ -230,7 +230,8 @@ body { background: var(--page); }
   display: grid; grid-template-columns: 1fr auto; gap: 4px 18px;
   align-items: baseline; margin-bottom: 7px;
 }
-.stage .drow .dmath { font-family: var(--mono); font-size: 18px; }
+.stage .dmath { font-family: var(--mono); font-size: 18px; }
+.stage .drow .dmath { font-size: 16.5px; }
 .stage .drow .dwhy  { font-size: 13px; color: var(--ink-muted); text-align: right; white-space: nowrap; }
 .stage .drow.final {
   border-top: 1px solid var(--hairline); padding-top: 9px; margin-top: 3px;
@@ -248,6 +249,19 @@ body { background: var(--page); }
 .stage .vbox .mark { font-size: 26px; line-height: 1; color: var(--good); }
 .stage .vbox.bad { border-color: var(--critical); background: color-mix(in srgb, var(--critical) 10%, transparent); }
 .stage .vbox.bad .mark { color: var(--critical); }
+
+/* the gradient check, read as a test report */
+.stage .badge {
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+  letter-spacing: .1em; padding: 3px 11px; border-radius: 5px;
+  text-transform: uppercase;
+}
+.stage .badge.pass { background: var(--good); color: #fff; }
+.stage .badge.fail { background: var(--critical); color: #fff; }
+.stage table.data td.ok { color: var(--good); }
+.stage table.data tr.deadparam td {
+  background: color-mix(in srgb, var(--critical) 9%, transparent);
+}
 
 /* ------------------------------------- the live backward network diagram */
 /* Sits beside the equation on every step of the backward walk and answers
@@ -1796,9 +1810,20 @@ S({
 SEP("backward");
 
 /* ============================================== backward pass machinery */
+/* Everything in the backward run is generated from these. NHID, NINP and the
+   index of the dead unit are read out of the trace rather than typed, so the
+   section survives a change to the model shape. */
 const STEPS = T.backward.steps;
 const NSTEP = STEPS.length;
 const SAVED_KEYS = Object.keys(T.forward.saved_for_backward);
+const BWD   = T.backward;
+const FWD   = T.forward;
+const NHID  = FWD.z1.length;                /* hidden width */
+const NINP  = FWD.x.length;                 /* input width  */
+const DEADU = FWD.relu_mask.indexOf(0);     /* the unit ReLU clamped */
+const STEP_IX = {};
+STEPS.forEach(function (s, i) { STEP_IX[s.id] = i; });
+
 const READ_SRC = {
   x:         { values: T.forward.x,          cls: "activation", shape: [2],
                why: "the layer input, saved during the forward pass" },
@@ -1811,7 +1836,838 @@ const READ_SRC = {
 };
 function isSaved(name) { return SAVED_KEYS.indexOf(name) >= 0; }
 
-/* -------------------------------------------------- 17. backward plan */
+/* ------------------------------------------------- formatting helpers */
+function vecTxt(a, dig, signed) {
+  return "[" + a.map(function (v) {
+    return signed ? fS(v, dig) : f(v, dig);
+  }).join(", ") + "]";
+}
+
+/* ============================================== equation typesetting ====
+   The defect this answers: a chain-rule step written as one run-on line is
+   unreadable. So every equation in this run is set as a PRODUCT — a left
+   hand side, then one card per factor with the operator between them, and
+   under each card a label saying what that factor is: the UPSTREAM gradient
+   handed in from the right, or the LOCAL derivative of a single operation,
+   plus the defining equation it was read off. Each card is tinted by the
+   tensor class its value belongs to, and that is the same hue the quantity
+   carries in the network diagram beside it. */
+function eqfac(o) {
+  return d("eqfac " + (o.zero ? "zero" : (o.cls ? "is-" + o.cls : "")), [
+    h("fsym", o.sym),
+    o.val !== undefined ? h("fval", o.val) : null,
+    h("frole", o.role || ""),
+    o.rule ? h("frule", o.rule) : null
+  ]);
+}
+function eqline(lhs, parts, small) {
+  const kids = [el("div", { class: "eqlhs" + (small ? " sm" : ""), html: lhs }),
+                h("eqop", "=")];
+  parts.forEach(function (p, i) {
+    if (i) kids.push(h("eqop", p.op || "·"));
+    kids.push(eqfac(p));
+  });
+  return d("eqline", kids);
+}
+/* one line of algebra, with the reason it is legal in the right gutter */
+function drow(math, why, final) {
+  return d("drow" + (final ? " final" : ""), [h("dmath", math), h("dwhy", why || "")]);
+}
+function derivPanel(hdr, rows, cls) {
+  return d("panel " + (cls || "a"), [ph(hdr)].concat(rows));
+}
+function vbox(ok, html) {
+  return d("vbox" + (ok ? "" : " bad"), [h("mark", ok ? "✓" : "✗"), el("div", { html: html })]);
+}
+
+/* ============================================ the chain, factor by factor
+   Every local derivative on the path from W1 to L, derived rather than
+   asserted — including dŷ/dz2, which is recovered as the ratio the trace
+   itself leaves behind rather than typed as "1". */
+const D_ID = BWD.dL_dz2 / BWD.dL_dyhat;
+
+function chainFactors(i, j) {
+  return [
+    { sym: "dL/dŷ", role: "loss derivative", rule: "from L = (ŷ − y)²",
+      cls: "gradient", num: BWD.dL_dyhat },
+    { sym: "dŷ/dz2", role: "identity output", rule: "from ŷ = z2",
+      cls: null, num: D_ID },
+    { sym: "dz2/da1[" + i + "]", role: "a weight", rule: "from z2 = W2·a1 + b2",
+      cls: "weight", num: T.init.W2[0][i] },
+    { sym: "da1[" + i + "]/dz1[" + i + "]", role: "the ReLU gate",
+      rule: "from a1 = relu(z1)", cls: "activation", num: FWD.relu_mask[i] },
+    { sym: "dz1[" + i + "]/dW1[" + i + "][" + j + "]", role: "the saved input",
+      rule: "from z1 = W1·x + b1", cls: "activation", num: FWD.x[j] }
+  ];
+}
+function chainProduct(i, j) {
+  return chainFactors(i, j).reduce(function (a, fc) { return a * fc.num; }, 1);
+}
+const IX_W100 = T.param_names.indexOf("W1[0][0]");
+
+/* ==================================== the live backward network diagram ==
+   The picture the complaint asked for: an SVG of the 2→3→1 network that
+   sits beside the maths on every equation slide in this run and answers
+   "where are we?".
+
+     · the path the gradient has ALREADY travelled is drawn faint, right to
+       left, so you can see how far backward has got;
+     · the link being differentiated right now animates;
+     · the tensor the step READS (x, a1, relu_mask, W2) pulses;
+     · the variable under inspection is named on the picture, in the colour
+       it carries in the equation.
+
+   Colour grammar is the deck's and nothing here adds a fifth hue:
+   gradients orange, activations green, weights blue, and --critical only
+   for the dead unit, which is not a tensor class. */
+const GN = {
+  W: 520, H: 372,
+  IN:  [{ x: 58, y: 150 }, { x: 58, y: 232 }],
+  HID: [{ x: 208, y: 92 }, { x: 208, y: 186 }, { x: 208, y: 280 }],
+  OUT: { x: 352, y: 186 },
+  LOSS: { x: 458, y: 186 },
+  rI: 17, rH: 23, rO: 23, rL: 17
+};
+
+function gradNet(o) {
+  o = o || {};
+  const cur   = (o.step === undefined) ? -1 : o.step;
+  const id    = cur >= 0 ? STEPS[cur].id : null;
+  const reads = cur >= 0 ? STEPS[cur].reads : (o.reads || []);
+  const seen  = {};
+  for (let k = 0; k <= cur; k++) seen[STEPS[k].id] = true;
+
+  const root = SV("svg", {
+    viewBox: "0 0 " + GN.W + " " + GN.H, class: "gnet", role: "img",
+    "aria-label": "The " + T.meta.architecture + " network. Gradients travel " +
+      "right to left, from the loss back to the weights." +
+      (id ? " The step shown is " + id + "." : "")
+  });
+  const gBase = SV("g", {}), gFlow = SV("g", {}), gNode = SV("g", {}),
+        gHalo = SV("g", {}), gText = SV("g", {});
+
+  function txt(x, y, s, cls, anchor) {
+    const t = SV("text", { x: x, y: y, "text-anchor": anchor || "middle",
+                           class: cls || null });
+    t.textContent = s; gText.appendChild(t); return t;
+  }
+  /* An edge carries two flow paths over the same geometry: `flow` is drawn
+     right-to-left so its dashes travel the way a gradient does, `fwd` is
+     drawn left-to-right for the slides that trace the FORWARD dependency
+     path before the backward walk starts. */
+  function edge(a, b, ra, rb) {
+    const dx = b.x - a.x, dy = b.y - a.y, L = Math.hypot(dx, dy);
+    const ux = dx / L, uy = dy / L;
+    const p1 = { x: a.x + ux * ra, y: a.y + uy * ra };
+    const p2 = { x: b.x - ux * rb, y: b.y - uy * rb };
+    gBase.appendChild(SV("line", { class: "ebase", x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y }));
+    const D = function (q, r) {
+      return "M " + q.x.toFixed(1) + " " + q.y.toFixed(1) +
+             " L " + r.x.toFixed(1) + " " + r.y.toFixed(1);
+    };
+    const flow = SV("path", { class: "gflow", d: D(p2, p1) });
+    const fwd  = SV("path", { class: "gflow", d: D(p1, p2) });
+    gFlow.appendChild(flow); gFlow.appendChild(fwd);
+    return { flow: flow, fwd: fwd, mid: { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 },
+             p1: p1, p2: p2 };
+  }
+  function node(p, r, cls) {
+    const c = SV("circle", { class: "nb " + (cls || ""), cx: p.x, cy: p.y, r: r });
+    gNode.appendChild(c); return c;
+  }
+  function halo(p, r, cls) {
+    const c = SV("circle", { class: "halo " + (cls || ""), cx: p.x, cy: p.y, r: r });
+    gHalo.appendChild(c); return c;
+  }
+
+  /* ---- wires ---------------------------------------------------------- */
+  const w1e = [], w2e = [];
+  for (let i = 0; i < NHID; i++) {
+    w1e.push([]);
+    for (let j = 0; j < NINP; j++) w1e[i].push(edge(GN.IN[j], GN.HID[i], GN.rI, GN.rH));
+  }
+  for (let i = 0; i < NHID; i++) w2e.push(edge(GN.HID[i], GN.OUT, GN.rH, GN.rO));
+  const le = edge(GN.OUT, GN.LOSS, GN.rO, GN.rL);
+
+  /* ---- nodes ---------------------------------------------------------- */
+  const inC = GN.IN.map(function (p, j) {
+    const c = node(p, GN.rI, "act");
+    txt(p.x, p.y + 4, "x[" + j + "]", "nname");
+    txt(p.x, p.y + GN.rI + 13, f(FWD.x[j], 1), "nval");
+    return c;
+  });
+  const hidC = [], hidDa = [], hidDz = [], mBadge = [];
+  GN.HID.forEach(function (p, i) {
+    const dead = FWD.relu_mask[i] === 0;
+    const c = node(p, GN.rH, dead ? "dead" : "act");
+    hidC.push(c);
+    txt(p.x, p.y - 3, "a1[" + i + "]", "nname");
+    txt(p.x, p.y + 11, f(FWD.a1[i], 2), "nval");
+    txt(p.x - GN.rH - 6, p.y - GN.rH - 4, "z1 " + f(FWD.z1[i], 2), "cap", "start");
+    hidDa.push(txt(p.x, p.y + GN.rH + 13, "dL/da1 " + fS(BWD.dL_da1[i], 3), "gval"));
+    hidDz.push(txt(p.x, p.y + GN.rH + 25, "dL/dz1 " + fS(BWD.dL_dz1[i], 3), "gval"));
+    /* the ReLU mask, as a badge you can point at — it is a saved tensor.
+       It sits to the LEFT of the unit, clear of the W2 wire labels. */
+    const bx = p.x - GN.rH - 44, by = p.y - 9;
+    const r = SV("rect", { x: bx, y: by, width: 36, height: 18, rx: 5,
+      fill: "var(--surface-2)",
+      stroke: dead ? "var(--critical)" : "var(--activation)" });
+    gText.appendChild(r);
+    const t = SV("text", { x: bx + 18, y: by + 13, "text-anchor": "middle",
+                           class: "mlab" + (dead ? " off" : "") });
+    t.textContent = "m " + f(FWD.relu_mask[i], 0); gText.appendChild(t);
+    mBadge.push(SV("rect", { class: "halo", x: bx - 4, y: by - 4, width: 44,
+                             height: 26, rx: 8 }));
+  });
+  mBadge.forEach(function (r) { gHalo.appendChild(r); });
+
+  const outC  = node(GN.OUT, GN.rO, "act");
+  txt(GN.OUT.x, GN.OUT.y - 3, "ŷ = z2", "nname");
+  txt(GN.OUT.x, GN.OUT.y + 11, f(FWD.yhat, 2), "nval");
+  const outDy = txt(GN.OUT.x, GN.OUT.y + GN.rO + 13, "dL/dŷ " + fS(BWD.dL_dyhat, 3), "gval");
+  const outDz = txt(GN.OUT.x, GN.OUT.y + GN.rO + 25, "dL/dz2 " + fS(BWD.dL_dz2, 3), "gval");
+  const outDb = txt(GN.OUT.x, GN.OUT.y + GN.rO + 37, "dL/db2 " + fS(BWD.dL_db2[0], 3), "gval");
+
+  const lossC = node(GN.LOSS, GN.rL, "");
+  txt(GN.LOSS.x, GN.LOSS.y + 4, "L", "nname");
+  txt(GN.LOSS.x, GN.LOSS.y + GN.rL + 13, f(FWD.loss, 3), "cap");
+  txt(GN.LOSS.x, GN.LOSS.y - GN.rL - 8, "y " + f(FWD.y, 1), "cap");
+
+  /* ---- W2 wire labels: the weight, and its gradient once it exists ----- */
+  const w2g = w2e.map(function (e, i) {
+    const lx = e.p1.x + (e.p2.x - e.p1.x) * 0.5;
+    const ly = e.p1.y + (e.p2.y - e.p1.y) * 0.5;
+    txt(lx, ly - 6, "w " + f(T.init.W2[0][i], 2), "wlab");
+    return txt(lx, ly + 7, "∇ " + fS(BWD.dL_dW2[0][i], 2), "gval");
+  });
+  const w1g = [];
+  for (let i = 0; i < NHID; i++) {
+    w1g.push([]);
+    for (let j = 0; j < NINP; j++) {
+      const e = w1e[i][j];
+      const t = j === 0 ? 0.34 : 0.62;
+      const px = e.p1.x + (e.p2.x - e.p1.x) * t, py = e.p1.y + (e.p2.y - e.p1.y) * t;
+      if (o.w1labels) txt(px, py - 5, "w " + f(T.init.W1[i][j], 2), "wlab");
+      w1g[i].push(o.w1labels ? txt(px, py + 8, "∇ " + fS(BWD.dL_dW1[i][j], 2), "gval") : null);
+    }
+  }
+
+  /* ---- read halos: one group per tensor the backward pass can read ----- */
+  const HALOS = {
+    x:         inC.map(function (c, j) { return halo(GN.IN[j], GN.rI + 6); }),
+    a1:        hidC.map(function (c, i) { return halo(GN.HID[i], GN.rH + 6); }),
+    relu_mask: mBadge,
+    W2:        w2e.map(function (e) {
+                 const p = SV("path", { class: "halo w", d: e.flow.getAttribute("d"),
+                                        "stroke-width": 7 });
+                 gHalo.appendChild(p); return p;
+               })
+  };
+
+  /* ---- captions ------------------------------------------------------- */
+  txt(GN.W / 2, 16, "gradient travels ← right to left", "cap");
+  const focusT = txt(GN.W / 2, GN.H - 6, o.focus || "", "focus");
+
+  root.appendChild(gBase); root.appendChild(gFlow);
+  root.appendChild(gNode); root.appendChild(gHalo); root.appendChild(gText);
+
+  /* ---- how far the gradient has already travelled --------------------- */
+  if (cur >= STEP_IX.dL_dyhat) le.flow.classList.add("trav");
+  if (cur >= STEP_IX.dL_da1) w2e.forEach(function (e) { e.flow.classList.add("trav"); });
+  if (cur >= STEP_IX.dL_dW1) {
+    w1e.forEach(function (r) { r.forEach(function (e) { e.flow.classList.add("trav"); }); });
+  }
+
+  /* ---- which gradient values are known by now ------------------------- */
+  outDy.classList.toggle("on", !!seen.dL_dyhat);
+  outDz.classList.toggle("on", !!seen.dL_dz2);
+  outDb.classList.toggle("on", !!seen.dL_db2);
+  w2g.forEach(function (t) { t.classList.toggle("on", !!seen.dL_dW2); });
+  hidDa.forEach(function (t) { t.classList.toggle("on", !!seen.dL_da1); });
+  hidDz.forEach(function (t) { t.classList.toggle("on", !!seen.dL_dz1); });
+  w1g.forEach(function (r) {
+    r.forEach(function (t) { if (t) t.classList.toggle("on", !!seen.dL_dW1); });
+  });
+
+  /* ---- what is moving right now --------------------------------------- */
+  const litAlive = function () {
+    hidC.forEach(function (c, k) { if (FWD.relu_mask[k]) c.classList.add("lit"); });
+  };
+  const ACT = {
+    dL_dyhat: function () { le.flow.classList.add("on"); lossC.classList.add("lit"); outC.classList.add("lit"); },
+    dL_dz2:   function () { outC.classList.add("lit"); },
+    dL_dW2:   function () {
+      outC.classList.add("lit");
+      w2e.forEach(function (e, k) {
+        if (BWD.dL_dW2[0][k] === 0) e.flow.classList.add("zero");
+        e.flow.classList.add("on");
+      });
+    },
+    dL_db2:   function () { outC.classList.add("lit"); },
+    dL_da1:   function () {
+      outC.classList.add("lit");
+      w2e.forEach(function (e) { e.flow.classList.add("on"); });
+      hidC.forEach(function (c) { c.classList.add("lit"); });
+    },
+    dL_dz1:   litAlive,
+    dL_dW1:   function () {
+      litAlive();
+      w1e.forEach(function (r, k) {
+        r.forEach(function (e) {
+          if (BWD.dL_dz1[k] === 0) e.flow.classList.add("zero");
+          e.flow.classList.add("on");
+        });
+      });
+    },
+    dL_db1:   litAlive
+  };
+  if (id && ACT[id]) ACT[id]();
+
+  /* ---- API ------------------------------------------------------------ */
+  const api = {
+    el: root,
+    /** Pulse the tensors this step reads. Gated on a fragment so the read
+        happens visibly at the moment the local derivative is evaluated. */
+    setReading: function (on) {
+      Object.keys(HALOS).forEach(function (k) {
+        const hot = !!on && reads.indexOf(k) >= 0;
+        HALOS[k].forEach(function (e) { e.classList.toggle("rd", hot); });
+      });
+    },
+    /** Light the first n links of the forward path W1[i][j] → … → L.
+        Used by the chain-rule slides, before the backward walk begins. */
+    setPath: function (n, i, j) {
+      w1e.forEach(function (r) { r.forEach(function (e) { e.fwd.classList.remove("on"); }); });
+      w2e.forEach(function (e) { e.fwd.classList.remove("on"); });
+      le.fwd.classList.remove("on");
+      hidC.forEach(function (c) { c.classList.remove("lit"); });
+      outC.classList.remove("lit"); lossC.classList.remove("lit");
+      if (n >= 1) w1e[i][j].fwd.classList.add("on");
+      if (n >= 2) hidC[i].classList.add("lit");
+      if (n >= 3) w2e[i].fwd.classList.add("on");
+      if (n >= 4) outC.classList.add("lit");
+      if (n >= 5) { le.fwd.classList.add("on"); lossC.classList.add("lit"); }
+    },
+    setFocus: function (s) { focusT.textContent = s; }
+  };
+  api.setReading(true);
+  return api;
+}
+
+/* ======================================================================= */
+/*  THE CHAIN RULE — derived before anything is walked                     */
+/* ======================================================================= */
+
+/* ------------------------------------------- C1. L depends on W1 how? */
+S({
+  chapter: "Chain rule · the path",
+  plain: "L depends on W1[0][0] only through a path",
+  notes: "Do not assume the room knows the chain rule applies here — show " +
+    "that it has to. Ask the question literally: if I increase W1[0][0], how " +
+    "does the loss change? The honest answer is that the loss has no idea " +
+    "W1[0][0] exists. L is a function of ŷ. ŷ is a function of z2. z2 is a " +
+    "function of a1. a1 is a function of z1. Only z1 has ever seen W1[0][0]. " +
+    "So there is exactly one route from that parameter to the loss, five " +
+    "links long, and every link is a function we already wrote down during " +
+    "the forward pass. Advance the fragments one at a time and let the path " +
+    "light up on the diagram — that picture is the whole idea.",
+  build: function (ctx) {
+    ctx.gn = gradNet({ focus: "the path from W1[0][0] to L" });
+    ctx.gn.setPath(0, 0, 0);
+    const links = [
+      ["W1[0][0]", "z1[0]", "z1 = W1·x + b1"],
+      ["z1[0]", "a1[0]", "a1 = relu(z1)"],
+      ["a1[0]", "z2", "z2 = W2·a1 + b2"],
+      ["z2", "ŷ", "ŷ = z2"],
+      ["ŷ", "L", "L = (ŷ − y)²"]
+    ];
+    return [
+      kicker("Chain rule · <b>why there is a chain at all</b>"),
+      title("<span class='mono v-weight'>W1[0][0]</span> never touches the loss directly", true),
+      d("cols wide-l", [
+        d("stack", [
+          say("The loss is a function of one number, <span class='mono'>ŷ</span>. " +
+              "It has never heard of <span class='mono v-weight'>W1[0][0]</span>. " +
+              "The only way that parameter can move the loss is by travelling " +
+              "along the forward pass we already ran:"),
+          d("stack", links.map(function (L, k) {
+            return frag(d("panel " + (k === 4 ? "g" : "a") + " tight", [
+              d("rowflex", [
+                h("pill", "link " + (k + 1)),
+                h("midnum", "<span class='mono' style='font-size:20px'>" +
+                  L[0] + " &nbsp;→&nbsp; " + L[1] + "</span>"),
+                h("small muted", "because <span class='mono'>" + L[2] + "</span>")
+              ])
+            ]), "f-left");
+          }))
+        ]),
+        d("stack", [ctx.gn.el, frag(NN.callout("key", "One path, five links",
+          "There is no second route. <span class='mono v-weight'>W1[0][0]</span> " +
+          "enters <span class='mono'>z1[0]</span> and nothing else, and each of " +
+          "the five arrows above is a function whose derivative we can write " +
+          "down by hand. That is what makes the whole thing mechanical."), "f-fade")])
+      ])
+    ];
+  },
+  render: function (n, ctx) { ctx.gn.setPath(Math.min(n, 5), 0, 0); }
+});
+
+/* ------------------------------------------- C2. why derivatives multiply */
+S({
+  chapter: "Chain rule · why it is a product",
+  plain: "Why the derivatives along the path multiply",
+  notes: "This is the derivation people never get shown. Nudge W1[0][0] by a " +
+    "tiny ε and follow the nudge forward, link by link, using nothing but the " +
+    "forward equations. Each link multiplies the nudge by its own local " +
+    "sensitivity. By the time the disturbance reaches the loss it has been " +
+    "multiplied by all five, so the ratio ΔL / ε is the product of the five " +
+    "local derivatives — and that ratio, in the limit, IS dL/dW1[0][0]. The " +
+    "punchline is on the last line: the cascade lands on exactly the number " +
+    "the trace's finite-difference check reports for the same parameter, " +
+    "which is a completely independent calculation.",
+  build: function () {
+    const EPS = 1e-3;
+    const nz1 = FWD.x[0] * EPS;
+    const na1 = nz1 * FWD.relu_mask[0];
+    const nz2 = T.init.W2[0][0] * na1;
+    const nyh = D_ID * nz2;
+    const nL  = BWD.dL_dyhat * nyh;
+    const ratio = nL / EPS;
+    const num = T.gradcheck.numerical[IX_W100];
+    return [
+      kicker("Chain rule · <b>the derivation</b>"),
+      title("Push a nudge through the path and watch it get rescaled", true),
+      d("cols wide-l", [
+        derivPanel("nudge W1[0][0] by ε = " + f(EPS, 4) + " and follow it forward", [
+          frag(drow("Δz1[0] &nbsp;=&nbsp; x[0] · ε &nbsp;=&nbsp; " + A(FWD.x[0], 1) +
+                    " × " + f(EPS, 4) + " = " + f(nz1, 6),
+                    "z1 = W1·x + b1"), "f-left"),
+          frag(drow("Δa1[0] &nbsp;=&nbsp; mask[0] · Δz1[0] &nbsp;=&nbsp; " +
+                    A(FWD.relu_mask[0], 0) + " × " + f(nz1, 6) + " = " + f(na1, 6),
+                    "a1 = relu(z1)"), "f-left"),
+          frag(drow("Δz2 &nbsp;=&nbsp; W2[0][0] · Δa1[0] &nbsp;=&nbsp; " +
+                    W(T.init.W2[0][0], 2) + " × " + f(na1, 6) + " = " + f(nz2, 6),
+                    "z2 = W2·a1 + b2"), "f-left"),
+          frag(drow("Δŷ &nbsp;=&nbsp; 1 · Δz2 &nbsp;=&nbsp; " + f(nyh, 6),
+                    "ŷ = z2"), "f-left"),
+          frag(drow("ΔL &nbsp;=&nbsp; 2(ŷ − y) · Δŷ &nbsp;=&nbsp; " +
+                    G(BWD.dL_dyhat, 2) + " × " + f(nyh, 6) + " = " + f(nL, 6),
+                    "L = (ŷ − y)²"), "f-left"),
+          frag(drow("ΔL / ε &nbsp;=&nbsp; <span class='v-gradient'>" + f(ratio, 6) +
+                    "</span>", "the sensitivity we wanted", true), "f-pop")
+        ], "a"),
+        d("stack", [
+          frag(say("Every link did the same thing: it took the disturbance " +
+            "handed to it and multiplied it by <b>one number</b> — its own " +
+            "local sensitivity. Five links, five multiplications. So the " +
+            "overall ratio is the <b>product</b> of the five."), "f-right"),
+          frag(NN.formula({
+            rule: "dL/dW1[0][0] &nbsp;=&nbsp; lim<sub>ε→0</sub> ΔL / ε " +
+                  "&nbsp;=&nbsp; (dL/dŷ)(dŷ/dz2)(dz2/da1)(da1/dz1)(dz1/dW1)",
+            cls: "gradient" }), "f-right"),
+          frag(vbox(Math.abs(ratio - num) < 1e-6,
+            "cascade gives <b class='v-gradient'>" + f(ratio, 6) + "</b> &nbsp;·&nbsp; " +
+            "<span class='muted'>T.gradcheck.numerical[" + IX_W100 + "] =</span> <b>" +
+            f(num, 6) + "</b> &nbsp;·&nbsp; <span class='muted'>the trace perturbed " +
+            "the real parameter and re-ran the forward pass</span>"), "f-pop"),
+          frag(h("small muted", "The nudge is linear here because ε is small: " +
+            "ReLU does not change side, so each link really is a single " +
+            "multiply. That is exactly what taking the limit ε → 0 " +
+            "guarantees."), "f-fade")
+        ])
+      ])
+    ];
+  }
+});
+
+/* --------------------------------------------- C3. the rule, stated */
+S({
+  chapter: "Chain rule · stated",
+  plain: "Upstream × local, at every node",
+  notes: "Now name the two halves, because every one of the next " + NSTEP +
+    " slides is built out of them. The upstream gradient is what arrived " +
+    "from the right — the derivative of the loss with respect to this node's " +
+    "output. The local derivative is the derivative of ONE operation with " +
+    "respect to one of its inputs, and it comes from that operation's " +
+    "defining equation and nothing else. Multiply them and you have the " +
+    "gradient to hand to the node on your left. That is the whole algorithm; " +
+    "everything after this is bookkeeping.",
+  build: function () {
+    return [
+      kicker("Chain rule · <b>the shape of every step</b>"),
+      title("Every step is the same two factors"),
+      frag(eqline("dL/d<span class='v-weight'>W</span>", [
+        { sym: "dL/dz", role: "upstream", rule: "arrived from the right",
+          cls: "gradient" },
+        { sym: "dz/dW", role: "local", rule: "read off z's own definition",
+          cls: "activation", op: "·" }
+      ]), "f-pop"),
+      gap(6),
+      frag(d("cols", [
+        panel("g", [ph("the upstream gradient"),
+          h("say", "How much the loss moves when <span class='mono'>z</span> " +
+            "moves. Someone to the right already computed it and handed it " +
+            "over. This is the only thing that flows.")]),
+        panel("a", [ph("the local derivative"),
+          h("say", "How much <span class='mono'>z</span> moves when " +
+            "<span class='mono'>W</span> moves — a property of one operation, " +
+            "obtained by differentiating the line of algebra that defines it. " +
+            "It never depends on anything downstream.")])
+      ]), "f-fade"),
+      frag(NN.callout("key", "Right to left is forced, not stylistic",
+        "Each step needs the result of the step to its right: " +
+        "<span class='mono'>dL/dW1</span> needs <span class='mono'>dL/dz1</span> " +
+        "needs <span class='mono'>dL/da1</span> needs <span class='mono'>dL/dz2</span> " +
+        "needs <span class='mono'>dL/dŷ</span>. That data dependency is also why " +
+        "the backward pass cannot start until the forward pass has finished — " +
+        "and therefore why everything backward will need has to survive until " +
+        "then."), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------- C4. local derivative: the loss */
+S({
+  chapter: "Chain rule · local derivative 1 of 4",
+  plain: "Differentiate the loss: dL/dŷ = 2(ŷ − y)",
+  notes: "Never present a local derivative as a given. Here is the first one " +
+    "worked on screen: expand the square, differentiate term by term " +
+    "remembering that y is a constant, collect. The answer is 2(ŷ − y) — " +
+    "twice the signed error. Substitute and you get " + f(BWD.dL_dyhat, 2) +
+    ", which is bigger in magnitude than the error itself; the factor of two " +
+    "is real and it propagates into every one of the 13 gradients.",
+  build: function () {
+    return [
+      kicker("Chain rule · <b>local derivative 1</b> · the loss"),
+      title("<span class='mono'>L = (ŷ − y)²</span> &nbsp;⟹&nbsp; " +
+            "<span class='mono v-gradient'>dL/dŷ = 2(ŷ − y)</span>", true),
+      d("cols", [
+        derivPanel("differentiate it, line by line", [
+          frag(drow("L(ŷ) &nbsp;=&nbsp; (ŷ − y)²", "the definition"), "f-left"),
+          frag(drow("&nbsp;&nbsp;&nbsp;&nbsp; = &nbsp;ŷ² − 2yŷ + y²", "expand the square"), "f-left"),
+          frag(drow("dL/dŷ &nbsp;=&nbsp; 2ŷ − 2y − 0", "term by term; y is a constant"), "f-left"),
+          frag(drow("&nbsp;&nbsp;&nbsp;&nbsp; = &nbsp;2(ŷ − y)", "collect", true), "f-pop")
+        ], "g"),
+        d("stack", [
+          frag(NN.formula({ rule: STEPS[STEP_IX.dL_dyhat].formula,
+            sub: STEPS[STEP_IX.dL_dyhat].substitution,
+            result: fS(BWD.dL_dyhat, 4), cls: "gradient" }), "f-right"),
+          frag(NN.tiles([
+            { k: "error  ŷ − y", v: fS(FWD.error, 2), s: "signed", cls: "gradient" },
+            { k: "dL/dŷ", v: fS(BWD.dL_dyhat, 3), s: "twice the error", cls: "gradient" }
+          ]), "f-right"),
+          frag(NN.callout("why", "Where the 2 goes",
+            "It does not cancel anywhere. Every one of the " + NPARAM +
+            " gradients carries this factor of two, and so does the size of " +
+            "the first optimizer step. Halving the loss definition to " +
+            "<span class='mono'>½(ŷ − y)²</span> — which many texts do — " +
+            "halves all " + NPARAM + " gradients and is exactly equivalent to " +
+            "halving the learning rate."), "f-right")
+        ])
+      ])
+    ];
+  }
+});
+
+/* ------------------------------- C5. local derivative: a linear layer */
+S({
+  chapter: "Chain rule · local derivative 2 of 4",
+  plain: "A linear layer, differentiated three ways",
+  notes: "One line of algebra pays for three of the eight backward steps. " +
+    "Write z2 out as a plain sum of products — no matrix notation, just the " +
+    "three terms and the bias. Then read the partial derivatives straight " +
+    "off it. W2[0][j] appears in exactly one term, multiplied by a1[j], so " +
+    "the derivative is a1[j]. a1[j] appears in exactly one term, multiplied " +
+    "by W2[0][j], so that derivative is W2[0][j]. b2 appears once with a " +
+    "coefficient of one. Make the contrast explicit: the WEIGHT gradient " +
+    "needs the activation, the ACTIVATION gradient needs the weight. That " +
+    "asymmetry is the reason the forward pass cannot free its outputs.",
+  build: function () {
+    const terms = T.init.W2[0].map(function (w, j) {
+      return "<span class='v-weight'>W2[0][" + j + "]</span>·" +
+             "<span class='v-activation'>a1[" + j + "]</span>";
+    }).join(" + ");
+    return [
+      kicker("Chain rule · <b>local derivative 2</b> · a linear layer"),
+      title("Write the matmul out, then just read the partials off", true),
+      frag(d("panel a", [ph("the forward equation, expanded — no matrix notation"),
+        h("dmath", "<span class='mono' style='font-size:21px'>z2 &nbsp;=&nbsp; " +
+          terms + " + <span class='v-weight'>b2</span></span>"),
+        h("small muted", "= " + T.init.W2[0].map(function (w, j) {
+          return f(w, 2) + "×" + f(FWD.a1[j], 2);
+        }).join(" + ") + " + " + f(T.init.b2[0], 2) + " = " + f(FWD.yhat, 4))]), "f-fade"),
+      gap(4),
+      d("cols3", [
+        frag(d("panel w", [ph("differentiate w.r.t. a WEIGHT"),
+          h("dmath", "<span class='mono' style='font-size:19px'>∂z2/∂W2[0][j] = " +
+            "<span class='v-activation'>a1[j]</span></span>"),
+          h("small muted", "W2[0][j] appears in one term only, multiplied by a1[j]. " +
+            "Everything else is a constant w.r.t. it."),
+          h("small", "here: " + vecTxt(FWD.a1, 2) + " — a " +
+            "<span class='v-activation'>saved activation</span>")]), "f-pop"),
+        frag(d("panel a", [ph("differentiate w.r.t. an INPUT"),
+          h("dmath", "<span class='mono' style='font-size:19px'>∂z2/∂a1[j] = " +
+            "<span class='v-weight'>W2[0][j]</span></span>"),
+          h("small muted", "a1[j] appears in one term only, multiplied by W2[0][j]."),
+          h("small", "here: " + vecTxt(T.init.W2[0], 2) + " — a " +
+            "<span class='v-weight'>live parameter</span>")]), "f-pop"),
+        frag(d("panel acc", [ph("differentiate w.r.t. the BIAS"),
+          h("dmath", "<span class='mono' style='font-size:19px'>∂z2/∂b2 = 1</span>"),
+          h("small muted", "b2 is added in once, with a coefficient of one."),
+          h("small", "here: 1 — nothing has to be remembered at all")]), "f-pop")
+      ]),
+      frag(NN.callout("key", "The asymmetry to remember",
+        "A linear layer's <b>weight</b> gradient needs its " +
+        "<span class='v-activation'>input</span>; its <b>input</b> gradient " +
+        "needs its <span class='v-weight'>weights</span>. The weights were " +
+        "going to be resident anyway. The input was not — which is why it has " +
+        "to be kept alive from the forward pass until backward asks for it. " +
+        "The same three partials apply verbatim to " +
+        "<span class='mono'>z1 = W1·x + b1</span> one layer down, with " +
+        "<span class='mono v-activation'>x</span> in place of " +
+        "<span class='mono v-activation'>a1</span>."), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------- C6. local derivative: ReLU */
+S({
+  chapter: "Chain rule · local derivative 3 of 4",
+  plain: "The ReLU gate: da1/dz1 = 1 if z1 > 0 else 0",
+  notes: "ReLU is defined piecewise, so differentiate it piecewise. On the " +
+    "positive side it is the identity, whose slope is one. On the negative " +
+    "side it is the constant zero, whose slope is zero. So the derivative is " +
+    "a gate: it either passes the gradient through untouched or it deletes " +
+    "it. Crucially, which side you are on depends on the sign of z1 — a " +
+    "forward-pass quantity — so the backward pass has to be told. That is " +
+    "the whole reason the mask is a saved tensor. Our z1 was " +
+    vecTxt(FWD.z1, 2) + ", so the mask is " + vecTxt(FWD.relu_mask, 0) + ".",
+  build: function (ctx) {
+    const pts = [];
+    for (let v = -2; v <= 2.001; v += 0.05) pts.push([v, Math.max(0, v)]);
+    const dpts = [];
+    for (let v = -2; v <= -0.001; v += 0.05) dpts.push([v, 0]);
+    const dpts2 = [];
+    for (let v = 0.001; v <= 2.001; v += 0.05) dpts2.push([v, 1]);
+    return [
+      kicker("Chain rule · <b>local derivative 3</b> · the nonlinearity"),
+      title("<span class='mono'>a1 = relu(z1) = max(0, z1)</span>", true),
+      d("cols", [
+        d("stack", [
+          derivPanel("it is defined piecewise, so differentiate it piecewise", [
+            frag(drow("relu(z) &nbsp;=&nbsp; z &nbsp;&nbsp;&nbsp;&nbsp;when z &gt; 0",
+                      "the identity — slope 1"), "f-left"),
+            frag(drow("relu(z) &nbsp;=&nbsp; 0 &nbsp;&nbsp;&nbsp;&nbsp;when z &lt; 0",
+                      "a constant — slope 0"), "f-left"),
+            frag(drow("d relu/dz &nbsp;=&nbsp; <span class='v-activation'>1[z &gt; 0]</span>",
+                      "one number per unit, 1 or 0", true), "f-pop")
+          ], "a"),
+          frag(d("panel a tight", [ph("our z1, and the mask it produced"),
+            d("rowflex", [
+              tn({ name: "z1", shape: [NHID], values: FWD.z1, cls: "activation", digits: 2 }),
+              h("ar", "→"),
+              tn({ name: "relu_mask", shape: [NHID], values: FWD.relu_mask,
+                   cls: "activation", digits: 0, note: "saved for backward" })
+            ])]), "f-left")
+        ]),
+        d("stack", [
+          frag(d("panel a", [ph("relu, and its slope"),
+            NN.chart.line({
+              series: [
+                { name: "relu(z)", color: "var(--activation)", points: pts, dots: false },
+                { name: "slope, z < 0", color: "var(--critical)", points: dpts, dots: false },
+                { name: "slope, z > 0", color: "var(--gradient)", points: dpts2, dots: false }
+              ], width: 480, height: 210, xlabel: "z", ylabel: "" }),
+            chartKey([{ name: "relu(z) = max(0, z)", color: "var(--activation)" },
+                      { name: "derivative = 1 where z > 0", color: "var(--gradient)" },
+                      { name: "derivative = 0 where z < 0", color: "var(--critical)" }])]), "f-right"),
+          frag(NN.callout("mem", "This is why a mask has to be saved",
+            "The derivative depends on the <em>sign of z1</em>, which is a " +
+            "forward-pass fact. Backward cannot recover it from the gradient " +
+            "flowing in. So the forward pass writes down " +
+            "<span class='mono v-activation'>relu_mask</span> = " +
+            vecTxt(FWD.relu_mask, 0) + " and keeps it. One bit per unit of real " +
+            "information — the cheapest thing backward reads, and the one most " +
+            "worth compressing at scale."), "f-right")
+        ])
+      ])
+    ];
+  }
+});
+
+/* ------------------------------- C7. the full product, one parameter */
+S({
+  chapter: "Chain rule · the whole product",
+  plain: "The full chain for W1[0][0], multiplied out and checked",
+  notes: "Now put it together. Five factors, nothing abbreviated, every " +
+    "value from the trace: the loss derivative, the identity output, one " +
+    "weight, one ReLU gate and one saved input. Multiply them and you get " +
+    f(BWD.dL_dW1[0][0], 4) + ", which is exactly T.backward.dL_dW1[0][0]. " +
+    "The check on the last line is computed live in the browser, not typed. " +
+    "Point out what the factors are MADE of: one is the loss derivative, one " +
+    "is a parameter, two are saved activations. You cannot evaluate this " +
+    "product from the weights alone — the activations are half the " +
+    "ingredients, and that is the memory argument in one line.",
+  build: function (ctx) {
+    const I = 0, J = 0;
+    const FCS = chainFactors(I, J);
+    const prod = chainProduct(I, J);
+    const truth = BWD.dL_dW1[I][J];
+    const diff = Math.abs(prod - truth);
+    ctx.gn = gradNet({ focus: "dL/dW1[0][0] · the whole path", w1labels: false });
+    ctx.gn.setPath(5, I, J);
+    return [
+      kicker("Chain rule · <b>the whole product</b>"),
+      title("<span class='mono v-gradient'>dL/dW1[0][0]</span> = five numbers, multiplied", true),
+      frag(eqline("dL/dW1[0][0]", FCS.map(function (fc) {
+        return { sym: fc.sym, role: fc.role, rule: fc.rule, cls: fc.cls,
+                 op: "·", zero: fc.num === 0 };
+      }), true), "f-left"),
+      d("cols wide-l", [
+        d("stack", [
+          frag(eqline("&nbsp;", FCS.map(function (fc) {
+            return { sym: f(fc.num, 3), role: fc.role, cls: fc.cls, op: "×",
+                     zero: fc.num === 0 };
+          }), true), "f-left"),
+          frag(vbox(diff < 1e-12,
+            "product = <b class='v-gradient'>" + f(prod, 6) + "</b> &nbsp;·&nbsp; " +
+            "<span class='muted'>T.backward.dL_dW1[0][0] =</span> " +
+            "<b class='v-gradient'>" + f(truth, 6) + "</b> &nbsp;·&nbsp; " +
+            "<span class='muted'>|difference| =</span> <b>" +
+            (diff === 0 ? "0" : diff.toExponential(2)) + "</b>"), "f-pop"),
+          frag(h("small muted", "The <span class='mono'>|difference|</span> above is " +
+            "computed in the browser from <span class='mono'>NN.T</span> when the " +
+            "slide is built — it is a live assertion, not a claim."), "f-fade")
+        ]),
+        d("stack", [ctx.gn.el,
+          frag(NN.callout("mem", "Two of the five factors are saved activations",
+            "One factor is the loss derivative, one is the constant 1, one is a " +
+            "<span class='v-weight'>parameter</span> we were keeping anyway — and " +
+            "two are <span class='v-activation'>activations</span> the forward " +
+            "pass had to write down: the ReLU mask and the input " +
+            "<span class='mono'>x</span>. Without them this product cannot be " +
+            "evaluated at all."), "f-fade")])
+      ])
+    ];
+  }
+});
+
+/* ------------------------------- C8. one zero kills the path */
+S({
+  chapter: "Chain rule · a zero on the path",
+  plain: "One zero factor annihilates the whole product",
+  notes: "Same five-factor product, one row down the hidden layer: " +
+    "W1[" + DEADU + "][0], the weight feeding the unit ReLU clamped. Four of " +
+    "the five factors are perfectly ordinary non-zero numbers. The ReLU gate " +
+    "is zero, and a product with a zero in it is zero, so the parameter " +
+    "receives no gradient at all. Not small — exactly zero. Say it plainly: " +
+    "the unit contributed nothing to the prediction, so it takes none of the " +
+    "blame. We come back to what that does to training in two slides.",
+  build: function (ctx) {
+    const I = DEADU, J = 0;
+    const FCS = chainFactors(I, J);
+    const prod = chainProduct(I, J);
+    const truth = BWD.dL_dW1[I][J];
+    const diff = Math.abs(prod - truth);
+    ctx.gn = gradNet({ focus: "dL/dW1[" + I + "][0] · the path is broken" });
+    ctx.gn.setPath(5, I, J);
+    return [
+      kicker("Chain rule · <b>a broken link</b>"),
+      title("Four ordinary numbers and one <span class='v-gradient'>0</span>", true),
+      frag(eqline("dL/dW1[" + I + "][0]", FCS.map(function (fc) {
+        return { sym: f(fc.num, 3), role: fc.role, rule: fc.rule, cls: fc.cls,
+                 op: "×", zero: fc.num === 0 };
+      }), true), "f-left"),
+      d("cols wide-l", [
+        d("stack", [
+          frag(vbox(diff < 1e-12,
+            "product = <b class='v-gradient'>" + f(prod, 6) + "</b> &nbsp;·&nbsp; " +
+            "<span class='muted'>T.backward.dL_dW1[" + I + "][0] =</span> " +
+            "<b class='v-gradient'>" + f(truth, 6) + "</b> &nbsp;·&nbsp; " +
+            "<span class='muted'>|difference| =</span> <b>" +
+            (diff === 0 ? "0" : diff.toExponential(2)) + "</b>"), "f-pop"),
+          frag(h("deadflag", "The gate is shut: " + f(FWD.relu_mask[I], 0) +
+            " × anything = 0"), "f-pop"),
+          frag(say("The other four factors are not small. " +
+            "<span class='mono v-weight'>W2[0][" + I + "] = " +
+            f(T.init.W2[0][I], 2) + "</span> is the largest weight in the " +
+            "output layer. It does not matter. One zero anywhere on a path " +
+            "zeroes the whole path."), "f-fade")
+        ]),
+        d("stack", [ctx.gn.el,
+          frag(NN.callout("warn", "Every path through unit " + I + " is dead",
+            "There are " + NINP + " weights and one bias feeding unit " + I +
+            ", and all " + (NINP + 1) + " of their paths to the loss run " +
+            "through the same shut gate. All " + (NINP + 1) + " gradients are " +
+            "exactly zero, so SGD moves none of them, so next iteration the " +
+            "gate is still shut."), "f-fade")])
+      ])
+    ];
+  }
+});
+
+/* ------------------------------- C9. why not 13 chains */
+S({
+  chapter: "Chain rule · the shared prefix",
+  plain: "Why backprop is one pass, not 13 chains",
+  notes: "The last framing slide before the walk. You could evaluate the " +
+    "five-factor product separately for each of the " + NPARAM +
+    " parameters, and you would get the right answer — but look at the " +
+    "products: they share their leading factors. Every parameter in the " +
+    "first layer starts with the same dL/dŷ, dŷ/dz2 prefix, and every " +
+    "parameter feeding hidden unit i shares the prefix all the way down to " +
+    "dL/dz1[i]. Backpropagation computes each shared prefix ONCE, left to " +
+    "right in the products but right to left in the network, and reuses it. " +
+    "That is the entire reason one backward pass costs about what one " +
+    "forward pass costs instead of one forward pass per parameter.",
+  build: function () {
+    const rows = [[0, 0], [0, 1], [1, 0], [DEADU, 0]].map(function (p) {
+      const FCS = chainFactors(p[0], p[1]);
+      return el("tr", {}, [
+        el("td", { class: "mono" }, "W1[" + p[0] + "][" + p[1] + "]"),
+        el("td", { class: "n v-gradient" }, f(FCS[0].num, 3)),
+        el("td", { class: "n" }, f(FCS[1].num, 0)),
+        el("td", { class: "n v-weight" }, f(FCS[2].num, 2)),
+        el("td", { class: "n v-activation" }, f(FCS[3].num, 0)),
+        el("td", { class: "n v-activation" }, f(FCS[4].num, 1)),
+        el("td", { class: "n v-gradient" }, f(chainProduct(p[0], p[1]), 4))
+      ]);
+    });
+    return [
+      kicker("Chain rule · <b>why it is cheap</b>"),
+      title("The products share their front halves"),
+      frag(d("panel g", [ph("the five factors, for four different parameters"),
+        el("table", { class: "data" }, [
+          el("thead", {}, el("tr", {}, [
+            el("th", { style: { textAlign: "left" } }, "parameter"),
+            el("th", {}, "dL/dŷ"), el("th", {}, "dŷ/dz2"),
+            el("th", {}, "dz2/da1"), el("th", {}, "da1/dz1"),
+            el("th", {}, "dz1/dW1"), el("th", {}, "product")])),
+          el("tbody", {}, rows)]),
+        h("small muted", "The first two columns are identical for every " +
+          "parameter in the model. The first four are identical for every " +
+          "parameter feeding the same hidden unit. Only the last column " +
+          "changes within a row of W1.")]), "f-fade"),
+      frag(d("cols", [
+        NN.tiles([
+          { k: "if you evaluated each chain separately", v: String(NPARAM),
+            s: "independent products", cls: "gradient" },
+          { k: "shared prefixes computed once", v: String(NSTEP),
+            s: "the " + NSTEP + " steps of the backward pass", cls: "gradient" }
+        ]),
+        NN.callout("key", "That is what backpropagation IS",
+          "Backprop is not a different rule from the chain rule. It is the " +
+          "chain rule evaluated with the common subexpressions factored out — " +
+          "dynamic programming over the computation graph. It walks right to " +
+          "left because that is the direction in which the prefixes are " +
+          "shared, and it stores one intermediate gradient per node instead " +
+          "of one product per parameter.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* -------------------------------------------------- the plan for the walk */
 S({
   chapter: "Backward pass", plain: "The plan: " + NSTEP + " steps, right to left",
   notes: "Before we walk it, the shape of the thing. Backpropagation is the " +
@@ -1820,26 +2676,41 @@ S({
     "right and produces the gradient to pass further left, plus — if it owns " +
     "parameters — the gradient for those. Keep an eye on the READS line on " +
     "each of the next " + NSTEP + " slides; that is the whole argument of this deck.",
-  build: function () {
+  build: function (ctx) {
     const chain = STEPS.map(function (s, i) {
       return frag(d("pill" + (s.reads.some(isSaved) ? " hot" : ""),
         (i + 1) + ". " + s.label + (s.reads.length ? "  ← " + s.reads.join(", ") : "")), "f-pop");
     });
+    ctx.gn = gradNet({ focus: "eight steps, from L back to W1", height: 300 });
+    ctx.gn.setPath(0, 0, 0);
     return [
       kicker("Backward pass"),
       title("The chain rule, " + NSTEP + " times, in reverse order"),
-      frag(netSVG({ height: 230, back: true, dead: true, labels: false, values: true }), "f-fade"),
-      d("rowflex", chain),
-      frag(NN.callout("key", "Read the arrows on the left of each step",
-        "Some steps need nothing but the gradient flowing in. Others must " +
-        "re-read a tensor that the <em>forward</em> pass produced. Those are the " +
-        "reason activation memory exists, and the reason it scales with batch " +
-        "size and sequence length."), "f-fade")
+      d("cols wide-r", [
+        d("stack", [
+          frag(say("Each step multiplies the gradient handed to it by one " +
+            "local derivative and hands the result further left. Steps that " +
+            "own parameters also emit a parameter gradient and stop."), "f-left"),
+          frag(NN.callout("key", "Read the arrows on the left of each step",
+            "Some steps need nothing but the gradient flowing in. Others must " +
+            "re-read a tensor that the <em>forward</em> pass produced. Those are " +
+            "the reason activation memory exists, and the reason it scales with " +
+            "batch size and sequence length."), "f-left")
+        ]),
+        ctx.gn.el
+      ]),
+      d("rowflex", chain)
     ];
   }
 });
 
-/* ------------------------------------------ 18..(17+NSTEP). one per step */
+/* ============================= the walk: one slide per chain-rule step ===
+   Each of the NSTEP slides does the same four things: the symbolic rule
+   typeset as a labelled product, the local derivative DERIVED from the
+   operation's defining equation, the substitution with real numbers and the
+   result, and — beside all of it — the live network diagram with the node
+   or wire under inspection highlighted and the saved tensor pulsing. */
+
 /* Presenter framing per step, keyed by the id in the trace. The factual
    note always comes from T.backward.steps[i].note. */
 const STEP_SAY = {
@@ -1872,10 +2743,97 @@ const STEP_SAY = {
     "is just the gradient of its own pre-activation. We now have all " +
     NPARAM + " numbers and the backward pass is finished."
 };
+
+/* The three tiers, per step: the symbolic product with each factor labelled,
+   the local derivative read off its defining equation, and the substitution.
+   `factors` is what gets typeset; `deriv` is the algebra behind the LOCAL
+   factor; `focus` names the variable under inspection on the diagram. */
+const STEP_EQ = {
+  dL_dyhat: {
+    factors: [{ sym: "2(ŷ − y)", role: "local · the only factor",
+                rule: "from L = (ŷ − y)²", cls: "gradient" }],
+    vals: [fS(BWD.dL_dyhat, 3)],
+    deriv: [["L = (ŷ − y)² = ŷ² − 2yŷ + y²", "expand"],
+            ["dL/dŷ = 2ŷ − 2y = 2(ŷ − y)", "differentiate; y is constant", true]],
+    from: "L = (ŷ − y)²",
+    focus: "dL/dŷ · at the output node"
+  },
+  dL_dz2: {
+    factors: [{ sym: "dL/dŷ", role: "upstream", rule: "step 1", cls: "gradient" },
+              { sym: "dŷ/dz2", role: "local", rule: "from ŷ = z2", cls: null, op: "·" }],
+    vals: [fS(BWD.dL_dyhat, 3), f(D_ID, 0)],
+    deriv: [["ŷ = z2", "the output layer has no activation function"],
+            ["dŷ/dz2 = 1", "the derivative of the identity", true]],
+    from: "ŷ = z2",
+    focus: "dL/dz2 · at the output node"
+  },
+  dL_dW2: {
+    factors: [{ sym: "dL/dz2", role: "upstream", rule: "step 2", cls: "gradient" },
+              { sym: "a1ᵀ", role: "local · saved activation",
+                rule: "from z2 = W2·a1 + b2", cls: "activation", op: "⊗" }],
+    vals: [fS(BWD.dL_dz2, 3), vecTxt(FWD.a1, 2)],
+    deriv: [["z2 = W2[0][0]·a1[0] + W2[0][1]·a1[1] + W2[0][2]·a1[2] + b2", "the definition"],
+            ["∂z2/∂W2[0][j] = a1[j]", "W2[0][j] appears once, multiplied by a1[j]", true]],
+    from: "z2 = W2·a1 + b2",
+    focus: "dL/dW2 · the three output wires"
+  },
+  dL_db2: {
+    factors: [{ sym: "dL/dz2", role: "upstream", rule: "step 2", cls: "gradient" },
+              { sym: "dz2/db2", role: "local", rule: "from z2 = W2·a1 + b2",
+                cls: null, op: "·" }],
+    vals: [fS(BWD.dL_dz2, 3), "1"],
+    deriv: [["z2 = … + b2", "b2 is added in once"],
+            ["∂z2/∂b2 = 1", "coefficient one, so the gradient passes through", true]],
+    from: "z2 = W2·a1 + b2",
+    focus: "dL/db2 · at the output node"
+  },
+  dL_da1: {
+    factors: [{ sym: "W2ᵀ", role: "local · live parameter",
+                rule: "from z2 = W2·a1 + b2", cls: "weight" },
+              { sym: "dL/dz2", role: "upstream", rule: "step 2", cls: "gradient", op: "·" }],
+    vals: [vecTxt(T.init.W2[0], 2), fS(BWD.dL_dz2, 3)],
+    deriv: [["z2 = W2[0][0]·a1[0] + W2[0][1]·a1[1] + W2[0][2]·a1[2] + b2", "the same definition"],
+            ["∂z2/∂a1[j] = W2[0][j]", "a1[j] appears once, multiplied by W2[0][j]", true]],
+    from: "z2 = W2·a1 + b2",
+    focus: "dL/da1 · crossing the layer boundary"
+  },
+  dL_dz1: {
+    factors: [{ sym: "dL/da1", role: "upstream", rule: "step 5", cls: "gradient" },
+              { sym: "1[z1 > 0]", role: "local · saved mask",
+                rule: "from a1 = relu(z1)", cls: "activation", op: "⊙" }],
+    vals: [vecTxt(BWD.dL_da1, 3, true), vecTxt(FWD.relu_mask, 0)],
+    deriv: [["relu(z) = z when z > 0, else 0", "the definition, piecewise"],
+            ["d relu/dz = 1[z > 0]", "slope 1 on one side, slope 0 on the other", true]],
+    from: "a1 = relu(z1)",
+    focus: "dL/dz1 · through the ReLU gate"
+  },
+  dL_dW1: {
+    factors: [{ sym: "dL/dz1", role: "upstream", rule: "step 6", cls: "gradient" },
+              { sym: "xᵀ", role: "local · saved input", rule: "from z1 = W1·x + b1",
+                cls: "activation", op: "⊗" }],
+    vals: [vecTxt(BWD.dL_dz1, 3, true), vecTxt(FWD.x, 1)],
+    deriv: [["z1[i] = W1[i][0]·x[0] + W1[i][1]·x[1] + b1[i]", "the definition"],
+            ["∂z1[i]/∂W1[i][j] = x[j]", "same algebra as W2, one layer down", true]],
+    from: "z1 = W1·x + b1",
+    focus: "dL/dW1 · the six input wires"
+  },
+  dL_db1: {
+    factors: [{ sym: "dL/dz1", role: "upstream", rule: "step 6", cls: "gradient" },
+              { sym: "dz1/db1", role: "local", rule: "from z1 = W1·x + b1",
+                cls: null, op: "·" }],
+    vals: [vecTxt(BWD.dL_dz1, 3, true), "1"],
+    deriv: [["z1[i] = … + b1[i]", "b1[i] is added in once"],
+            ["∂z1[i]/∂b1[i] = 1", "coefficient one, again", true]],
+    from: "z1 = W1·x + b1",
+    focus: "dL/db1 · at the hidden units"
+  }
+};
+
 STEPS.forEach(function (st, si) {
   const arr = Array.isArray(st.value);
   const flat = arr ? [].concat.apply([], st.value) : [st.value];
   const readsSaved = st.reads.some(isSaved);
+  const EQ = STEP_EQ[st.id];
   S({
     chapter: "Backward · step " + (si + 1) + " of " + NSTEP,
     plain: st.label + " = " + (arr
@@ -1886,11 +2844,18 @@ STEPS.forEach(function (st, si) {
         "gradient alone: it re-reads " + st.reads.join(" and ") + ", a tensor " +
         "the forward pass produced and the framework has been holding in " +
         "memory ever since."
-      : ""),
+      : "") + "  ——  The three tiers on the left are the same every time: the " +
+      "symbolic rule, the local derivative read off " + EQ.from + ", then the " +
+      "numbers. The diagram on the right shows how far the gradient has " +
+      "travelled and pulses whatever this step reads.",
     build: function (ctx) {
+      ctx.gn = gradNet({ step: si, focus: EQ.focus,
+                         w1labels: st.id === "dL_dW1" });
+      ctx.gn.setReading(false);
+
       const valNode = arr
         ? tn({ name: st.label, values: st.value, cls: "gradient", digits: 4, signed: true })
-        : h("bignum v-gradient", fS(st.value, 4));
+        : h("midnum v-gradient", fS(st.value, 4));
 
       const readNodes = st.reads.length
         ? st.reads.map(function (r) {
@@ -1900,32 +2865,152 @@ STEPS.forEach(function (st, si) {
                 ? "READS SAVED ACTIVATION · " + r
                 : "READS LIVE PARAMETER · " + r),
               d("rowflex", [
-                tn({ name: r, shape: src.shape, values: src.values, cls: src.cls, digits: 2 }),
-                h("say", src.why)
+                tn({ name: r, shape: src.shape, cls: src.cls, digits: 2,
+                     values: src.shape.length === 1 ? [src.values] : src.values }),
+                h("small muted", src.why)
               ])
             ]);
           })
         : [d("readbox none", [h("rt", "READS NOTHING SAVED"),
-            h("say", "Only the gradient flowing in from the right.")])];
+            h("small muted", "Only the gradient flowing in from the right.")])];
 
       return [
         kicker("Backward · step <b>" + (si + 1) + " / " + NSTEP + "</b> · " +
                "<span class='mono'>" + st.id + "</span>"),
-        title("<span class='mono v-gradient'>" + st.label + "</span>", true),
+        title("<span class='mono v-gradient'>" + st.label + "</span>" +
+              " &nbsp;<span style='font-size:22px;color:var(--ink-muted)'>" +
+              "— " + EQ.focus.split(" · ")[1] + "</span>", true),
         d("cols wide-l", [
           d("stack", [
-            frag(NN.formula({ rule: st.formula, cls: "gradient" }), "f-left"),
-            frag(NN.formula({ rule: "substitute", sub: st.substitution, cls: "gradient" }), "f-left"),
-            frag(d("panel g", [ph("result · " + st.label), valNode]), "f-pop")
+            /* TIER 1 — the symbolic rule, factor by factor */
+            frag(eqline(st.label, EQ.factors), "f-left"),
+            /* TIER 2 — where the local derivative comes from */
+            frag(derivPanel("the local derivative, read off " + EQ.from,
+              EQ.deriv.map(function (r) { return drow(r[0], r[1], r[2]); })), "f-left"),
+            /* TIER 3 — the same product with the real numbers in it */
+            frag(eqline("&nbsp;", EQ.factors.map(function (fc, k) {
+              return { sym: EQ.vals[k], role: fc.role, cls: fc.cls, op: fc.op };
+            }), true), "f-left"),
+            frag(d("panel g tight", [ph("result · " + st.label), valNode,
+              h("small muted", "<span class='mono'>T.backward.steps[" + si +
+                "].substitution</span> &nbsp;=&nbsp; <span class='mono'>" +
+                st.substitution + "</span>")]), "f-pop")
           ]),
-          d("stack", readNodes.map(function (rn, k) {
+          d("stack", [ctx.gn.el].concat(readNodes.map(function (rn) {
             return frag(rn, "f-right");
-          }))
+          })))
         ]),
-        frag(h("say", st.note), "f-fade")
+        frag(h("small muted", "<span class='mono'>T.backward.steps[" + si +
+          "].formula</span> — " + st.formula + " &nbsp;·&nbsp; " + st.note), "f-fade")
       ];
-    }
+    },
+    /* The read pulses the moment the local derivative is evaluated. */
+    render: function (n, ctx) { if (ctx.gn) ctx.gn.setReading(n >= 2); }
   });
+});
+
+/* --------------------------------------------- the finished gradient board */
+S({
+  chapter: "Backward · the result",
+  plain: "All " + NPARAM + " gradients, produced by one pass",
+  notes: "The walk is over. " + NSTEP + " steps produced " + NPARAM +
+    " numbers, one per parameter, plus four transient node gradients that " +
+    "have already been freed. Read the board left to right and notice the " +
+    "structure: dL/db1 and dL/db2 are literally copies of the node gradients " +
+    "above them, and each weight gradient is an outer product of a node " +
+    "gradient with a saved input. Nothing here was estimated — every number " +
+    "is the exact analytic derivative, and the finite-difference check three " +
+    "slides on agrees to " + T.gradcheck.max_abs_error.toExponential(2) + ".",
+  build: function () {
+    const nodeGrads = [
+      ["dL/dŷ", fS(BWD.dL_dyhat, 3)], ["dL/dz2", fS(BWD.dL_dz2, 3)],
+      ["dL/da1", vecTxt(BWD.dL_da1, 3, true)], ["dL/dz1", vecTxt(BWD.dL_dz1, 3, true)]
+    ];
+    return [
+      kicker("Backward · <b>the finished board</b>"),
+      title("One pass. <span class='v-gradient'>" + NPARAM + "</span> gradients."),
+      frag(d("rowflex top", [
+        tn({ name: "dL/dW1", shape: [3, 2], values: BWD.dL_dW1, cls: "gradient",
+             digits: 3, signed: true, note: "6" }),
+        tn({ name: "dL/db1", shape: [3], values: BWD.dL_db1, cls: "gradient",
+             digits: 3, signed: true, note: "3" }),
+        tn({ name: "dL/dW2", shape: [1, 3], values: BWD.dL_dW2, cls: "gradient",
+             digits: 3, signed: true, note: "3" }),
+        tn({ name: "dL/db2", shape: [1], values: BWD.dL_db2, cls: "gradient",
+             digits: 3, signed: true, note: "1" })
+      ]), "f-pop"),
+      frag(d("panel g tight", [ph("the transient node gradients — already freed"),
+        d("rowflex", nodeGrads.map(function (g) {
+          return h("pill", "<span class='mono'>" + g[0] + "</span> = " + g[1]);
+        }))]), "f-fade"),
+      frag(d("cols", [
+        NN.tiles([
+          { k: "chain-rule steps", v: String(NSTEP), s: "T.backward.steps", cls: "gradient" },
+          { k: "parameter gradients", v: String(NPARAM), s: "one per parameter", cls: "gradient" },
+          { k: "exactly zero", v: String(T.gradcheck.analytic.filter(function (g) { return g === 0; }).length),
+            s: "all from the dead unit", cls: "gradient" }
+        ]),
+        NN.callout("key", "Two patterns, and that is all there is",
+          "Every <b>bias</b> gradient is a copy of the node gradient above it. " +
+          "Every <b>weight</b> gradient is a node gradient times the layer's " +
+          "saved input. Those two patterns generate all " + NPARAM +
+          " numbers here, and they generate every gradient in a 70B " +
+          "transformer too — there is no third rule waiting further up.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* ---------------------------------------- why a weight gradient is an outer product */
+S({
+  chapter: "Backward · outer product",
+  plain: "dL/dW = δ ⊗ inputᵀ — cell by cell",
+  notes: "Slow down on the shape. dL/dz1 has one number per output unit. x " +
+    "has one number per input. The weight matrix has one entry per " +
+    "(output, input) PAIR, so its gradient must too — and the only way to " +
+    "build a matrix out of two vectors like that is the outer product: entry " +
+    "[i][j] is delta[i] times input[j]. Walk two or three cells out loud " +
+    "from the grid. Then make the consequence explicit: every cell of that " +
+    "grid contains a factor of the input, so there is no way to fill the " +
+    "grid in without the input still being in memory.",
+  build: function () {
+    const dz = BWD.dL_dz1, xx = FWD.x;
+    /* one revealed row per hidden unit, so the grid on screen has exactly
+       the shape of W1 — the dead unit's row lands last, all zeros */
+    const gridRows = [];
+    for (let i = 0; i < NHID; i++) {
+      const row = [];
+      for (let j = 0; j < NINP; j++) {
+        row.push(d("panel " + (dz[i] === 0 ? "crit" : "g") + " tight", [
+          h("small muted", "<span class='mono'>dL/dW1[" + i + "][" + j + "]</span>"),
+          h("dmath", "<span class='mono' style='font-size:16px'>" +
+            "<span class='v-gradient'>" + fS(dz[i], 3) + "</span> × " +
+            "<span class='v-activation'>" + f(xx[j], 1) + "</span></span>"),
+          h("midnum v-gradient", fS(BWD.dL_dW1[i][j], 3))
+        ]));
+      }
+      gridRows.push(frag(d("cols", row), "f-fade"));
+    }
+    return [
+      kicker("Backward · <b>the shape of a weight gradient</b>"),
+      title("A vector and a vector make a matrix", true),
+      frag(eqline("dL/dW1", [
+        { sym: "dL/dz1", role: "upstream · one per OUTPUT unit",
+          rule: vecTxt(BWD.dL_dz1, 3, true), cls: "gradient" },
+        { sym: "xᵀ", role: "local · one per INPUT", rule: vecTxt(FWD.x, 1),
+          cls: "activation", op: "⊗" }
+      ]), "f-pop"),
+      d("stack", gridRows),
+      frag(NN.callout("mem", "Every cell contains a copy of the input",
+        "W1 has one entry per (output, input) pair, so its gradient does too, " +
+        "and entry <span class='mono'>[i][j]</span> is " +
+        "<span class='mono v-gradient'>δ[i]</span> × " +
+        "<span class='mono v-activation'>x[j]</span>. There is no arrangement " +
+        "of the incoming gradient alone that produces this grid. The layer's " +
+        "input is a required operand — which is exactly why the forward pass " +
+        "is not allowed to free it."), "f-fade")
+    ];
+  }
 });
 
 /* ------------------------------------------------- the thesis slide */
@@ -1993,14 +3078,83 @@ S({
   }
 });
 
+/* ------------------------------- the dead unit, beat 1: the gradient arrives */
+S({
+  chapter: "Backward · the dead unit (1 of 2)",
+  plain: "A real gradient DOES arrive at the dead unit",
+  notes: "Two beats, and people usually miss the first one. Before the mask " +
+    "is applied, unit " + DEADU + " receives dL/da1[" + DEADU + "] = " +
+    f(BWD.dL_da1[DEADU], 4) + " — not zero, and in fact the LARGEST incoming " +
+    "gradient of the three hidden units, because its outgoing weight " +
+    "W2[0][" + DEADU + "] = " + f(T.init.W2[0][DEADU], 2) + " is the biggest " +
+    "in the output layer. The loss genuinely wants that unit's activation to " +
+    "change. The message was delivered. Hold that thought — the next slide " +
+    "is what happens to it one multiply later.",
+  build: function (ctx) {
+    ctx.gn = gradNet({ step: STEP_IX.dL_da1,
+      focus: "dL/da1[" + DEADU + "] = " + fS(BWD.dL_da1[DEADU], 3) + " — it arrived" });
+    ctx.da = tn({ name: "dL/da1", shape: [NHID], values: BWD.dL_da1,
+                  cls: "gradient", digits: 3, signed: true });
+    /* "largest" is checked against the trace, not asserted from memory */
+    const mags = BWD.dL_da1.map(Math.abs);
+    const rank = mags.indexOf(Math.max.apply(null, mags)) === DEADU
+      ? "the <b>largest</b> of the " + NHID + " in magnitude"
+      : "a perfectly ordinary non-zero gradient";
+    return [
+      kicker("The dead unit · <b>beat 1</b> · the gradient arrives"),
+      title("Unit " + DEADU + " is switched off — and the loss still has " +
+            "something to say to it", true),
+      d("cols wide-l", [
+        d("stack", [
+          frag(eqline("dL/da1[" + DEADU + "]", [
+            { sym: "W2[0][" + DEADU + "]", role: "local · a live weight",
+              rule: "from z2 = W2·a1 + b2", cls: "weight" },
+            { sym: "dL/dz2", role: "upstream", rule: "step 2", cls: "gradient", op: "·" }
+          ]), "f-left"),
+          frag(eqline("&nbsp;", [
+            { sym: f(T.init.W2[0][DEADU], 2), role: "local · a live weight", cls: "weight" },
+            { sym: fS(BWD.dL_dz2, 3), role: "upstream", cls: "gradient", op: "×" }
+          ], true), "f-left"),
+          frag(d("panel g tight", [ph("the gradient that arrived at every hidden unit"),
+            ctx.da]), "f-pop"),
+          frag(say("Unit " + DEADU + " received " +
+            G(BWD.dL_da1[DEADU], 3) + " — " + rank +
+            ", because <span class='mono v-weight'>W2[0][" + DEADU + "] = " +
+            f(T.init.W2[0][DEADU], 2) + "</span> is the biggest weight in the " +
+            "output layer. Nothing about this step knows the unit is dead: " +
+            "<span class='mono'>dL/da1 = W2ᵀ · dL/dz2</span> reads the " +
+            "<span class='v-weight'>weights</span> only."), "f-fade")
+        ]),
+        d("stack", [ctx.gn.el,
+          frag(NN.callout("why", "Why the message is delivered at all",
+            "The gradient of the loss with respect to an <em>activation</em> " +
+            "asks a hypothetical: if <span class='mono'>a1[" + DEADU +
+            "]</span> were larger, would the loss fall? The answer is yes, by " +
+            G(BWD.dL_da1[DEADU], 3) + " per unit. That question never " +
+            "consults the ReLU. The ReLU's veto happens on the next step."), "f-fade")])
+      ])
+    ];
+  },
+  render: function (n, ctx) {
+    const on = n >= 3;
+    if (ctx.da) ctx.da.highlight(on ? [[DEADU, 0]] : null, on);
+    if (ctx.gn) ctx.gn.setReading(n >= 1);
+  }
+});
+
 /* ----------------------------------------------- the dead unit's gradient */
 S({
-  chapter: "Backward · the dead unit", plain: "The dead unit's gradient is exactly zero",
-  notes: "Cash in the promise from the forward pass. Unit 3 had a " +
-    "pre-activation of " + f(T.forward.z1[2], 2) + ", ReLU clamped it to zero, " +
-    "so the mask entry is zero, so dL/dz1[2] is zero, so the entire row of " +
-    "dL/dW1 for that unit is zero — not small, exactly zero. It contributed " +
-    "nothing to the prediction, so it takes none of the blame. And because SGD " +
+  chapter: "Backward · the dead unit (2 of 2)",
+  plain: "…and one multiply later the mask annihilates it",
+  notes: "Beat two. The gradient " + fS(BWD.dL_da1[DEADU], 3) + " that arrived " +
+    "on the last slide is now multiplied by the saved mask entry, which is " +
+    f(FWD.relu_mask[DEADU], 0) + ", and it is gone. Say the two beats out " +
+    "loud as a pair: the gradient WAS delivered, and then it was annihilated " +
+    "one multiply later. Unit " + DEADU + " had a pre-activation of " +
+    f(T.forward.z1[DEADU], 2) + ", ReLU clamped it to zero, so the mask entry " +
+    "is zero, so dL/dz1[" + DEADU + "] is zero, so the entire row of dL/dW1 " +
+    "for that unit is zero — not small, exactly zero. It contributed nothing " +
+    "to the prediction, so it takes none of the blame. And because SGD " +
     "multiplies the gradient by the learning rate, those weights will not move " +
     "this step. If the unit stays negative for every input, it never moves again.",
   build: function (ctx) {
@@ -2084,6 +3238,134 @@ S({
           "in loss by ε. Max absolute disagreement across all " + NPARAM +
           " parameters: <span class='mono'>" + f(T.gradcheck.max_abs_error, 1) +
           "</span>. That is float noise.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* --------------------------------------------- gradcheck: the method */
+S({
+  chapter: "Backward · verification",
+  plain: "How you prove a hand-derived gradient is right",
+  notes: "Everything in this run was differentiated by hand and then " +
+    "implemented, and both are places to make a mistake. A wrong gradient " +
+    "does not crash — it trains badly in a way that looks exactly like a bad " +
+    "learning rate, which is why people lose weeks to it. So you check it " +
+    "numerically: nudge one parameter by a tiny epsilon in each direction, " +
+    "re-run the forward pass, and divide the change in loss by 2 epsilon. " +
+    "That is the definition of a derivative, evaluated arithmetically. It " +
+    "costs two forward passes per parameter — " + (2 * NPARAM) + " here, and " +
+    "of order 10^11 for a 70B model — which is why it is a correctness test " +
+    "and never a training method.",
+  build: function () {
+    return [
+      kicker("Backward · <b>verification</b>"),
+      title("Do not trust a derivative you worked out by hand", true),
+      d("cols wide-l", [
+        d("stack", [
+          frag(NN.formula({
+            rule: "dL/dθᵢ &nbsp;≈&nbsp; ( L(θ + ε·eᵢ) − L(θ − ε·eᵢ) ) / 2ε",
+            cls: "gradient" }), "f-left"),
+          frag(derivPanel("what that costs", [
+            drow("2 forward passes &nbsp;×&nbsp; " + NPARAM + " parameters &nbsp;=&nbsp; " +
+                 (2 * NPARAM), "for this model"),
+            drow("2 forward passes &nbsp;×&nbsp; " + bn(CFG.params) + " parameters",
+                 "for " + MODEL.name),
+            drow("backpropagation: <span class='v-gradient'>1</span> backward pass, " +
+                 "all " + NPARAM + " at once", "which is the entire point", true)
+          ], "g"), "f-left")
+        ]),
+        d("stack", [
+          frag(NN.callout("key", "A wrong gradient does not announce itself",
+            "It does not throw. The loss still goes down, just more slowly and " +
+            "to a worse place, and it looks identical to a badly-chosen " +
+            "learning rate. This is why <span class='mono'>torch.autograd." +
+            "gradcheck</span> exists and why it is standard practice to run it " +
+            "on any custom <span class='mono'>autograd.Function</span> before " +
+            "trusting it."), "f-right"),
+          frag(NN.callout("warn", "Two rules that carry over",
+            "Run it in <b>float64</b> — in float32 the finite-difference noise " +
+            "swamps the signal and everything looks broken. And be suspicious " +
+            "of exact zeros on both sides, because a bug that returns zero and " +
+            "a genuinely-zero gradient are indistinguishable in this test. " +
+            "Here the zeros were explained independently — they are the ReLU " +
+            "mask — which is what makes them believable."), "f-right")
+        ])
+      ])
+    ];
+  }
+});
+
+/* --------------------------------------------- gradcheck: the report */
+S({
+  chapter: "Backward · the gradient check",
+  plain: "Gradient check: " + (T.gradcheck.passed ? "PASS" : "FAIL") +
+         ", max |error| = " + T.gradcheck.max_abs_error.toExponential(3),
+  notes: "The report, all " + NPARAM + " parameters, analytic against " +
+    "central difference. Max absolute disagreement " +
+    T.gradcheck.max_abs_error.toExponential(3) + " — and the residual is the " +
+    "FINITE-DIFFERENCE side being wrong, not the derivation: the numerator " +
+    "subtracts two nearly-equal doubles and then divides by a small epsilon, " +
+    "so it loses precision. The analytic column is the exact one. Point at " +
+    "the highlighted rows: the dead unit's parameters agree at exactly zero " +
+    "from both directions, so the numerical check independently confirms " +
+    "that nudging them really does not move the loss at all.",
+  build: function () {
+    const GC = T.gradcheck, TOL = 1e-6;
+    const rows = T.param_names.map(function (name, k) {
+      const a = GC.analytic[k], nv = GC.numerical[k];
+      return { name: name, a: a, n: nv, dif: Math.abs(a - nv), dead: a === 0 };
+    });
+    const nPass = rows.filter(function (r) { return r.dif <= TOL; }).length;
+    const half = Math.ceil(rows.length / 2);
+    const tbl = function (list) {
+      return el("table", { class: "data" }, [
+        el("thead", {}, el("tr", {}, [
+          el("th", { style: { textAlign: "left" } }, "parameter"),
+          el("th", {}, "analytic"), el("th", {}, "numerical"),
+          el("th", {}, "|Δ|"), el("th", {}, "")])),
+        el("tbody", {}, list.map(function (r) {
+          const ok = r.dif <= TOL;
+          return el("tr", { class: r.dead ? "deadparam" : null }, [
+            el("td", { class: "mono" }, r.name),
+            el("td", { class: "n v-gradient" }, fS(r.a, 4)),
+            el("td", { class: "n" }, fS(r.n, 4)),
+            el("td", { class: "n muted" }, r.dif === 0 ? "0" : r.dif.toExponential(1)),
+            el("td", { class: "n " + (ok ? "ok" : "") }, ok ? "✓" : "✗")
+          ]);
+        }))
+      ]);
+    };
+    return [
+      kicker("Backward · <b>the gradient check</b>"),
+      d("rowflex", [
+        el("h2", { class: "stitle sm", style: { margin: "0" },
+          html: "Analytic vs finite difference, all " + NPARAM + " parameters" }),
+        h("badge " + (GC.passed ? "pass" : "fail"), GC.passed ? "pass" : "fail"),
+        h("small muted", nPass + " / " + rows.length + " within " +
+          TOL.toExponential(0) + " &nbsp;·&nbsp; max |error| = " +
+          GC.max_abs_error.toExponential(3) + " &nbsp;·&nbsp; " +
+          "<span class='mono'>T.gradcheck</span>")
+      ]),
+      gap(8),
+      frag(el("div", { class: "cols", style: { alignItems: "flex-start" } },
+        [tbl(rows.slice(0, half)), tbl(rows.slice(half))]), "f-fade"),
+      frag(d("cols", [
+        NN.tiles([
+          { k: "parameters checked", v: String(rows.length), s: "T.param_names" },
+          { k: "max abs error", v: GC.max_abs_error.toExponential(2),
+            s: "T.gradcheck", cls: "gradient" },
+          { k: "verdict", v: GC.passed ? "PASS" : "FAIL", s: "T.gradcheck.passed" }
+        ]),
+        NN.callout("why", "The residual is the CHECK's error, not the derivation's",
+          "<span class='mono'>" + GC.max_abs_error.toExponential(3) + "</span> is " +
+          "the finite-difference side losing precision: it subtracts two " +
+          "nearly-equal doubles and divides by a small ε. The analytic column " +
+          "is the exact one. Note the " +
+          rows.filter(function (r) { return r.dead; }).length +
+          " highlighted rows — the dead unit's parameters agree at exactly " +
+          "zero from both directions, which is an independent confirmation " +
+          "that nudging them does not move the loss at all.")
       ]), "f-fade")
     ];
   }

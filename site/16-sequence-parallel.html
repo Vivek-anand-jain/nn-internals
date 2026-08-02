@@ -1,0 +1,1596 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 16 Sequence Parallelism</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* page-local layout only; every colour is a design.css custom property */
+
+/* ---- compact tensor cells inside GPU cards -------------------------- */
+.card-t .cell   { min-width: 50px; padding: 5px 6px; font-size: .74rem; }
+.card-t .tensor { margin: 0 0 6px; }
+.card-t .tensor-label { font-size: .7rem; }
+
+/* REPLICATED is marked by a HATCH as well as by its label, so the
+   distinction survives colour-vision deficiency and greyscale printing. */
+.tensor.repl .cell {
+  background-image: repeating-linear-gradient(45deg,
+    transparent 0 7px,
+    color-mix(in srgb, var(--ink-muted) 16%, transparent) 7px 10px);
+}
+.tensor.repl .tensor-body { border-style: dashed; border-color: var(--ink-muted); }
+.tensor.ghost { opacity: .55; }
+
+/* ---- status badges --------------------------------------------------- */
+.badge {
+  display: inline-block; font-family: var(--mono); font-size: .58rem;
+  letter-spacing: .07em; text-transform: uppercase; padding: 2px 6px;
+  border-radius: 4px; border: 1px solid var(--hairline); white-space: nowrap;
+  color: var(--ink-2); background: var(--surface-3);
+}
+.badge.rep {
+  border-style: dashed; border-color: var(--ink-muted); color: var(--ink-2);
+  background-image: repeating-linear-gradient(45deg,
+    transparent 0 6px,
+    color-mix(in srgb, var(--ink-muted) 15%, transparent) 6px 9px);
+}
+.badge.seq {
+  color: var(--activation); background: var(--activation-w);
+  border-color: color-mix(in srgb, var(--activation) 55%, transparent);
+}
+.badge.hid {
+  color: var(--activation); background: transparent;
+  border-style: dotted;
+  border-color: color-mix(in srgb, var(--activation) 55%, transparent);
+}
+.badge.na { color: var(--ink-muted); background: transparent; border-style: dotted; }
+
+/* ---- resident ledger ------------------------------------------------- */
+.ledger { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px;
+          font-family: var(--mono); font-size: .66rem; color: var(--ink-2);
+          border-top: 1px solid var(--hairline-2); margin-top: 7px; padding-top: 6px; }
+.ledger .lrow { display: contents; }
+.ledger .ln  { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ledger .lv  { text-align: right; font-variant-numeric: tabular-nums; }
+.ledger .lrow.new .ln, .ledger .lrow.new .lv { color: var(--activation); font-weight: 700; }
+.ledger .lrow.gone .ln, .ledger .lrow.gone .lv { opacity: .35; text-decoration: line-through; }
+.ledger .lrow.tot .ln, .ledger .lrow.tot .lv { color: var(--ink); font-weight: 700; }
+
+/* ---- two-column walkthrough ------------------------------------------ */
+.twocol { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start; }
+@media (max-width: 980px) { .twocol { grid-template-columns: 1fr; } }
+.colhead { font-family: var(--mono); font-size: .74rem; font-weight: 700;
+           letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2);
+           padding: 6px 10px; border-radius: 7px; background: var(--surface-2);
+           border: 1px solid var(--hairline); display: flex;
+           justify-content: space-between; gap: 8px; align-items: baseline; }
+.colhead .tot { color: var(--ink); font-size: .8rem; }
+.colhead.win { border-color: color-mix(in srgb, var(--good) 55%, transparent); }
+.colwrap { display: grid; gap: 8px; }
+
+/* ---- the zipper ------------------------------------------------------ */
+.zip { display: flex; flex-wrap: wrap; gap: 5px; align-items: stretch;
+       margin: 4px 0 16px; }
+.zippill { font-family: var(--mono); font-size: .64rem; letter-spacing: .04em;
+           padding: 6px 9px; border-radius: 7px; border: 1px solid var(--hairline);
+           background: var(--surface-2); color: var(--ink-muted);
+           transition: all .35s; display: flex; align-items: center; }
+.zippill.comm { border-style: dashed; }
+.zippill.now { color: var(--ink); border-color: var(--activation);
+               background: var(--activation-w); font-weight: 700;
+               box-shadow: 0 0 0 3px color-mix(in srgb, var(--activation) 16%, transparent); }
+.zippill.now.comm { border-color: var(--gradient); background: var(--gradient-w);
+                    box-shadow: 0 0 0 3px color-mix(in srgb, var(--gradient) 16%, transparent); }
+.zipsep { color: var(--ink-muted); align-self: center; font-family: var(--mono); font-size: .7rem; }
+
+/* ---- fade-in on step change ------------------------------------------ */
+@keyframes swapin { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+.swap { animation: swapin .34s cubic-bezier(.4,0,.2,1); }
+@media (prefers-reduced-motion: reduce) { .swap { animation: none; } }
+
+/* ---- the cut diagram (section 2) ------------------------------------- */
+.cutwrap { display: flex; gap: 22px; flex-wrap: wrap; align-items: flex-start; }
+.cutgrid { display: grid; gap: 3px; width: max-content;
+           font-family: var(--mono); font-size: .72rem;
+           font-variant-numeric: tabular-nums; }
+.cutcell { padding: 6px 8px; border-radius: 3px; text-align: right;
+           border: 1px solid transparent; transition: all .35s; }
+.cutcell.g0 { background: var(--activation-w); color: var(--activation);
+              border-color: color-mix(in srgb, var(--activation) 40%, transparent); }
+.cutcell.g1 { background: var(--surface-3); color: var(--ink-2);
+              border-style: dashed; border-color: var(--ink-muted); }
+.cuthdr { font-size: .6rem; color: var(--ink-muted); text-align: center;
+          letter-spacing: .05em; text-transform: uppercase; }
+.cutside { font-size: .62rem; color: var(--ink-muted); display: flex;
+           align-items: center; padding-right: 6px; white-space: nowrap; }
+.cutmu { padding: 6px 8px; border-radius: 3px; font-size: .68rem;
+         border: 1px dashed var(--hairline); text-align: right;
+         transition: all .35s; white-space: nowrap; }
+.cutmu.ok  { color: var(--good); border-color: var(--good);
+             background: color-mix(in srgb, var(--good) 10%, transparent); }
+.cutmu.bad { color: var(--critical); border-color: var(--critical);
+             background: color-mix(in srgb, var(--critical) 10%, transparent); }
+
+/* ---- verdicts -------------------------------------------------------- */
+.vd { border-radius: 8px; padding: 13px 17px; margin: 14px 0;
+      border: 1px solid var(--hairline); background: var(--surface-2);
+      display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 20px; }
+.vd .big { font-size: 1.35rem; font-weight: 800; letter-spacing: -.02em; }
+.vd .det { font-family: var(--mono); font-size: .82rem; color: var(--ink-2); }
+.vd.ok  { border-left: 4px solid var(--good); }
+.vd.ok .big { color: var(--good); }
+.vd.bad { border-left: 4px solid var(--critical); }
+.vd.bad .big { color: var(--critical); }
+
+/* ---- proportional replicated / sharded strip ------------------------- */
+.rsstrip { display: flex; height: 30px; border-radius: 7px; overflow: hidden;
+           border: 1px solid var(--hairline); margin: 10px 0 6px; }
+.rsseg { display: flex; align-items: center; justify-content: center;
+         font-family: var(--mono); font-size: .66rem; color: var(--ink);
+         transition: flex-grow .45s cubic-bezier(.4,0,.2,1); overflow: hidden;
+         white-space: nowrap; }
+.rsseg.rep { background: color-mix(in srgb, var(--activation) 20%, var(--surface-3));
+             background-image: repeating-linear-gradient(45deg,
+               transparent 0 5px,
+               color-mix(in srgb, var(--ink-muted) 34%, transparent) 5px 9px); }
+.rsseg.shd { background: var(--activation); color: #fff; }
+
+/* ---- control rows ---------------------------------------------------- */
+.ctlrow { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center;
+          margin: 12px 0; font-family: var(--mono); font-size: .78rem; }
+.ctl { display: flex; align-items: center; gap: 8px; }
+.ctl label { color: var(--ink-muted); font-size: .72rem; letter-spacing: .05em;
+             text-transform: uppercase; }
+.ctl input[type="range"] { width: 132px; }
+.ctl .val { color: var(--ink); font-weight: 700; min-width: 62px; }
+.segbtns { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 12px; }
+.segbtns .btn[aria-pressed="true"] { background: var(--weight); border-color: var(--weight); color: #fff; }
+
+/* ---- misc ------------------------------------------------------------ */
+.chartlegend { display: flex; flex-wrap: wrap; gap: 16px; font-family: var(--mono);
+               font-size: .74rem; color: var(--ink-2); margin: 6px 0 2px; }
+.chartlegend i { display: inline-block; width: 22px; height: 0; vertical-align: middle;
+                 border-top-width: 3px; margin-right: 6px; }
+.notbox { border: 1px solid var(--hairline); border-radius: 8px; padding: 13px 16px;
+          background: var(--surface-2); margin: 10px 0; }
+.notbox h4 { margin: 0 0 6px; font-size: .95rem; }
+.notbox .tag { font-family: var(--mono); font-size: .6rem; letter-spacing: .07em;
+               text-transform: uppercase; padding: 2px 6px; border-radius: 4px;
+               border: 1px dashed var(--critical); color: var(--critical);
+               margin-left: 8px; white-space: nowrap; }
+table.data td.wrap, table.data th.wrap { white-space: normal; }
+.eqgrid { display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; }
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 16</div>
+    <h1>Sequence Parallelism</h1>
+    <p class="lede">Tensor parallelism divides the weights and the MLP activations by the TP
+      degree, and divides the LayerNorm, dropout and residual activations by one. Nothing in
+      those regions mixes tokens, so they can be split along the sequence axis instead — the
+      axis TP left free. The transitions cost an all-gather in and a reduce-scatter out, which
+      is exactly the all-reduce tensor parallelism was already running. Same bytes on the wire,
+      strictly less memory.</p>
+    <noscript><p class="callout warn">Every diagram and every number on this page is built in
+      the browser from <code>assets/data/seqpar.js</code>. With JavaScript disabled you will
+      see an empty shell.</p></noscript>
+  </div>
+
+  <section class="block" id="replicated">
+    <h2>1 · The replicated half, made visible</h2>
+    <div id="repBody"></div>
+  </section>
+
+  <section class="block" id="resists">
+    <h2>2 · Why LayerNorm resists a hidden-dimension cut</h2>
+    <div id="resistBody"></div>
+  </section>
+
+  <section class="block" id="walk">
+    <h2>3 · The same region, both ways</h2>
+    <div id="walkBody"></div>
+  </section>
+
+  <section class="block" id="free">
+    <h2>4 · The proof that it is free</h2>
+    <div id="freeBody"></div>
+  </section>
+
+  <section class="block" id="equiv">
+    <h2>5 · Same answer, to the last bit</h2>
+    <div id="equivBody"></div>
+  </section>
+
+  <section class="block" id="scale">
+    <h2>6 · At scale</h2>
+    <div id="scaleBody"></div>
+  </section>
+
+  <section class="block" id="isnot">
+    <h2>7 · What sequence parallelism is not</h2>
+    <div id="isnotBody"></div>
+  </section>
+
+  <section class="block" id="stack">
+    <h2>8 · Where it sits in the stack</h2>
+    <div id="stackBody"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/parallel.js"></script>
+<script src="../assets/data/tf2.js"></script>
+<script src="../assets/data/seqpar.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T  = NN.T;
+  const P  = window.PARALLEL;
+  const F  = window.TF2;
+  const S  = window.SEQPAR;
+  const el = NN.el, fmt = NN.fmt;
+
+  if (!S) {
+    NN.$("#repBody").appendChild(NN.callout("warn", "seqpar.js did not load",
+      "Run <code>python3 code/sequence_parallel.py</code> to regenerate " +
+      "<code>assets/data/seqpar.js</code>."));
+    NN.page("seqpar");
+    return;
+  }
+
+  /* ==================================================================== */
+  /*  shared derivations                                                  */
+  /* ==================================================================== */
+  const M     = S.meta;
+  const SEQ   = M.seq, DM = M.d_model, DFF = M.d_ff, TP = M.tp;
+  const TOK   = M.tokens;
+  const SPER  = SEQ / TP;              // sequence rows per rank under SP
+  const FPER  = DFF / TP;              // hidden units per rank under TP
+  const RANKS = S.tp_only.ranks.length;
+
+  function colSlice(rows, a, b) { return rows.map(function (r) { return r.slice(a, b); }); }
+  function mm(A, B) {
+    return A.map(function (row) {
+      return B[0].map(function (_, j) {
+        return row.reduce(function (s, v, k) { return s + v * B[k][j]; }, 0);
+      });
+    });
+  }
+  function maxdiff(A, B) {
+    let m = 0;
+    for (let i = 0; i < A.length; i++) for (let j = 0; j < A[0].length; j++) {
+      m = Math.max(m, Math.abs(A[i][j] - B[i][j]));
+    }
+    return m;
+  }
+  function sum(a) { return a.reduce(function (x, y) { return x + y; }, 0); }
+
+  /* rank r's slice of the MLP hidden state, and its partial output */
+  function actShard(r)  { return colSlice(S.baseline.act, r * FPER, (r + 1) * FPER); }
+  function partial(r)   { return mm(actShard(r), S.input.W_out.slice(r * FPER, (r + 1) * FPER)); }
+  function seqRows(r)   { return (S.tp_plus_sp.ranks[r].seq_rows) || []; }
+  function tokensOf(r)  { return seqRows(r).map(function (t) { return TOK[t]; }); }
+
+  /* ring cost factors, from PARALLEL's collective table */
+  function ringFactor(op, N) {
+    const c = P && P.collectives ? P.collectives.find(function (x) { return x.op === op; }) : null;
+    if (!c || !c.ring_factor_at_world) return null;
+    const v = c.ring_factor_at_world[String(N)];
+    return v === undefined ? null : v;
+  }
+  function collectiveInfo(op) {
+    return P && P.collectives ? P.collectives.find(function (x) { return x.op === op; }) : null;
+  }
+
+  /* Korthikanti coefficients, SOLVED for from the shipped table rather than
+     typed in:  tp_only(t) = A + B/t,  tp_sp(t) = C/t.  Two rows fix A and B. */
+  const AS   = S.at_scale;
+  const ASat = function (t) {
+    return AS.table.find(function (r) { return r.tp === t; });
+  };
+  const COEF = (function () {
+    const r1 = ASat(1), r2 = ASat(2);
+    const a = 2 * r2.bytes_per_token_per_layer_tp_only - r1.bytes_per_token_per_layer_tp_only;
+    const b = r1.bytes_per_token_per_layer_tp_only - a;
+    const c = r1.bytes_per_token_per_layer_tp_sp;
+    let err = 0;
+    AS.table.forEach(function (r) {
+      err = Math.max(err,
+        Math.abs(a + b / r.tp - r.bytes_per_token_per_layer_tp_only),
+        Math.abs(c / r.tp - r.bytes_per_token_per_layer_tp_sp));
+    });
+    return { A: a, B: b, C: c, fitErr: err,
+             tpOnly: function (t) { return a + b / t; },
+             tpSp:   function (t) { return c / t; } };
+  })();
+
+  /* status string -> badge kind. More than colour: each kind has its own
+     label text and its own border treatment. */
+  function badgeKind(status) {
+    if (/REPLICATED/i.test(status)) return "rep";
+    if (/SEQ/i.test(status)) return "seq";
+    return "hid";
+  }
+  function badge(status, kindOverride) {
+    const k = kindOverride || badgeKind(status);
+    const glyph = k === "rep" ? "▨ " : k === "seq" ? "▤ " : k === "hid" ? "▥ " : "";
+    return el("span", { class: "badge " + k }, glyph + status);
+  }
+
+  /* a tensor grid, activation-classed, hatched when replicated */
+  function grid(o) {
+    const t = NN.tensor({
+      name: o.name, shape: o.shape || [o.values.length, o.values[0].length],
+      values: o.values, cls: "activation", digits: o.digits === undefined ? 3 : o.digits,
+      signed: !!o.signed, note: o.note
+    });
+    if (o.repl) t.classList.add("repl");
+    if (o.ghost) t.classList.add("ghost");
+    return t;
+  }
+
+  /* ==================================================================== */
+  /*  1 · THE REPLICATED HALF                                             */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#repBody");
+
+    host.appendChild(el("p", { html:
+      "Page <a href='15-tensor-parallel.html'>15</a> cut the weight matrices: <code>W_in</code> " +
+      "by column, <code>W_out</code> by row, one all-reduce at the join. That is the whole of " +
+      "tensor parallelism, and it is genuinely a division — the weights shrink, and so does the " +
+      "MLP hidden state. But a transformer block is not only matmuls. Around them sit LayerNorm, " +
+      "dropout and the residual add, and tensor parallelism does nothing to those at all. " +
+      "Every rank computes the identical LayerNorm over the identical full <span class='mono'>(" +
+      SEQ + "×" + DM + ")</span> tensor and keeps the identical result." }));
+
+    host.appendChild(el("p", { class: "small muted", html:
+      "The region simulated here, from <code>SEQPAR.meta.region</code>: <b>" + M.region + "</b>, " +
+      "with seq " + SEQ + ", d_model " + DM + ", d_ff " + DFF + ", TP " + TP + ", tokens " +
+      TOK.map(function (t) { return "<code>" + t + "</code>"; }).join(" ") + ". Every tensor drawn " +
+      "below is an " + "activation, so the grid is one hue throughout; " +
+      "<b>replicated</b> and <b>sharded</b> are told apart by their label and by a diagonal hatch, " +
+      "never by colour." }));
+
+    host.appendChild(NN.legend(["activation"]));
+
+    /* --- the two GPUs, drawn honestly --------------------------------- */
+    const values = {
+      "LN output":           function (r) { return S.baseline.ln; },
+      "MLP hidden (sharded)": function (r) { return actShard(r); },
+      "residual stream":     function (r) { return S.tp_only.out; }
+    };
+
+    const gridEl = NN.gpu.grid({
+      count: RANKS,
+      label: function (g) { return "GPU " + g + " — TP only"; },
+      render: function (g) {
+        const rk = S.tp_only.ranks[g];
+        const box = el("div", { class: "card-t" });
+        rk.resident.forEach(function (res) {
+          const vals = values[res.name] ? values[res.name](g) : null;
+          box.appendChild(el("div", { style: { marginBottom: "10px" } }, [
+            el("div", { style: { display: "flex", gap: "7px", alignItems: "baseline",
+                                 flexWrap: "wrap", marginBottom: "4px" } }, [
+              badge(res.status),
+              el("span", { class: "mono small", style: { color: "var(--ink-muted)" } },
+                res.elements + " el")
+            ]),
+            vals ? grid({
+              name: res.name, values: vals, shape: res.shape,
+              repl: badgeKind(res.status) === "rep"
+            }) : null,
+            el("div", { class: "small muted", style: { maxWidth: "30ch" } }, res.why)
+          ]));
+        });
+        return box;
+      }
+    });
+    host.appendChild(gridEl);
+
+    host.appendChild(el("p", { class: "small muted", html:
+      "Read the two cards against each other. <b>LN output</b> and <b>residual stream</b> are " +
+      "not similar on the two ranks — they are the same numbers, cell for cell, because both " +
+      "ranks ran the same arithmetic on the same inputs. Only <b>MLP hidden</b> differs, because " +
+      "that is the one tensor tensor parallelism actually split." }));
+
+    /* --- the census --------------------------------------------------- */
+    const rep = S.tp_only.replicated_elements, shd = S.tp_only.sharded_elements;
+    const per = S.tp_only.activation_elements_per_rank;
+    host.appendChild(NN.tiles([
+      { k: "activation elements / rank", v: String(per), cls: "activation",
+        s: "SEQPAR.tp_only, per rank" },
+      { k: "of which REPLICATED", v: String(rep),
+        s: fmt(100 * rep / per, 1) + "% — LN output + residual" },
+      { k: "of which sharded", v: String(shd), cls: "activation",
+        s: fmt(100 * shd / per, 1) + "% — MLP hidden only" },
+      { k: "ranks holding the copy", v: String(RANKS),
+        s: "each holds all " + rep + " replicated elements" }
+    ]));
+
+    host.appendChild(NN.formula({
+      rule: "per-rank activations = replicated + sharded",
+      sub: "(2 · seq · d_model) + (seq · d_ff / t) = (2 · " + SEQ + " · " + DM + ") + (" +
+           SEQ + " · " + DFF + " / " + TP + ") = " + rep + " + " + shd,
+      result: String(per) + " elements",
+      cls: "activation"
+    }));
+
+    /* --- the interactive: raise t, watch the replicated half not move -- */
+    const divisors = [];
+    for (let t = 1; t <= DFF; t++) if (DFF % t === 0) divisors.push(t);
+    const startIdx = divisors.indexOf(TP);
+
+    const strip = el("div", { class: "rsstrip" });
+    const segRep = el("div", { class: "rsseg rep" });
+    const segShd = el("div", { class: "rsseg shd" });
+    strip.appendChild(segRep); strip.appendChild(segShd);
+
+    const readout = el("div", { class: "small mono", style: { color: "var(--ink-2)" } });
+    const slider = el("input", { type: "range", min: 0, max: divisors.length - 1,
+                                 step: 1, value: String(startIdx < 0 ? 0 : startIdx) });
+    const tval = el("span", { class: "val" });
+
+    function paintT() {
+      const t = divisors[+slider.value];
+      const r = 2 * SEQ * DM;            // replicated: LN output + residual
+      const s = SEQ * DFF / t;           // sharded: MLP hidden
+      segRep.style.flexGrow = String(r);
+      segShd.style.flexGrow = String(s);
+      segRep.textContent = r / (r + s) > 0.14 ? "▨ replicated " + r : "";
+      segShd.textContent = s / (r + s) > 0.14 ? "sharded " + s : "";
+      tval.textContent = "TP = " + t;
+      const check = (t === TP)
+        ? "  ✓ matches SEQPAR.tp_only.activation_elements_per_rank = " + per
+        : "";
+      readout.innerHTML =
+        "per-rank activations = <b>" + (r + s) + "</b> elements  =  " + r +
+        " replicated + " + s + " sharded  →  replicated share <b>" +
+        fmt(100 * r / (r + s), 1) + "%</b>" +
+        (check ? "<span style='color:var(--good)'>" + check + "</span>" : "");
+    }
+    slider.addEventListener("input", paintT);
+
+    host.appendChild(el("div", { class: "ctlrow" }, [
+      el("div", { class: "ctl" }, [
+        el("label", {}, "tensor-parallel degree"), slider, tval
+      ])
+    ]));
+    host.appendChild(strip);
+    host.appendChild(readout);
+    paintT();
+
+    host.appendChild(NN.callout("key", "The floor tensor parallelism cannot get under",
+      "Drag the slider. The solid sharded block halves every time <i>t</i> doubles; the hatched " +
+      "replicated block does not move by one element. At t = " + divisors[divisors.length - 1] +
+      " the replicated half is " +
+      fmt(100 * (2 * SEQ * DM) / (2 * SEQ * DM + SEQ), 1) + "% of what each rank holds. " +
+      "<i>SEQPAR.tp_only.note</i>: “" + S.tp_only.note + "”<br><br>" +
+      "That is the entire motivation. Sequence parallelism is not a new way to split a matmul — " +
+      "it is a way to stop paying for " + rep + " duplicated elements per rank that tensor " +
+      "parallelism has no mechanism to touch."));
+  })();
+
+  /* ==================================================================== */
+  /*  2 · WHY LAYERNORM RESISTS A HIDDEN CUT                              */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#resistBody");
+
+    host.appendChild(el("p", { html:
+      "Page <a href='18-transformer-partitioned.html#tp'>18</a> made the argument and then left " +
+      "it hanging: a LayerNorm mean is an average over the <em>hidden</em> vector, so a rank that " +
+      "holds half the channels holds half the sum, and half a sum is not a mean. Here is that " +
+      "arithmetic on the first token of this page's input, <code>SEQPAR.input.X[0]</code>." }));
+
+    const x0 = S.input.X[0];
+    const mu = sum(x0) / DM;
+
+    /* independent cross-check: page 18's LayerNorm on the same vector */
+    let tfMu = null, tfErr = null;
+    if (F && F.forward && F.forward.layers && F.forward.layers[0].ln1) {
+      const row = F.forward.layers[0].ln1.rows[0];
+      if (row && row.x && row.x.length === DM &&
+          row.x.every(function (v, i) { return Math.abs(v - x0[i]) < 1e-12; })) {
+        tfMu = row.mu; tfErr = Math.abs(tfMu - mu);
+      }
+    }
+
+    const half = DM / TP;
+    const rowsArith = [];
+    for (let r = 0; r < TP; r++) {
+      const chans = x0.slice(r * half, (r + 1) * half);
+      rowsArith.push({
+        r: r,
+        range: "[" + (r * half) + " … " + (r * half + half - 1) + "]",
+        vals: chans,
+        psum: sum(chans),
+        localMean: sum(chans) / half
+      });
+    }
+
+    const tbl = el("table", { class: "data" }, [
+      el("thead", {}, el("tr", {}, [
+        el("th", {}, "rank"), el("th", {}, "channels held"), el("th", {}, "values"),
+        el("th", {}, "partial Σ"), el("th", {}, "Σ / (d/t)"), el("th", { class: "wrap" }, "is that μ?")
+      ])),
+      el("tbody", {}, rowsArith.map(function (a) {
+        const err = Math.abs(a.localMean - mu);
+        return el("tr", {}, [
+          el("td", {}, "GPU " + a.r),
+          el("td", { class: "n" }, a.range),
+          el("td", { class: "n" }, a.vals.map(function (v) { return fmt(v, 3); }).join(", ")),
+          el("td", { class: "n" }, fmt(a.psum, 4)),
+          el("td", { class: "n" }, fmt(a.localMean, 6)),
+          el("td", { class: "n", style: { color: "var(--critical)" } },
+            "no — off by " + fmt(err, 4))
+        ]);
+      }).concat([
+        el("tr", { style: { fontWeight: "700" } }, [
+          el("td", {}, "all ranks"), el("td", { class: "n" }, "[0 … " + (DM - 1) + "]"),
+          el("td", { class: "n" }, x0.map(function (v) { return fmt(v, 3); }).join(", ")),
+          el("td", { class: "n" }, fmt(sum(x0), 4)),
+          el("td", { class: "n" }, fmt(mu, 6)),
+          el("td", { class: "n", style: { color: "var(--good)" } }, "yes — needs a collective")
+        ])
+      ]))
+    ]);
+    host.appendChild(el("div", { class: "scrollx" }, tbl));
+
+    host.appendChild(el("p", { class: "small muted", html:
+      "Each rank can compute a partial sum and a partial sum of squares — two scalars per token — " +
+      "and then it is stuck until those scalars are added across ranks. Megatron's answer, on " +
+      "page <a href='18-transformer-partitioned.html#tp'>18</a>, is not to bother: keep the hidden " +
+      "vector whole at the LayerNorm and accept the duplication." +
+      (tfMu !== null
+        ? " <span style='color:var(--good)'>✓</span> The same vector appears as " +
+          "<code>TF2.forward.layers[0].ln1.rows[0]</code> on that page, where μ = " +
+          fmt(tfMu, 8) + "; recomputed here from <code>SEQPAR.input.X[0]</code> it is " +
+          fmt(mu, 8) + ", agreeing " + (tfErr === 0 ? "exactly" : "to " + fmt(tfErr, 1)) + "."
+        : "") }));
+
+    /* --- the pivot: the cut that works -------------------------------- */
+    host.appendChild(el("h3", {}, "But it needs no other token"));
+    host.appendChild(el("p", { html:
+      "LayerNorm's dependency is total across the hidden axis and <em>empty</em> across the " +
+      "sequence axis. μ for “" + TOK[0] + "” is computed from “" + TOK[0] + "” alone; it does not " +
+      "look at “" + TOK[1] + "”. That asymmetry is the whole opening. Cut the tensor the other way " +
+      "and every rank has everything it needs." }));
+
+    const cutState = { mode: "hidden" };
+    const btnH = el("button", { class: "btn" }, "cut along HIDDEN (d_model)");
+    const btnS = el("button", { class: "btn" }, "cut along SEQUENCE");
+    host.appendChild(el("div", { class: "segbtns" }, [btnH, btnS]));
+
+    const cutHost = el("div", { class: "cutwrap" });
+    host.appendChild(cutHost);
+    const verdict = el("div", { class: "vd" });
+    host.appendChild(verdict);
+
+    function drawCut() {
+      cutHost.innerHTML = "";
+      const g = el("div", {
+        class: "cutgrid swap",
+        style: { gridTemplateColumns: "auto repeat(" + DM + ", auto) auto" }
+      });
+      /* header */
+      g.appendChild(el("div", { class: "cuthdr" }, ""));
+      for (let d = 0; d < DM; d++) g.appendChild(el("div", { class: "cuthdr" }, "d" + d));
+      g.appendChild(el("div", { class: "cuthdr" }, "μ for the row"));
+
+      for (let t = 0; t < SEQ; t++) {
+        g.appendChild(el("div", { class: "cutside" }, "t" + t + " “" + TOK[t] + "”"));
+        const owners = new Set();
+        for (let d = 0; d < DM; d++) {
+          const owner = cutState.mode === "hidden"
+            ? Math.floor(d / (DM / TP))
+            : Math.floor(t / SPER);
+          owners.add(owner);
+          g.appendChild(el("div", {
+            class: "cutcell g" + owner,
+            title: "X[" + t + "][" + d + "] = " + S.input.X[t][d] + " — held by GPU " + owner
+          }, fmt(S.input.X[t][d], 3)));
+        }
+        const local = owners.size === 1;
+        const rowMu = sum(S.input.X[t]) / DM;
+        g.appendChild(el("div", {
+          class: "cutmu " + (local ? "ok" : "bad")
+        }, local ? "μ = " + fmt(rowMu, 4) + " ✓ local" : "needs " + owners.size + " ranks ✗"));
+      }
+      cutHost.appendChild(g);
+
+      const legend = el("div", { style: { display: "grid", gap: "6px", alignContent: "start" } }, [
+        el("div", { class: "small mono" }, [
+          el("span", { class: "cutcell g0", style: { display: "inline-block" } }, "▨"),
+          " held by GPU 0"
+        ]),
+        el("div", { class: "small mono" }, [
+          el("span", { class: "cutcell g1", style: { display: "inline-block" } }, "▨"),
+          " held by GPU 1"
+        ]),
+        el("div", { class: "small muted", style: { maxWidth: "34ch" } },
+          cutState.mode === "hidden"
+            ? "Every row straddles the cut. Every mean needs both ranks."
+            : "No row straddles the cut. Every mean is a purely local reduction.")
+      ]);
+      cutHost.appendChild(legend);
+
+      const ok = cutState.mode === "sequence";
+      verdict.className = "vd " + (ok ? "ok" : "bad");
+      verdict.innerHTML = "";
+      verdict.appendChild(el("div", { class: "big" }, ok ? "✓ works" : "✗ breaks"));
+      verdict.appendChild(el("div", { class: "det" },
+        ok
+          ? SEQ + " of " + SEQ + " row means computable with zero communication — " +
+            SPER + " tokens per rank"
+          : SEQ + " of " + SEQ + " row means need a collective before LayerNorm can proceed"));
+      btnH.setAttribute("aria-pressed", String(cutState.mode === "hidden"));
+      btnS.setAttribute("aria-pressed", String(cutState.mode === "sequence"));
+    }
+    btnH.addEventListener("click", function () { cutState.mode = "hidden"; drawCut(); });
+    btnS.addEventListener("click", function () { cutState.mode = "sequence"; drawCut(); });
+    drawCut();
+
+    host.appendChild(NN.callout("why", "The rule, stated once",
+      "A region can be sharded along an axis exactly when nothing in it reduces over that axis. " +
+      "LayerNorm reduces over hidden and not over sequence. Dropout and the residual add reduce " +
+      "over nothing at all — they are elementwise. So all three can be split by sequence, and " +
+      "none of them can be split by hidden. The matmuls are the mirror image: they contract over " +
+      "hidden, so they need every channel of a token, and they treat tokens independently, so " +
+      "they can take any subset of the sequence — which is why they are happy to be handed the " +
+      "whole thing."));
+  })();
+
+  /* ==================================================================== */
+  /*  3 · THE CENTREPIECE — the same region, both ways                    */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#walkBody");
+    const sched = S.tp_plus_sp.schedule;
+    const tpColl = S.tp_only.collectives[0];
+
+    host.appendChild(el("p", { html:
+      "Both columns below compute the same region — " + M.region + " — on the same " + RANKS +
+      " GPUs, from the same inputs, and finish with the same numbers. The left column is page " +
+      "<a href='15-tensor-parallel.html'>15</a>'s tensor parallelism, unchanged. The right column " +
+      "shards the LayerNorm and residual regions by sequence and pays for the crossings with the " +
+      "two collectives in <code>SEQPAR.tp_plus_sp.schedule</code>. Step through and watch the " +
+      "right-hand ledger stay smaller." }));
+
+    /* ---- stage model ------------------------------------------------- */
+    const sch = function (op) {
+      return sched.find(function (c) { return c.op === op; });
+    };
+    const STAGES = [
+      { key: "in",     label: "residual stream in",
+        tpTitle: "x", spTitle: "x",
+        note: "Where the region starts. Under TP every rank holds all " + SEQ +
+              " tokens; under SP each rank holds " + SPER + "." },
+      { key: "ln",     label: "LayerNorm",
+        tpTitle: "LN(x)", spTitle: "LN(x)",
+        comm: sch("none"),
+        note: "Per-token statistics. TP computes all " + SEQ + " rows on every rank — the same " +
+              "arithmetic, twice. SP computes " + SPER + " rows on each rank and nothing crosses." },
+      { key: "gather", label: "entering the TP region",
+        tpTitle: "LN(x)", spTitle: "LN(x) gathered",
+        comm: sch("all_gather"),
+        note: "The matmul contracts over the hidden dimension, so it needs whole tokens — and " +
+              "every rank runs it over the full sequence. TP already had that; SP all-gathers." },
+      { key: "tp",     label: "TP region: column-parallel up, GELU, row-parallel down",
+        tpTitle: "GELU(LN·W_in⁽ʳ⁾)", spTitle: "GELU(LN·W_in⁽ʳ⁾)",
+        note: "Identical in both columns. Each rank owns " + FPER + " of the " + DFF +
+              " hidden units and produces a partial sum of the output." },
+      { key: "exit",   label: "leaving the TP region",
+        tpTitle: "residual out", spTitle: "residual out",
+        comm: sch("reduce_scatter"),
+        note: "The partials must be summed. TP all-reduces and every rank keeps all " + SEQ +
+              " rows. SP reduce-scatters: the same sum, delivered one shard at a time." }
+    ];
+
+    /* per-stage tensor values, per side, per rank */
+    function tpValues(stage, r) {
+      switch (stage) {
+        case "in":     return { v: S.input.X,       repl: true,  shape: [SEQ, DM] };
+        case "ln":     return { v: S.baseline.ln,   repl: true,  shape: [SEQ, DM] };
+        case "gather": return { v: S.baseline.ln,   repl: true,  shape: [SEQ, DM] };
+        case "tp":     return { v: actShard(r),     repl: false, shape: [SEQ, FPER] };
+        case "exit":   return { v: S.tp_only.out,   repl: true,  shape: [SEQ, DM] };
+      }
+    }
+    function spValues(stage, r) {
+      const rows = seqRows(r);
+      const pick = function (m) { return rows.map(function (t) { return m[t]; }); };
+      switch (stage) {
+        case "in":     return { v: pick(S.input.X),     repl: false, shape: [SPER, DM], axis: "seq" };
+        case "ln":     return { v: pick(S.baseline.ln), repl: false, shape: [SPER, DM], axis: "seq" };
+        case "gather": return { v: S.baseline.ln,       repl: false, shape: [SEQ, DM], axis: "gathered",
+                                ghost: true };
+        case "tp":     return { v: actShard(r),         repl: false, shape: [SEQ, FPER], axis: "hid" };
+        case "exit":   return { v: pick(S.tp_plus_sp.out), repl: false, shape: [SPER, DM], axis: "seq" };
+      }
+    }
+
+    /* resident ledgers: name -> elements, accumulated stage by stage.
+       The three entries are exactly SEQPAR's `resident` arrays. */
+    const tpRes = S.tp_only.ranks[0].resident;
+    const spRes = S.tp_plus_sp.ranks[0].resident;
+    function findRes(list, needle) {
+      return list.find(function (x) { return x.name.indexOf(needle) === 0; }) || list[0];
+    }
+    const tpResid   = findRes(tpRes, "residual"), tpLn = findRes(tpRes, "LN"), tpMlp = findRes(tpRes, "MLP");
+    const spResid   = findRes(spRes, "residual"), spLn = findRes(spRes, "LN"), spMlp = findRes(spRes, "MLP");
+
+    function ledgerFor(side, stage) {
+      const R = side === "tp"
+        ? { resid: tpResid, ln: tpLn, mlp: tpMlp }
+        : { resid: spResid, ln: spLn, mlp: spMlp };
+      const rows = [];
+      const si = STAGES.findIndex(function (s) { return s.key === stage; });
+      rows.push({ name: R.resid.name + " (in)", el: R.resid.elements,
+                  status: R.resid.status, isNew: si === 0, gone: si >= 4 });
+      if (si >= 1) rows.push({ name: R.ln.name, el: R.ln.elements, status: R.ln.status,
+                               isNew: si === 1 });
+      if (si >= 3) rows.push({ name: R.mlp.name, el: R.mlp.elements, status: R.mlp.status,
+                               isNew: si === 3 });
+      if (si >= 4) rows.push({ name: R.resid.name + " (out)", el: R.resid.elements,
+                               status: R.resid.status, isNew: true });
+      return rows;
+    }
+    function ledgerTotal(rows) {
+      return rows.reduce(function (a, r) { return a + (r.gone ? 0 : r.el); }, 0);
+    }
+
+    /* sanity: the final ledgers must equal what the simulation reported */
+    const tpFinal = ledgerTotal(ledgerFor("tp", "exit"));
+    const spFinal = ledgerTotal(ledgerFor("sp", "exit"));
+    const ledgerOk = tpFinal === S.tp_only.activation_elements_per_rank &&
+                     spFinal === S.tp_plus_sp.activation_elements_per_rank;
+
+    /* ---- DOM scaffolding --------------------------------------------- */
+    const zip = el("div", { class: "zip" });
+    const zipPills = [
+      { text: "▤ shard: SEQ · residual in", comm: false },
+      { text: "▤ shard: SEQ · LayerNorm",   comm: false },
+      { text: "⇢ all-gather ⇢",             comm: true  },
+      { text: "▥ shard: HIDDEN · MLP",      comm: false },
+      { text: "⇠ reduce-scatter ⇢ ▤ SEQ",   comm: true  }
+    ].map(function (p, i) {
+      const e = el("div", { class: "zippill" + (p.comm ? " comm" : "") }, p.text);
+      if (i) zip.appendChild(el("span", { class: "zipsep" }, "›"));
+      zip.appendChild(e);
+      return e;
+    });
+    host.appendChild(zip);
+
+    const stageNote = el("p", { class: "small", style: {
+      borderLeft: "3px solid var(--accent)", padding: "4px 0 4px 13px",
+      minHeight: "2.6em", color: "var(--ink-2)", margin: "0 0 14px" } });
+    host.appendChild(stageNote);
+
+    const two = el("div", { class: "twocol" });
+    host.appendChild(two);
+
+    const sides = {};
+    [["tp", "TP only (page 15)"], ["sp", "TP + sequence parallel"]].forEach(function (pair) {
+      const key = pair[0];
+      const head = el("div", { class: "colhead" + (key === "sp" ? " win" : "") }, [
+        el("span", {}, pair[1]),
+        el("span", { class: "tot" }, "")
+      ]);
+      const wrap = el("div", { class: "colwrap" });
+      const slots = [];
+      const gpus = NN.gpu.grid({
+        count: RANKS,
+        label: function (g) {
+          return key === "sp"
+            ? "GPU " + g + " · " + tokensOf(g).map(function (t) { return "“" + t + "”"; }).join(" ")
+            : "GPU " + g + " · all " + SEQ + " tokens";
+        },
+        render: function (g) {
+          const s = el("div", { class: "card-t" });
+          slots.push(s);
+          return s;
+        }
+      });
+      gpus.style.gridTemplateColumns = "1fr";
+      const commHost = el("div", {});
+      wrap.appendChild(head);
+      wrap.appendChild(gpus);
+      wrap.appendChild(commHost);
+      two.appendChild(wrap);
+      sides[key] = { head: head, tot: head.lastChild, slots: slots, comm: commHost, grid: gpus };
+    });
+
+    /* ---- render one stage -------------------------------------------- */
+    function commCardFor(side, stageKey) {
+      if (side === "tp") {
+        if (stageKey === "exit") {
+          const f = ringFactor(tpColl.op, TP);
+          return NN.gpu.commCard({
+            op: tpColl.op, elements: tpColl.elements,
+            tensor: "partial sums (" + SEQ + "×" + DM + ")",
+            sent_per_gpu_elements: f === null ? 0 : f * tpColl.elements,
+            why: tpColl.why, phase: tpColl.where
+          });
+        }
+        if (stageKey === "gather") {
+          return NN.gpu.commCard({
+            op: "none", elements: 0,
+            why: "Nothing to gather: TP never split the sequence, so every rank already holds " +
+                 "every token. This is the saving SP is about to claim — the tensor was whole " +
+                 "because it was duplicated.",
+            phase: "SP → TP boundary"
+          });
+        }
+        return NN.gpu.commCard({
+          op: "none", elements: 0,
+          why: "No communication. " + (stageKey === "ln"
+            ? "Every rank runs the identical LayerNorm over the identical full sequence."
+            : "The column split leaves each rank with whole hidden units and GELU is elementwise."),
+          phase: stageKey === "ln" ? "LayerNorm region" : "TP region"
+        });
+      }
+      const st = STAGES.find(function (s) { return s.key === stageKey; });
+      if (st && st.comm) {
+        const c = st.comm;
+        const f = ringFactor(c.op, TP);
+        return NN.gpu.commCard({
+          op: c.op, elements: c.elements,
+          tensor: c.op === "none" ? null : "(" + SEQ + "×" + DM + ")",
+          sent_per_gpu_elements: f === null ? 0 : f * c.elements,
+          why: c.why, phase: "region: " + c.region
+        });
+      }
+      return NN.gpu.commCard({
+        op: "none", elements: 0,
+        why: "No communication. Each rank owns whole hidden units of the MLP and GELU is " +
+             "elementwise, exactly as under plain TP.",
+        phase: "region: TP"
+      });
+    }
+
+    function renderStage(i) {
+      const st = STAGES[i];
+      zipPills.forEach(function (p, k) { p.classList.toggle("now", k === i); });
+      stageNote.innerHTML = "<b>" + st.label + ".</b> " + st.note;
+
+      [["tp", tpValues, st.tpTitle], ["sp", spValues, st.spTitle]].forEach(function (trip) {
+        const key = trip[0], valfn = trip[1], title = trip[2];
+        const side = sides[key];
+        side.slots.forEach(function (slot, r) {
+          const v = valfn(st.key, r);
+          slot.innerHTML = "";
+          const statusTxt = key === "tp"
+            ? (v.repl ? "REPLICATED ×" + RANKS : "sharded by HIDDEN")
+            : (v.axis === "seq" ? "sharded by SEQ"
+              : v.axis === "hid" ? "sharded by HIDDEN"
+              : "gathered — transient");
+          const kind = key === "tp"
+            ? (v.repl ? "rep" : "hid")
+            : (v.axis === "seq" ? "seq" : v.axis === "hid" ? "hid" : "na");
+          const box = el("div", { class: "swap" }, [
+            el("div", { style: { display: "flex", gap: "7px", flexWrap: "wrap",
+                                 alignItems: "baseline", marginBottom: "4px" } }, [
+              badge(statusTxt, kind),
+              el("span", { class: "mono small", style: { color: "var(--ink-muted)" } },
+                v.v.length + "×" + v.v[0].length + " = " + (v.v.length * v.v[0].length) + " el")
+            ]),
+            grid({ name: title, values: v.v, shape: v.shape, repl: !!v.repl, ghost: !!v.ghost })
+          ]);
+          slot.appendChild(box);
+
+          /* ledger */
+          const rows = ledgerFor(key, st.key);
+          const led = el("div", { class: "ledger" });
+          rows.forEach(function (row) {
+            const cls = "lrow" + (row.isNew ? " new" : "") + (row.gone ? " gone" : "");
+            led.appendChild(el("div", { class: cls }, [
+              el("div", { class: "ln" }, row.name),
+              el("div", { class: "lv" }, row.el + " el")
+            ]));
+          });
+          led.appendChild(el("div", { class: "lrow tot" }, [
+            el("div", { class: "ln" }, "resident on this rank"),
+            el("div", { class: "lv" }, ledgerTotal(rows) + " el")
+          ]));
+          slot.appendChild(led);
+        });
+        side.tot.textContent = ledgerTotal(ledgerFor(key, st.key)) + " el / rank";
+        side.comm.innerHTML = "";
+        side.comm.appendChild(commCardFor(key, st.key));
+      });
+
+      /* light up the ranks that are actually talking */
+      const talking = (st.key === "gather" || st.key === "exit");
+      sides.sp.grid.highlight(talking ? [0, 1] : null);
+      sides.tp.grid.highlight(st.key === "exit" ? [0, 1] : null);
+    }
+
+    const stepMount = el("div", {});
+    host.appendChild(stepMount);
+    new NN.Stepper({
+      mount: stepMount,
+      count: STAGES.length,
+      labels: STAGES.map(function (s) { return s.label; }),
+      autoplayMs: 2100,
+      onStep: function (i) { renderStage(i); }
+    });
+
+    /* ---- the zipper, stated ------------------------------------------ */
+    host.appendChild(NN.callout("key", "The zipper",
+      "Read the strip at the top of this section left to right: <b>shard by sequence → " +
+      "all-gather → shard by hidden → reduce-scatter → shard by sequence</b>. The two halves of " +
+      "the block are sharded along different axes, and the collectives are the teeth that join " +
+      "them. Neither axis is ever unsharded: the moment the sequence shard is released by the " +
+      "all-gather, the hidden shard takes over, and the reduce-scatter hands it back. That is " +
+      "why <i>SEQPAR.tp_plus_sp.note</i> can say “" + S.tp_plus_sp.note + "”"));
+
+    /* ---- independent checks ------------------------------------------ */
+    const sumPart = partial(0).map(function (row, i) {
+      return row.map(function (v, j) { return v + partial(1)[i][j]; });
+    });
+    const partErr = maxdiff(sumPart, S.baseline.down);
+    host.appendChild(el("div", { class: "vd " + (partErr < 1e-12 && ledgerOk ? "ok" : "bad") }, [
+      el("div", { class: "big" }, partErr < 1e-12 && ledgerOk ? "✓ checked in the browser" : "✗ mismatch"),
+      el("div", { class: "det" },
+        "Σ over ranks of the partial outputs vs SEQPAR.baseline.down: max|Δ| = " + fmt(partErr, 2) +
+        "  ·  ledger totals " + tpFinal + " / " + spFinal + " vs SEQPAR's " +
+        S.tp_only.activation_elements_per_rank + " / " + S.tp_plus_sp.activation_elements_per_rank)
+    ]));
+
+    host.appendChild(el("p", { class: "small muted", html:
+      "One honesty note on the ledger. The tensor produced by the all-gather is drawn ghosted " +
+      "because it is <em>transient</em>: what gets saved for the backward pass is the sequence " +
+      "shard, not the gathered copy, and the all-gather is simply run again on the way back. " +
+      "That is why the gathered <span class='mono'>(" + SEQ + "×" + DM + ")</span> tensor does " +
+      "not appear in <code>SEQPAR.tp_plus_sp.ranks[r].resident</code>, and why the saving is " +
+      S.memory.saved + " elements per rank (" + S.memory.saved_pct + "%) rather than nothing." }));
+
+    host.appendChild(NN.tiles([
+      { k: "TP only, per rank", v: String(S.memory.tp_only_per_rank), s: "elements of activation" },
+      { k: "TP + SP, per rank", v: String(S.memory.tp_sp_per_rank), cls: "activation",
+        s: "elements of activation" },
+      { k: "saved", v: String(S.memory.saved), s: S.memory.saved_pct + "% less, at TP = " + TP },
+      { k: "collectives", v: sched.filter(function (c) { return c.op !== "none"; }).length + " vs " +
+                             S.tp_only.collectives.length,
+        s: "TP+SP vs TP — same volume, next section" }
+    ]));
+  })();
+
+  /* ==================================================================== */
+  /*  4 · THE PROOF THAT IT IS FREE                                       */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#freeBody");
+    const C = S.communication;
+
+    host.appendChild(el("p", { html:
+      "Sequence parallelism adds two collectives per region and removes one. That sounds like a " +
+      "loss until you write down what the one it removed was made of. This is page " +
+      "<a href='12-collectives.html#compose'>12</a>'s decomposition, applied:" }));
+
+    const arInfo = collectiveInfo("all_reduce");
+    const agInfo = collectiveInfo("all_gather");
+    const rsInfo = collectiveInfo("reduce_scatter");
+
+    host.appendChild(NN.formula({
+      rule: "all_reduce  =  reduce_scatter  +  all_gather",
+      sub: (arInfo ? arInfo.ring_factor : "2(N-1)/N · S") + "  =  " +
+           (rsInfo ? rsInfo.ring_factor : "(N-1)/N · S") + "  +  " +
+           (agInfo ? agInfo.ring_factor : "(N-1)/N · S"),
+      result: "identical ring cost",
+      cls: "activation"
+    }));
+    host.appendChild(el("p", { class: "small muted", html:
+      "Ring factors quoted from <code>PARALLEL.collectives</code>. " +
+      (arInfo ? "<code>all_reduce.what</code>: “" + arInfo.what + "”" : "") }));
+
+    /* ---- the side-by-side bill --------------------------------------- */
+    const S_payload = C.payload_elements;
+    const fAR = ringFactor("all_reduce", TP);
+    const fAG = ringFactor("all_gather", TP);
+    const fRS = ringFactor("reduce_scatter", TP);
+
+    const billTbl = el("table", { class: "data" }, [
+      el("thead", {}, el("tr", {}, [
+        el("th", {}, "strategy"), el("th", {}, "collective"), el("th", {}, "payload S"),
+        el("th", {}, "ring factor at N=" + TP), el("th", {}, "sent per rank")
+      ])),
+      el("tbody", {}, [].concat(
+        C.tp_only.map(function (c) {
+          return el("tr", {}, [
+            el("td", {}, "TP only"), el("td", { class: "n" }, c.op),
+            el("td", { class: "n" }, String(S_payload)),
+            el("td", { class: "n" }, fmt(fAR, 4)),
+            el("td", { class: "n" }, fmt(c.sent_per_rank, 4))
+          ]);
+        }),
+        [el("tr", { style: { fontWeight: "700" } }, [
+          el("td", {}, "TP only"), el("td", {}, "total"), el("td", {}, ""), el("td", {}, ""),
+          el("td", { class: "n" }, fmt(C.tp_total_sent, 4))
+        ])],
+        C.tp_plus_sp.map(function (c) {
+          const f = c.op === "all_gather" ? fAG : fRS;
+          return el("tr", {}, [
+            el("td", {}, "TP + SP"), el("td", { class: "n" }, c.op),
+            el("td", { class: "n" }, String(S_payload)),
+            el("td", { class: "n" }, fmt(f, 4)),
+            el("td", { class: "n" }, fmt(c.sent_per_rank, 4))
+          ]);
+        }),
+        [el("tr", { style: { fontWeight: "700" } }, [
+          el("td", {}, "TP + SP"), el("td", {}, "total"), el("td", {}, ""), el("td", {}, ""),
+          el("td", { class: "n" }, fmt(C.sp_total_sent, 4))
+        ])]
+      ))
+    ]);
+    host.appendChild(el("div", { class: "scrollx" }, billTbl));
+
+    /* ---- independent verification ------------------------------------ */
+    const recomputedTP = (fAR === null ? null : fAR * S_payload);
+    const recomputedSP = (fAG === null || fRS === null ? null : (fAG + fRS) * S_payload);
+    const identicalJS = Math.abs(C.tp_total_sent - C.sp_total_sent) < 1e-12;
+    const matchesRing = recomputedTP !== null &&
+      Math.abs(recomputedTP - C.tp_total_sent) < 1e-9 &&
+      Math.abs(recomputedSP - C.sp_total_sent) < 1e-9;
+    const ok = identicalJS && C.identical && matchesRing;
+
+    host.appendChild(el("div", { class: "vd " + (ok ? "ok" : "bad") }, [
+      el("div", { class: "big" }, ok ? "✓ identical" : "✗ not identical"),
+      el("div", { class: "det" },
+        "TP " + fmt(C.tp_total_sent, 4) + " elements sent per rank  ·  TP+SP " +
+        C.tp_plus_sp.map(function (c) { return fmt(c.sent_per_rank, 4); }).join(" + ") + " = " +
+        fmt(C.sp_total_sent, 4) + "  ·  |Δ| = " + fmt(Math.abs(C.tp_total_sent - C.sp_total_sent), 1)),
+      el("div", { class: "det muted" },
+        "recomputed here from PARALLEL's ring factors: " + fmt(recomputedTP, 4) + " and " +
+        fmt(recomputedSP, 4) + " — SEQPAR.communication.identical = " + String(C.identical))
+    ]));
+
+    host.appendChild(el("p", { html: "<i>SEQPAR.communication.why</i>: “" + C.why + "”" }));
+
+    /* ---- interactive: the ring, and the world size ------------------- */
+    host.appendChild(el("h3", {}, "It stays free at every world size"));
+
+    const worlds = arInfo && arInfo.ring_factor_at_world
+      ? Object.keys(arInfo.ring_factor_at_world).map(Number).sort(function (a, b) { return a - b; })
+      : [TP];
+    /* start the ring at the world size TP is actually run at inside a node,
+       because a 2-node ring draws as a line; the table above already covers
+       N = TP exhaustively. */
+    const nodeWorld = worlds.filter(function (w) { return w <= 8; }).pop() || TP;
+    const wIdxStart = Math.max(0, worlds.indexOf(nodeWorld));
+    const wSlider = el("input", { type: "range", min: 0, max: worlds.length - 1, step: 1,
+                                  value: String(wIdxStart) });
+    const wVal = el("span", { class: "val" });
+    const wOut = el("div", { class: "small mono", style: { color: "var(--ink-2)" } });
+
+    const ringWrap = el("div", { style: { display: "flex", gap: "20px", flexWrap: "wrap",
+                                          alignItems: "center" } });
+    const ringHost = el("div", {});
+    const ringCap = el("div", { class: "small", style: { maxWidth: "42ch", color: "var(--ink-2)" } });
+    ringWrap.appendChild(ringHost);
+    ringWrap.appendChild(ringCap);
+
+    const phases = [
+      { op: "all_reduce", text: "TP alone: one all-reduce. Every rank sends " +
+        "2(N−1)/N of the payload and ends up holding the whole summed tensor." },
+      { op: "reduce_scatter", text: "TP+SP, half one: reduce-scatter. The same ring, run " +
+        "(N−1)/N of the way — the partials get summed, and each rank keeps only its own " +
+        "sequence shard of the result." },
+      { op: "all_gather", text: "TP+SP, half two: all-gather, at the top of the NEXT region. " +
+        "The other (N−1)/N. Between the two halves the tensor sits sharded — which is the " +
+        "whole point, and costs nothing extra to arrange." }
+    ];
+    let phaseIdx = 0;
+    const phaseBtns = phases.map(function (p, i) {
+      const b = el("button", { class: "btn" }, p.op);
+      b.addEventListener("click", function () { phaseIdx = i; paintRing(); });
+      return b;
+    });
+    host.appendChild(el("div", { class: "segbtns" }, phaseBtns));
+    host.appendChild(ringWrap);
+
+    let ringEl = null;
+    function paintRing() {
+      const N = worlds[+wSlider.value];
+      const drawN = Math.min(Math.max(N, 2), 8);
+      ringHost.innerHTML = "";
+      ringEl = NN.gpu.ring({ count: drawN, size: 230, r: 82 });
+      ringHost.appendChild(ringEl);
+      const p = phases[phaseIdx];
+      ringEl.step(0, NN.gpu.opColor(p.op));
+      phaseBtns.forEach(function (b, i) { b.setAttribute("aria-pressed", String(i === phaseIdx)); });
+      const f = ringFactor(p.op, N);
+      ringCap.innerHTML = "<b>" + p.op + "</b> at N = " + N +
+        (N > 8 ? " (drawn as " + drawN + " nodes)" : "") +
+        ": ring factor " + fmt(f, 6) + " · " + p.text +
+        (N <= 2 ? " <span class='muted'>At N = " + N + " the ring is degenerate — two ranks, " +
+                  "one exchange each way — which is why it draws as a line.</span>" : "");
+    }
+    function paintWorld() {
+      const N = worlds[+wSlider.value];
+      wVal.textContent = "N = " + N;
+      const ar = ringFactor("all_reduce", N);
+      const ag = ringFactor("all_gather", N);
+      const rs = ringFactor("reduce_scatter", N);
+      const a = ar * S_payload, b = (ag + rs) * S_payload;
+      const eq = Math.abs(a - b) < 1e-9;
+      wOut.innerHTML =
+        "TP only: <b>" + fmt(a, 4) + "</b> elements sent per rank  ·  " +
+        "TP + SP: " + fmt(rs * S_payload, 4) + " + " + fmt(ag * S_payload, 4) +
+        " = <b>" + fmt(b, 4) + "</b>  →  " +
+        (eq ? "<span style='color:var(--good)'>identical ✓</span>"
+            : "<span style='color:var(--critical)'>differ ✗</span>") +
+        "  <span class='muted'>(payload S = " + S_payload + " elements, " +
+        "SEQPAR.communication.payload_elements)</span>";
+      paintRing();
+    }
+    wSlider.addEventListener("input", paintWorld);
+    host.appendChild(el("div", { class: "ctlrow" }, [
+      el("div", { class: "ctl" }, [el("label", {}, "ranks in the TP group"), wSlider, wVal])
+    ]));
+    host.appendChild(wOut);
+    paintWorld();
+
+    host.appendChild(el("p", { class: "small muted", html:
+      "The identity 2(N−1)/N = (N−1)/N + (N−1)/N holds for every N, so the equality above is not " +
+      "a coincidence of TP = " + TP + ". <code>PARALLEL.ring.explanation</code>: “" +
+      (P && P.ring ? P.ring.explanation : "") + "”" }));
+
+    /* ---- the caveat, honestly ---------------------------------------- */
+    const cm = P ? P.cost_model : null;
+    let latencyLine = "";
+    if (cm && cm.latency_us) {
+      const lat = cm.latency_us.intra_node;
+      const link = P.interconnects.links.find(function (l) { return /NVLink 4/.test(l.name); }) ||
+                   P.interconnects.links[0];
+      const bw = link.per_dir_GBps * 1e9 * cm.achieved_fraction;
+      const crossover = lat * 1e-6 * bw;
+      latencyLine =
+        "Put a number on it. <code>PARALLEL.cost_model.latency_us.intra_node</code> is " + lat +
+        " µs per collective, so the second launch costs about " + lat + " µs that TP alone did " +
+        "not pay. At " + link.name + "'s " + link.per_dir_GBps + " GB/s per direction and " +
+        "<code>achieved_fraction</code> = " + cm.achieved_fraction + " — " +
+        fmt(bw / 1e9, 0) + " GB/s achieved — that " + lat + " µs is the time to move about " +
+        NN.bytes(crossover) + ". Below roughly that payload the extra launch, not the extra " +
+        "bytes, is what you are paying, and the memory win has to be worth it. Above it the " +
+        "bandwidth term dominates and the two schedules converge. " +
+        "<code>cost_model._status</code>: <em>" + cm._status + "</em>";
+    }
+
+    host.appendChild(NN.callout("warn", "Free in bytes is not free in time",
+      "<i>SEQPAR.communication.caveat</i>: “" + C.caveat + "”<br><br>" + latencyLine));
+
+    host.appendChild(NN.callout("why", "Why this is the argument that settled it",
+      "A memory optimisation that costs bandwidth is a trade, and trades get argued about. " +
+      "Sequence parallelism is not a trade in the bandwidth dimension at all: the bytes are " +
+      "the same bytes, moved by the same ring, in two calls instead of one. What changes is " +
+      "that the tensor is left sharded in the gap between the halves instead of being " +
+      "reassembled and then immediately duplicated. That is why Megatron enables it by default " +
+      "alongside tensor parallelism rather than exposing it as a tuning knob."));
+  })();
+
+  /* ==================================================================== */
+  /*  5 · EQUIVALENCE                                                     */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#equivBody");
+    const E = S.equivalence;
+
+    const tpErr = maxdiff(S.tp_only.out, S.baseline.out);
+    const spErr = maxdiff(S.tp_plus_sp.out, S.baseline.out);
+    const agreesTP = Math.abs(tpErr - E.tp_err) < 1e-18 || tpErr === E.tp_err;
+    const agreesSP = Math.abs(spErr - E.sp_err) < 1e-18 || spErr === E.sp_err;
+    const pass = tpErr < 1e-12 && spErr < 1e-12 && E.passed;
+
+    host.appendChild(el("p", { html:
+      "Rearranging where activations live must not change what is computed. The check is the " +
+      "same one page <a href='15-tensor-parallel.html'>15</a> and page " +
+      "<a href='13-data-parallel.html'>13</a> use: run the region on one GPU, run it under each " +
+      "strategy, subtract. Recomputed here in the browser from " +
+      "<code>SEQPAR.baseline.out</code>, <code>SEQPAR.tp_only.out</code> and " +
+      "<code>SEQPAR.tp_plus_sp.out</code> rather than read off the stored value." }));
+
+    host.appendChild(el("div", { class: "vd " + (pass ? "ok" : "bad") }, [
+      el("div", { class: "big" }, pass ? "✓ both exact" : "✗ mismatch"),
+      el("div", { class: "det" }, "TP only vs 1 GPU: max|Δ| = " + fmt(tpErr, 3)),
+      el("div", { class: "det" }, "TP + SP vs 1 GPU: max|Δ| = " + fmt(spErr, 3)),
+      el("div", { class: "det muted" },
+        "SEQPAR.equivalence says " + fmt(E.tp_err, 3) + " / " + fmt(E.sp_err, 3) + " — " +
+        (agreesTP && agreesSP ? "agrees" : "DISAGREES") + "; passed = " + String(E.passed))
+    ]));
+
+    host.appendChild(el("p", { class: "small muted", html:
+      "That residue is float64 rounding, not an approximation: the two schedules add the same " +
+      "products in a different order. It is the last bit of the mantissa and nothing more. " +
+      "<i>SEQPAR.equivalence.claim</i>: “" + E.claim + "”" }));
+
+    /* --- side-by-side, with a toggle ---------------------------------- */
+    const modes = [
+      { k: "base", label: "single GPU", get: function () { return S.baseline.out; } },
+      { k: "tp",   label: "TP only",     get: function () { return S.tp_only.out; } },
+      { k: "sp",   label: "TP + SP (reassembled from shards)",
+        get: function () { return S.tp_plus_sp.out; } },
+      { k: "diff", label: "TP+SP − single GPU",
+        get: function () {
+          return S.tp_plus_sp.out.map(function (row, i) {
+            return row.map(function (v, j) { return v - S.baseline.out[i][j]; });
+          });
+        } }
+    ];
+    let mode = 0;
+    const btns = modes.map(function (m, i) {
+      const b = el("button", { class: "btn" }, m.label);
+      b.addEventListener("click", function () { mode = i; paint(); });
+      return b;
+    });
+    host.appendChild(el("div", { class: "segbtns" }, btns));
+    const outHost = el("div", { class: "eqgrid" });
+    host.appendChild(outHost);
+
+    function paint() {
+      btns.forEach(function (b, i) { b.setAttribute("aria-pressed", String(i === mode)); });
+      outHost.innerHTML = "";
+      const m = modes[mode];
+      const vals = m.get();
+      const isDiff = m.k === "diff";
+      outHost.appendChild(el("div", { class: "swap" }, [
+        NN.tensor({
+          name: m.label, shape: [SEQ, DM], values: vals, cls: "activation",
+          digits: isDiff ? 2 : 5, signed: isDiff,
+          note: isDiff ? "every cell is float64 dust" : "(seq × d_model)"
+        })
+      ]));
+      const side = el("div", { style: { maxWidth: "40ch" } });
+      if (m.k === "sp") {
+        side.appendChild(el("div", { class: "small muted", html:
+          "Assembled by concatenating the rank shards in sequence order: " +
+          S.tp_plus_sp.ranks.map(function (r) {
+            return "GPU " + r.rank + " → rows " + r.seq_rows.join(",") + " (" +
+                   r.seq_rows.map(function (t) { return "“" + TOK[t] + "”"; }).join(" ") + ")";
+          }).join("; ") + ". No rank ever held all " + SEQ + " output rows." }));
+      } else if (isDiff) {
+        side.appendChild(el("div", { class: "small muted", html:
+          "Largest magnitude anywhere in the grid: " + fmt(spErr, 3) + ". For scale, the outputs " +
+          "themselves are of order " +
+          fmt(Math.max.apply(null, S.baseline.out.map(function (r) {
+            return Math.max.apply(null, r.map(Math.abs));
+          })), 3) + "." }));
+      } else {
+        side.appendChild(el("div", { class: "small muted", html:
+          "Token rows in order: " + TOK.map(function (t) { return "“" + t + "”"; }).join(", ") +
+          ". Compare against the other tabs — the printed values are identical to five decimals " +
+          "because they are identical to fifteen." }));
+      }
+      outHost.appendChild(side);
+    }
+    paint();
+  })();
+
+  /* ==================================================================== */
+  /*  6 · AT SCALE                                                        */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#scaleBody");
+    const rows = AS.table;
+    const at = ASat;
+    const A = COEF.A, B = COEF.B, Cc = COEF.C, fitErr = COEF.fitErr;
+    const tpOnlyB = COEF.tpOnly, tpSpB = COEF.tpSp;
+
+    host.appendChild(el("p", { html:
+      "The toy above has seq " + SEQ + " and d_ff " + DFF + ", which is enough to see the " +
+      "structure and not enough to see the size of the prize. For that, the standard accounting " +
+      "is Korthikanti et al.'s, in bytes of stored activation per token per layer with tensor " +
+      "parallel degree <i>t</i>:" }));
+
+    host.appendChild(NN.formula({
+      rule: "TP only:  " + AS.formula_tp_only,
+      sub: "per-token, per-layer coefficient = " + A + " + " + B + "/t",
+      result: fmt(tpOnlyB(TP), 3) + " bytes at t = " + TP,
+      cls: "activation"
+    }));
+    host.appendChild(NN.formula({
+      rule: "TP + SP:  " + AS.formula_tp_sp,
+      sub: "per-token, per-layer coefficient = " + Cc + "/t",
+      result: fmt(tpSpB(TP), 3) + " bytes at t = " + TP,
+      cls: "activation"
+    }));
+    host.appendChild(el("p", { class: "small muted", html:
+      "The coefficients " + A + ", " + B + " and " + Cc + " are not typed in here — they are " +
+      "solved for from the first two rows of <code>SEQPAR.at_scale.table</code> and then checked " +
+      "against every row: worst reproduction error " + fmt(fitErr, 2) + " bytes, which is the " +
+      "rounding in the shipped table. <b>_source</b>: <em>" + AS._source + "</em> These are " +
+      "quoted numbers, not something this site derives." }));
+
+    /* ---- the chart --------------------------------------------------- */
+    const tMax = rows[rows.length - 1].tp;
+    const dense = [], denseSp = [], floor = [];
+    for (let t = 1; t <= tMax; t++) {
+      dense.push([t, tpOnlyB(t)]);
+      denseSp.push([t, tpSpB(t)]);
+      floor.push([t, A]);
+    }
+    host.appendChild(el("div", { class: "chartlegend" }, [
+      el("span", {}, [el("i", { style: { borderTop: "3px solid var(--accent)" } }), "TP only — " + A + " + " + B + "/t"]),
+      el("span", {}, [el("i", { style: { borderTop: "3px solid var(--activation)" } }), "TP + SP — " + Cc + "/t"]),
+      el("span", {}, [el("i", { style: { borderTop: "3px dashed var(--critical)" } }),
+        "the replicated floor, y = " + A])
+    ]));
+    host.appendChild(NN.chart.line({
+      series: [
+        { name: "TP only", color: "var(--accent)", points: dense, dots: false },
+        { name: "TP + SP", color: "var(--activation)", points: denseSp, dots: false },
+        { name: "replicated floor", color: "var(--critical)", points: floor, dash: "5 4", dots: false }
+      ],
+      width: 680, height: 260, xlabel: "tensor-parallel degree t",
+      ylabel: "bytes / token / layer", yMin: 0, margin: { l: 66 }
+    }));
+
+    host.appendChild(NN.callout("key", "The key reading",
+      "<b>At t = 1 the two curves meet exactly</b> — " +
+      fmt(at(1).bytes_per_token_per_layer_tp_only, 3) + " = " +
+      fmt(at(1).bytes_per_token_per_layer_tp_sp, 3) + " — which is the sanity check that says the " +
+      "accounting is of the same activations, not two different lists. With one GPU there is " +
+      "nothing to replicate and nothing to shard, so the two schemes must agree, and they do.<br><br>" +
+      "<b>Then they part.</b> TP-only falls towards " + A + " bytes and stops. That asymptote is " +
+      "the replicated term — LayerNorm, dropout, the residual — and no number of GPUs removes " +
+      "it: at t = " + tMax + " it is still " + fmt(tpOnlyB(tMax), 3) + ", within " +
+      fmt(tpOnlyB(tMax) - A, 3) + " of the floor. TP+SP has no constant term at all, so it keeps " +
+      "dividing. At t = " + at(8).tp + " that is <b>" +
+      fmt(at(8).bytes_per_token_per_layer_tp_only, 3) + " vs " +
+      fmt(at(8).bytes_per_token_per_layer_tp_sp, 3) + " bytes</b>, a " +
+      fmt(at(8).saving_pct, 1) + "% saving.<br><br>" +
+      "<i>SEQPAR.at_scale.reading</i>: “" + AS.reading + "”"));
+
+    const scTbl = el("table", { class: "data" }, [
+      el("thead", {}, el("tr", {}, [
+        el("th", {}, "t"), el("th", {}, "TP only B/token/layer"),
+        el("th", {}, "TP + SP B/token/layer"), el("th", {}, "saving"),
+        el("th", { class: "wrap" }, "distance above the floor")
+      ])),
+      el("tbody", {}, rows.map(function (r) {
+        return el("tr", {}, [
+          el("td", {}, String(r.tp)),
+          el("td", { class: "n" }, fmt(r.bytes_per_token_per_layer_tp_only, 3)),
+          el("td", { class: "n" }, fmt(r.bytes_per_token_per_layer_tp_sp, 3)),
+          el("td", { class: "n" }, fmt(r.saving_pct, 1) + "%"),
+          el("td", { class: "n muted" }, fmt(r.bytes_per_token_per_layer_tp_only - A, 3))
+        ]);
+      }))
+    ]);
+    host.appendChild(el("div", { class: "scrollx" }, scTbl));
+
+    /* ---- the interactive budget -------------------------------------- */
+    host.appendChild(el("h3", {}, "Put a real model in it"));
+
+    const SEQS   = [512, 1024, 2048, 4096, 8192, 16384, 32768];
+    const HIDS   = [768, 1024, 2048, 4096, 8192, 12288, 16384];
+    const BATCH  = [1, 2, 4, 8, 16, 32, 64];
+    const TS     = rows.map(function (r) { return r.tp; });
+
+    function nearestIdx(list, v) {
+      let bi = 0, bd = Infinity;
+      list.forEach(function (x, i) { const d = Math.abs(x - v); if (d < bd) { bd = d; bi = i; } });
+      return bi;
+    }
+
+    const st = { s: 4, h: 3, b: 0, L: 32, t: nearestIdx(TS, 8) };
+
+    function mkSlider(list, key, label, fmtv) {
+      const inp = el("input", { type: "range", min: 0, max: list.length - 1, step: 1,
+                                value: String(st[key]) });
+      const v = el("span", { class: "val" });
+      inp.addEventListener("input", function () { st[key] = +inp.value; repaint(); });
+      const row = el("div", { class: "ctl" }, [el("label", {}, label), inp, v]);
+      row.sync = function () { inp.value = String(st[key]); v.textContent = fmtv(list[st[key]]); };
+      return row;
+    }
+    const sSl = mkSlider(SEQS,  "s", "sequence",    function (x) { return NN.count(x); });
+    const bSl = mkSlider(BATCH, "b", "micro-batch", function (x) { return String(x); });
+    const hSl = mkSlider(HIDS,  "h", "hidden",      function (x) { return NN.count(x); });
+    const tSl = mkSlider(TS,    "t", "TP degree",   function (x) { return "t = " + x; });
+
+    const lInp = el("input", { type: "range", min: 1, max: 128, step: 1, value: String(st.L) });
+    const lVal = el("span", { class: "val" });
+    lInp.addEventListener("input", function () { st.L = +lInp.value; repaint(); });
+    const lRow = el("div", { class: "ctl" }, [el("label", {}, "layers"), lInp, lVal]);
+    lRow.sync = function () { lInp.value = String(st.L); lVal.textContent = String(st.L); };
+
+    /* model presets, straight from T.reference_configs */
+    const presetRow = el("div", { class: "segbtns" });
+    const models = (T && T.reference_configs) ? T.reference_configs.models : [];
+    models.forEach(function (m) {
+      const b = el("button", { class: "btn" }, m.name);
+      b.addEventListener("click", function () {
+        st.s = nearestIdx(SEQS, m.seq);
+        st.h = nearestIdx(HIDS, m.d_model);
+        st.L = NN.clamp(m.n_layers, 1, 128);
+        repaint(m.name);
+      });
+      presetRow.appendChild(b);
+    });
+    host.appendChild(presetRow);
+    host.appendChild(el("div", { class: "ctlrow" }, [sSl, bSl, hSl, lRow, tSl]));
+
+    const budgetOut = el("div", {});
+    host.appendChild(budgetOut);
+
+    const gpus = (T && T.reference_configs) ? T.reference_configs.gpus : [];
+    const dev = gpus.find(function (g) { return g.name === T.reference_configs.default_gpu; }) || gpus[0];
+
+    function repaint(presetName) {
+      [sSl, bSl, hSl, lRow, tSl].forEach(function (r) { r.sync(); });
+      const s = SEQS[st.s], b = BATCH[st.b], h = HIDS[st.h], L = st.L, t = TS[st.t];
+      const bytesTP = s * b * h * L * tpOnlyB(t);
+      const bytesSP = s * b * h * L * tpSpB(t);
+      const saved = bytesTP - bytesSP;
+      const elemsSP = bytesSP / T.memory.dtype_bytes.bf16;
+
+      budgetOut.innerHTML = "";
+      budgetOut.appendChild(NN.tiles([
+        { k: "TP only, per GPU", v: NN.bytes(bytesTP),
+          s: fmt(tpOnlyB(t), 3) + " B/token/layer × " + NN.count(s * b) + " tokens × " + L + " layers" },
+        { k: "TP + SP, per GPU", v: NN.bytes(bytesSP), cls: "activation",
+          s: fmt(tpSpB(t), 3) + " B/token/layer" },
+        { k: "removed", v: NN.bytes(saved),
+          s: fmt(100 * saved / bytesTP, 1) + "% of the activation bill" },
+        { k: "as bf16 elements", v: NN.count(elemsSP),
+          s: "bytes ÷ dtype_bytes.bf16 = " + T.memory.dtype_bytes.bf16 }
+      ]));
+      if (dev) {
+        const capacity = dev.hbm_bytes;
+        budgetOut.appendChild(NN.chart.bars({
+          items: [
+            { label: "TP only, activations", value: bytesTP / 1e9, color: "var(--accent)",
+              sub: fmt(100 * bytesTP / capacity, 1) + "% of one " + dev.name },
+            { label: "TP + SP, activations", value: bytesSP / 1e9, color: "var(--activation)",
+              sub: fmt(100 * bytesSP / capacity, 1) + "% of one " + dev.name }
+          ],
+          unit: "GB", max: Math.max(bytesTP, capacity) / 1e9,
+          limit: { value: capacity / 1e9, label: dev.name + " HBM" }
+        }));
+        budgetOut.appendChild(el("p", { class: "small muted", html:
+          "Bars are decimal GB (1 GB = 10⁹ B). The device line is " + dev.name + " = " +
+          NN.gibytes(capacity) + " = " + NN.bytes(capacity) + " — the same silicon, two unit " +
+          "systems, which is why the label says which. Weights, gradients and optimizer state " +
+          "are <em>not</em> in these bars; this is activations only, which is the only thing " +
+          "sequence parallelism touches." }));
+      }
+      budgetOut.appendChild(el("p", { class: "small muted", html:
+        (presetName ? "<b>" + presetName + "</b> preset loaded from <code>T.reference_configs</code>. " : "") +
+        "Both figures are already per GPU: the /t is inside the coefficient. The coefficients " +
+        "are bytes for a mixed-precision block — most terms are " + T.memory.dtype_bytes.bf16 +
+        "-byte bf16, the dropout masks are 1 byte — so they are not a single dtype you can " +
+        "rescale, and this page does not try to. Sequence length enters linearly here because " +
+        "the seq² attention term is assumed handled; page " +
+        "<a href='10-flash-attention.html'>10</a> is why that assumption is allowed." }));
+    }
+    repaint();
+
+    host.appendChild(NN.callout("mem", "What this looks like on a real run",
+      "The toy on this page saves " + S.memory.saved + " elements per rank. A " +
+      (models.length ? models[models.length - 1].name : "frontier") + "-class block at " +
+      "t = " + at(8).tp + " saves " + fmt(at(8).saving_pct, 1) + "% of its activation memory, " +
+      "and activation memory is the term that scales with batch and sequence — the term you hit " +
+      "when you try to raise throughput. The alternative for that memory is activation " +
+      "recomputation, which buys it back with roughly a third more FLOPs in the backward pass. " +
+      "Sequence parallelism buys the same memory with zero extra bytes on the wire and zero " +
+      "extra FLOPs. That is the comparison that matters, and it is why the Korthikanti paper is " +
+      "titled after <em>reducing</em> recomputation rather than after sharding."));
+  })();
+
+  /* ==================================================================== */
+  /*  7 · WHAT IT IS NOT                                                  */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#isnotBody");
+
+    host.appendChild(el("p", { html:
+      "Three confusions are worth heading off, because two of them share the word “sequence”." }));
+
+    const box1 = el("div", { class: "notbox" });
+    box1.appendChild(el("h4", {}, [
+      document.createTextNode("It is not context (ring) parallelism"),
+      el("span", { class: "tag" }, "not simulated here")
+    ]));
+    box1.appendChild(el("div", { class: "small", html:
+      "Context parallelism — ring attention — also shards the sequence, but it shards it " +
+      "<em>through the attention itself</em>. That is a different problem, because attention is " +
+      "the one place in the block where tokens genuinely interact: query <i>i</i> needs key and " +
+      "value <i>j</i> for every <i>j</i> it attends to. So a rank holding queries for its own " +
+      "tokens has to obtain everyone else's K and V, which is done by passing K/V blocks around " +
+      "a ring of ranks and accumulating the softmax online, in the same streaming way page " +
+      "<a href='10-flash-attention.html'>10</a> accumulates over tiles. It costs real extra " +
+      "communication that scales with sequence length.<br><br>" +
+      "Sequence parallelism shards the sequence only in the regions where tokens do " +
+      "<em>not</em> interact — " + M.region + " — which is exactly why it is free and why the " +
+      "attention region is left to plain TP. The two compose: context parallelism is the next " +
+      "step up when the sequence is long enough that attention activations dominate. " +
+      "<b>This page does not simulate it.</b> The region in " +
+      "<code>SEQPAR.meta.region</code> stops at the MLP; there is no attention in this " +
+      "simulation, so nothing here is evidence about ring attention either way." }));
+    host.appendChild(box1);
+
+    const box2 = el("div", { class: "notbox" });
+    box2.appendChild(el("h4", {}, "It does not shard weights"));
+    box2.appendChild(el("div", { class: "small", html:
+      "Not one parameter moves. <code>W_in</code> and <code>W_out</code> are split exactly as " +
+      "page <a href='15-tensor-parallel.html'>15</a> splits them, by tensor parallelism, and the " +
+      "LayerNorm gain and bias stay replicated on every rank — they are per-channel, every rank " +
+      "needs every channel, and there are only " + (2 * DM) + " of them per LayerNorm in this " +
+      "model. Sequence parallelism is an <em>activation</em> optimisation and nothing else. If " +
+      "your problem is that the weights do not fit, this page is not the answer; page " +
+      "<a href='14-zero-fsdp.html'>14</a> and page <a href='15-tensor-parallel.html'>15</a> are." }));
+    host.appendChild(box2);
+
+    const box3 = el("div", { class: "notbox" });
+    box3.appendChild(el("h4", {}, "It is not an alternative to TP — it only exists inside one"));
+    box3.appendChild(el("div", { class: "small", html:
+      "Sequence parallelism has no collectives of its own. Its all-gather and reduce-scatter are " +
+      "the two halves of the all-reduce that tensor parallelism was already running, over the " +
+      "same TP group, on the same ring. With t = 1 there is no TP group, no all-reduce to split, " +
+      "and nothing to shard — which is precisely why the two curves in section 6 meet at t = 1. " +
+      "You do not choose between TP and SP. You choose TP, and then you choose whether to leave " +
+      COEF.A + " bytes per token per layer replicated on every rank of it." }));
+    host.appendChild(box3);
+  })();
+
+  /* ==================================================================== */
+  /*  8 · WHERE IT SITS                                                   */
+  /* ==================================================================== */
+  (function () {
+    const host = NN.$("#stackBody");
+
+    host.appendChild(NN.callout("key", "SP lives inside the TP group",
+      "Every collective on this page runs over the tensor-parallel group and nothing else — " +
+      "typically the " + TP + "-to-8 GPUs inside one node, on the fast link, because that is " +
+      "where TP already lives. So sequence parallelism inherits TP's placement rules exactly, " +
+      "and it changes nothing about the other two dimensions.<br><br>" +
+      "<b>Pipeline parallelism</b> (page <a href='17-pipeline-parallel.html'>17</a>) cuts the " +
+      "layer stack across the slower links. Its stage boundary sends one activation tensor per " +
+      "micro-batch, and with SP on that tensor is a sequence shard rather than a full copy — the " +
+      "same shrink, applied to the pipeline's own point-to-point traffic. Its bubble arithmetic " +
+      "is untouched.<br><br>" +
+      "<b>Data parallelism</b> replicates the whole TP×PP unit and all-reduces gradients. " +
+      "Activations are per-replica, so the saving multiplies: every data-parallel replica saves " +
+      "the same " + fmt(S.at_scale.table.find(function (r) { return r.tp === 8; }).saving_pct, 1) +
+      "% at t = 8.<br><br>" +
+      "Page <a href='19-3d-parallelism.html'>19</a> composes the three onto real hardware. Read " +
+      "sequence parallelism as a property of the TP axis in that picture, not as a fourth axis: " +
+      "it does not add a dimension to the mesh, it makes one dimension stop wasting memory."));
+
+    host.appendChild(el("p", { class: "small muted", html:
+      "The unfinished sentence on page <a href='18-transformer-partitioned.html#tp'>18</a> — " +
+      "“LayerNorm cannot be sharded, that is what sequence parallelism fixes” — closes like " +
+      "this: it cannot be sharded <em>along the hidden dimension</em>, because a mean is a " +
+      "reduction over exactly that axis. It shards perfectly along the sequence, because a " +
+      "LayerNorm never looks at another token. The cost of moving between the two regimes was " +
+      "already being paid, in full, by the all-reduce tensor parallelism needed anyway." }));
+
+    host.appendChild(el("p", { class: "small muted", html:
+      "Everything on this page comes from <code>code/sequence_parallel.py</code> via " +
+      "<code>assets/data/seqpar.js</code>, with ring costs from " +
+      "<code>assets/data/parallel.js</code>, the LayerNorm cross-check from " +
+      "<code>assets/data/tf2.js</code>, and model and device specifications from " +
+      "<code>NN.T.reference_configs</code>." }));
+
+    host.appendChild(NN.legend(["activation"]));
+  })();
+
+  NN.page("seqpar");
+})();
+</script>
+</body>
+</html>

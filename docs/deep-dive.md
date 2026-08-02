@@ -1,28 +1,39 @@
-# Deep dive: a 13-parameter network, derived by hand
+# Deep dive: a 13-parameter network, a 288-parameter transformer, and 64 GPUs
 
 This is the written companion to the interactive site. The site animates; this
-document derives. Everything here is checked against two generated data files:
-`assets/data/trace.json`, written by `code/ground_truth.py`, which covers
-sections 1-8; and `assets/data/parallel.json`, written by
-`code/parallel_toy.py`, which covers sections 9-14. Both are pure
-standard-library Python — no numpy, no autograd, no NCCL, every derivative
-written out longhand and every distributed strategy simulated rank by rank. If
-a number appears below, it is either a literal field in one of those files or
-is stated to be arithmetic performed on their fields.
+document derives. Everything here is checked against five generated data
+files:
 
-Where the site shows something interactively, the page is named:
-`site/01-memory.html`, `site/02-forward.html`, `site/03-loss.html`,
-`site/04-backward.html`, `site/05-optimizer.html`, `site/06-loop.html`,
-`site/07-transformer-forward.html`, `site/08-transformer-backward.html`,
-`site/09-transformer-cost.html`, `site/11-scaling.html`,
-`site/12-collectives.html`, `site/13-data-parallel.html`,
-`site/14-zero-fsdp.html`, `site/15-tensor-parallel.html`,
-`site/17-pipeline-parallel.html`, `site/18-transformer-partitioned.html`,
-`site/19-3d-parallelism.html`. The two-layer transformer of pages 07, 08 and
-16 has no section here yet; this document derives the 13-parameter MLP and
-the four-rank distributed toy only.
+| Data file | Generator | Covers | Object |
+|---|---|---|---|
+| `assets/data/trace.json` | `code/ground_truth.py` | sections 1-8 | the 13-parameter MLP, `2 → 3 (ReLU) → 1` |
+| `assets/data/tf2.json` | `code/transformer_2layer.py` | sections 9-10 | a 288-parameter, 2-block pre-LN transformer |
+| `assets/data/flash.json` | `code/flash_attention.py` | section 11 | standard vs tiled attention at `seq = 8` |
+| `assets/data/parallel.json` | `code/parallel_toy.py` | sections 12-18 | a 193-parameter MLP on four simulated ranks |
+| `assets/data/seqpar.json` | `code/sequence_parallel.py` | section 16 | one block under TP and TP+SP at `t = 2` |
 
-A note on precision. The trace stores IEEE-754 doubles as Python computed
+All five are pure standard-library Python — no numpy, no autograd, no torch,
+no NCCL — with every derivative written out longhand, every attention tile
+accumulated by hand, and every distributed strategy simulated rank by rank.
+Every one of them raises `SystemExit` if its own numerical check fails, so a
+data file that exists is one whose arithmetic has been verified. If a number
+appears below, it is either a literal field in one of those files or is
+stated to be arithmetic performed on their fields; anything quoted from the
+literature is marked as such where it appears.
+
+The document follows the site's three parts.
+
+| Part | Sections | Pages |
+|---|---|---|
+| I — the mechanics, on the 13-parameter MLP | 1-8 | `site/01-memory.html`, `site/02-forward.html`, `site/03-loss.html`, `site/04-backward.html`, `site/05-optimizer.html`, `site/06-loop.html` |
+| II — a real transformer | 9-11 | `site/07-transformer-forward.html`, `site/08-transformer-backward.html`, `site/09-transformer-cost.html`, `site/10-flash-attention.html`, `site/11-scaling.html` |
+| III — many GPUs | 12-19 | `site/12-collectives.html`, `site/13-data-parallel.html`, `site/14-zero-fsdp.html`, `site/15-tensor-parallel.html`, `site/16-sequence-parallel.html`, `site/17-pipeline-parallel.html`, `site/18-transformer-partitioned.html`, `site/19-3d-parallelism.html` |
+
+That page list is `NN.PAGES` in `assets/js/ui.js`, which is authoritative for
+chapter numbering. The chapters have been renumbered twice as pages were
+inserted; if you find a stale reference anywhere, `NN.PAGES` wins.
+
+A note on precision. The traces store IEEE-754 doubles as Python computed
 them, so `z1[0]` appears as `0.4999999999999999` and `dL/dz1[2]` as `-0.0`.
 Not typos, not errors in the math — that is what binary floating point does to
 decimal literals, and section 7 is about exactly this. Below I write the exact
@@ -785,7 +796,9 @@ weights. This is the arithmetic that made FlashAttention and gradient
 checkpointing mandatory rather than optional. FlashAttention removes the
 `5*a*s/h` term entirely by never materialising the `s x s` attention matrix
 (it recomputes tiles of it in the backward pass from the saved
-softmax statistics), taking the estimate from 521 GB to about 91 GB.
+softmax statistics), taking the estimate from 521 GB to about 91 GB. Section 9.13
+shows that term as a row of a real activation census, and **section 11 derives
+the removal and proves it exact** rather than asserting it here.
 
 ### 4.3 Gradient checkpointing and the sqrt(n) result
 
@@ -1448,9 +1461,1344 @@ optimizer-state memory. That is a common and expensive misunderstanding.
 
 ---
 
-## 9. The communication primitives
+## 9. A transformer, forward
 
-Sections 9 through 14 are the distributed half of this document. Their ground
+Sections 9, 10 and 11 are the middle part of this document, and they change
+the object under study. The 2-3-1 network of sections 1-8 is honest about the
+chain rule and useless for everything else: it has no normalisation, no
+attention, no residual, no sequence axis, and therefore nothing that a
+distributed strategy could sensibly cut. Sections 12 onward need something to
+shard, and section 4.2's activation arithmetic needs something to be an
+activation *of*.
+
+So there is a second model, generated by `code/transformer_2layer.py` into
+`assets/data/tf2.json` (referred to below as `TF2`). It is deliberately
+tiny and structurally complete: multi-head attention with a causal mask,
+pre-LN placement, a GELU MLP, two stacked blocks so the residual stream has
+somewhere to go, and every gradient in it derived by hand and checked against
+central finite differences. `site/07-transformer-forward.html` animates this
+section; `site/08-transformer-backward.html` animates section 10.
+
+### 9.1 Shapes, and the row-vector convention
+
+`TF2.meta`:
+
+```
+d_model  4          the residual stream width
+n_heads  2
+d_head   2          = d_model / n_heads
+seq      3          tokens: "the", "cat", "sat"
+d_ff     8          2x expansion (real models use 4x, or 3.5x for SwiGLU)
+n_layers 2
+eps      1e-5
+n_params 288
+architecture  "pre-LN, causal, GELU MLP, 2 stacked blocks"
+```
+
+Everything is written in the **row-vector convention**, which
+`TF2.meta.convention` states explicitly:
+
+```
+X is (seq, d_in)      one ROW per token
+W is (d_in, d_out)    one COLUMN per output feature
+Y = X W               (seq, d_in) @ (d_in, d_out) -> (seq, d_out)
+```
+
+This is not a stylistic choice and it is worth being pedantic about, because
+it is the one place where the literature and the framework disagree on what a
+word means.
+
+- **Megatron-LM uses this convention.** So when Megatron says a layer is
+  *column-parallel*, it really is splitting `W`'s columns — that is, splitting
+  the *output* features — and each rank holds `(d_in, d_out/N)`. *Row-parallel*
+  really splits `W`'s rows, i.e. the *input* features, and each rank holds
+  `(d_in/N, d_out)`. Sections 15.1 and 15.2 derive those two cases as block
+  matrix algebra; the naming only lines up with the algebra under this
+  convention.
+- **`torch.nn.Linear` stores the transpose.** Its `weight` attribute has shape
+  `(out_features, in_features)` and it computes `x @ weight.T`. A
+  "column-parallel" layer in Megatron's sense is therefore implemented by
+  splitting `nn.Linear.weight` along **dimension 0**, which reads like a row
+  split if you are looking at the tensor rather than at the mathematics. Every
+  hand-rolled tensor-parallel implementation gets this backwards once.
+  `site/15-tensor-parallel.html` covers the trap; `site/18-transformer-partitioned.html`
+  shows the resulting slices per rank for every matrix in this model.
+
+`transformer_2layer.py` sidesteps the ambiguity by never using a framework:
+`mm(A, B)` is three nested loops, and `W` is indexed `[in][out]` throughout.
+
+The parameters of one block, from `TF2.params` (shapes are literal; the
+element counts are their products):
+
+| Tensor | Shape | Elements |
+|---|---|---|
+| `ln1.g`, `ln1.b` | `(4,)` each | 8 |
+| `Wq`, `Wk`, `Wv`, `Wo` | `(4, 4)` each | 64 |
+| `ln2.g`, `ln2.b` | `(4,)` each | 8 |
+| `W1` (up-projection) | `(4, 8)` | 32 |
+| `W2` (down-projection) | `(8, 4)` | 32 |
+| **per block** | | **144** |
+| **× 2 blocks** | | **288** |
+
+`TF2.meta.n_params` is 288, and `TF2.flat_sharding.total_elements` is 288
+independently, since it is computed by walking the parameter list and
+accumulating offsets.
+
+**Three simplifications, stated so you know what is missing.** There is no
+token embedding and no LM head — the model reads a `(3, 4)` input tensor
+directly and regresses onto a `(3, 4)` target with mean squared error, which
+removes the vocabulary axis (the single largest tensor in a real model, and
+the subject of 17.4's load-imbalance discussion) but changes nothing about
+the block. There are no biases on the four projection matrices or on the two
+MLP matrices, matching Llama-family practice. And there is no dropout, which
+means one of the three tensors sequence parallelism is designed to shard
+(section 16) is absent here.
+
+### 9.2 The residual stream, and pre-LN placement
+
+The forward function is four lines:
+
+```
+h = x_in
+for each block:
+    h = h + Attn( LN1(h) )
+    h = h + MLP(  LN2(h) )
+out = h
+```
+
+Read `h` as an object rather than a variable. It is the **residual stream**: a
+`(seq, d_model)` tensor that every block *reads from* and *writes into*, and
+which is never replaced, only added to. A block does not transform the stream;
+it computes a correction and adds it. Two consequences follow immediately and
+both of them matter more than the attention mechanism does:
+
+1. **Every block sees the sum of every previous block's output.** There is a
+   direct additive path from the input to the output, so information does not
+   have to survive `n_layers` successive matrix multiplications to reach the
+   end.
+2. **The backward pass has a path with derivative exactly 1.** `∂(h₁ + D)/∂h₁`
+   is the identity — not approximately, not a well-conditioned matrix, the
+   identity, for every input and at every point in training. Section 10.5
+   measures what that is worth.
+
+**Pre-LN means the normalisation is inside the branch, not on the stream.**
+Compare:
+
+```
+post-LN (Vaswani et al. 2017):   h = LN( h + Attn(h) )
+pre-LN  (used here, and by every model since ~2020):
+                                 h = h + Attn( LN(h) )
+```
+
+Under post-LN the stream itself passes through a LayerNorm at every sub-layer,
+so the "identity path" is not an identity at all — it is an identity followed
+by a normalisation whose Jacobian (section 10.1) is emphatically not `I`. Under
+pre-LN the stream is untouched between the input and the output; only the
+*inputs to the branches* are normalised. That is why pre-LN models train
+without a learning-rate warm-up schedule tuned to keep the early layers alive,
+and why every large model uses it. It is literature that post-LN needs warm-up
+and pre-LN does not (Xiong et al., 2020); the *structural* reason is derived
+in 10.5.
+
+Shapes through one block, with `s = seq = 3`, `h = d_model = 4`,
+`a = n_heads = 2`, `d = d_head = 2`, `f = d_ff = 8`:
+
+```
+h        (3, 4)      the stream arriving
+n1 = LN1(h)          (3, 4)
+Q  = n1 Wq           (3, 4)      then viewed as 2 heads of (3, 2)
+K  = n1 Wk           (3, 4)
+V  = n1 Wv           (3, 4)
+S_head = Qh Khᵀ · scale          (3, 3)  per head   <- THE QUADRATIC ONE
+P_head = softmax(S_head + mask)  (3, 3)  per head
+O_head = P_head Vh               (3, 2)  per head
+O  = concat(O_0, O_1)            (3, 4)
+A  = O Wo                        (3, 4)
+h1 = h + A                       (3, 4)      residual add #1
+n2 = LN2(h1)                     (3, 4)
+U  = n2 W1                       (3, 8)
+G  = gelu(U)                     (3, 8)
+D  = G W2                        (3, 4)
+h2 = h1 + D                      (3, 4)      residual add #2
+```
+
+Every tensor on that list is `(seq, ·)` except the attention matrices, which
+are `(seq, seq)` per head. That single exception is the whole of section 11.
+
+### 9.3 LayerNorm forward — per token, across channels
+
+`layernorm_fwd` normalises **each row independently**. The reduction is over
+the `d_model` axis, never over the sequence axis. That fact is load-bearing
+three times: it is why LayerNorm cannot be tensor-parallel (15.6), why it
+*can* be sequence-parallel (section 16), and why its backward pass is not
+elementwise (10.1).
+
+```
+mu    = (1/n) Σ_k x_k
+var   = (1/n) Σ_k (x_k − mu)²          biased variance, matching PyTorch
+sigma = sqrt(var + eps)
+xhat  = (x − mu) / sigma
+y     = g ⊙ xhat + b
+```
+
+Worked on token 0 of block 0's LN1. The stream arriving is the model input,
+`TF2.input.x[0] = [0.125, 0.5, 0.875, 0.375]`:
+
+```
+mu    = (0.125 + 0.5 + 0.875 + 0.375)/4 = 1.875/4 = 0.46875
+dev   = [−0.34375, 0.03125, 0.40625, −0.09375]
+var   = (0.1181640625 + 0.0009765625 + 0.1650390625 + 0.0087890625)/4
+      = 0.29296875/4 = 0.0732421875
+1/σ   = 1/sqrt(0.0732421875 + 1e-5) = 3.6947895004592697
+xhat  = [−1.270083890782874, 0.11546217188935218,
+          1.5010082345615783, −0.34638651566805656]
+y[0]  = g[0]·xhat[0] + b[0] = 0.8·(−1.270083890782874) + 0.0333
+      = −0.9827671126262992
+```
+
+Every one of those is a literal field in
+`TF2.forward.layers[0].ln1.rows[0]` (`mu`, `var`, `inv_std`, `xhat`, `y`),
+with `g = TF2.params["L0.ln1.g"] = [0.8, 1.2333, 1.0333, 0.8333]` and
+`b = [0.0333, −0.1667, 0.2667, 0.0667]`.
+
+Two properties of `xhat` that section 10.1 will use as its proof obligations:
+`Σ_j xhat_j = 0` exactly, and `Σ_j xhat_j² = n·var/(var + eps)`, which for
+this row is `3.9994539412218924` rather than `4` — the `eps` shows up here
+and nowhere else, and it is the reason one of the two backward invariants
+below is exact and the other is only nearly so.
+
+`g` and `b` are shared across all tokens. Their gradients therefore
+*accumulate over the sequence*, which is the first place in this document
+where a gradient is a sum over an axis rather than a single outer product.
+
+### 9.4 Q, K, V — one input, three consumers
+
+```
+Q = n1 Wq        (3,4) @ (4,4) -> (3,4)
+K = n1 Wk
+V = n1 Wv
+```
+
+Three separate `(4, 4)` matrices reading the *same* `(3, 4)` tensor. Real
+implementations fuse them into one `(d_model, 3·d_model)` matrix and split the
+result, which is a pure performance decision — one larger matmul instead of
+three — and is also why Megatron's column-parallel split of the fused QKV
+matrix has to be head-interleaved rather than a flat three-way cut.
+
+First element, longhand, with `n1[0]` from 9.3 and
+`Wq = TF2.params["L0.Wq"]`:
+
+```
+Q[0][0] = n1[0][0]·Wq[0][0] + n1[0][1]·Wq[1][0]
+        + n1[0][2]·Wq[2][0] + n1[0][3]·Wq[3][0]
+        = (−0.9827671)(0.1667) + (−0.0243005)(−0.2333)
+        + ( 1.8176918)(0.0)    + (−0.2219439)(0.2333)
+        = −0.16382 + 0.00567 + 0 − 0.05178
+        = −0.20993747825151107
+```
+
+matching `TF2.forward.layers[0].qkv.Q[0][0]`.
+
+The fan-out matters for backward: because all three read `n1`, three separate
+input-gradients arrive at `n1` and must be **added** (10.4). One saved tensor,
+three consumers.
+
+### 9.5 The head split
+
+`Q`, `K` and `V` are `(3, 4)`. The head split is a *view of the columns*, not
+a reshape of any weight:
+
+```
+head 0  ->  columns [0, 2)
+head 1  ->  columns [2, 4)
+```
+
+`TF2.forward.layers[0].heads[h].cols` is `[0, 2]` and `[2, 4]`. Nothing is
+copied and nothing is communicated; each head then runs a complete, independent
+attention over its own `(3, 2)` slices. That independence is exactly why
+tensor parallelism splits attention *by head* (15.6): a head-aligned column
+split leaves every head whole on one rank, so the softmax — the one operation
+in the block that would need a collective if it were split — never crosses a
+rank boundary.
+
+### 9.6 Scores, and why the 1/√d_head scale exists
+
+```
+raw    = Qh Khᵀ                (3, 2) @ (2, 3) -> (3, 3)
+scaled = raw · (1/sqrt(d_head))
+```
+
+`TF2.forward.layers[0].scale = 0.7071067811865475`, which is `1/sqrt(2)`.
+Element `[0][0]` of block 0, head 0:
+
+```
+raw[0][0]    = Qh[0]·Kh[0]
+             = (−0.20993747825151107)(−0.38235021992063534)
+             + (−0.34306304890656864)( 0.6512397099096275)
+             = 0.0802705 − 0.2234172 = −0.14314663947157724
+scaled[0][0] = −0.14314663947157724 × 0.7071067811865475
+             = −0.10121995947441817
+```
+
+**Why the scale is there.** Take `q` and `k` to be `d`-dimensional with
+independent, zero-mean, unit-variance entries. Then
+
+```
+E[ q·k ]   = Σ_i E[q_i] E[k_i] = 0
+Var[ q·k ] = Σ_i Var[q_i k_i]  = d          (independence)
+sd[ q·k ]  = sqrt(d)
+```
+
+So the raw logits have standard deviation `sqrt(d_head)` and their spread
+*grows with the head dimension*. At `d_head = 128`, typical logit gaps are
+around 11x larger than at `d_head = 1`. Softmax turns a gap of `Δ` into a
+probability ratio of `e^Δ`, so as `d` grows the distribution collapses onto
+its argmax.
+
+That is not merely "peaky output"; it kills the gradient. Section 10.2 derives
+the softmax Jacobian `∂p_i/∂s_j = p_i(δ_ij − p_j)`. As `p` approaches a
+one-hot vector, every entry of that Jacobian approaches zero — `p_i(1−p_i) → 0`
+on the diagonal and `−p_i p_j → 0` off it. A saturated softmax has *no*
+gradient with respect to its scores, so `Wq` and `Wk` stop receiving updates
+entirely.
+
+Dividing by `sqrt(d_head)` restores unit variance to the logits regardless of
+head dimension, which keeps the softmax in the region where its Jacobian is
+non-degenerate. It is a variance-stabilisation term, not a normalisation of
+the output.
+
+This model shows the failure mode already, for a different reason: under the
+causal mask, query 0 attends only to key 0, so its softmax is a point mass and
+its Jacobian is identically zero. `TF2.backward_steps[*].heads[*].dS[0]` is
+`[0.0, −0.0, 0.0]` in every head of every layer. A saturated row is a dead
+row, exactly as a negative pre-activation was a dead ReLU unit in section 2.2.
+
+### 9.7 Causal masking
+
+```
+mask[i][j] = 0     if j <= i
+           = −inf  if j >  i
+masked = scaled + mask
+```
+
+The mask is *added before* the softmax rather than applied after it, and the
+additive identity is `−inf` rather than a large negative number, so
+`exp(−inf − m) = 0` exactly. A masked position therefore receives probability
+that is bit-zero, not merely small. Block 0, head 0
+(`TF2.forward.layers[0].heads[0].masked`, where `null` denotes `−inf`):
+
+```
+row 0:  [−0.10121995947441817,  null,                 null                ]
+row 1:  [−0.274457474803549,   −0.12104634825232742,  null                ]
+row 2:  [ 0.31217975154844185,  0.14953301596619709, −0.18915355004976572 ]
+```
+
+Exact zeros matter for the backward pass: masked entries have `p = 0`, and the
+Jacobian factor `p_i(δ − p_j)` is then identically zero, so no gradient flows
+to a masked score without anyone having to write code to prevent it (the
+generator's comment says exactly this). If the mask were `−1e9` instead of
+`−inf`, `p` would be about `1e-435`, which underflows to zero in fp64 anyway —
+but at bf16, `exp(−1e9)` and its neighbours are all zero while the *scores*
+themselves have already overflowed, which is one of the several ways an fp16
+attention implementation produces `nan`.
+
+### 9.8 Softmax
+
+```
+p_i = exp(s_i − max_k s_k) / Σ_j exp(s_j − max_k s_k)
+```
+
+The max subtraction is algebraically a no-op — multiply numerator and
+denominator by `e^{−m}` — and numerically essential, since `exp` overflows
+above about 709 in fp64 and above about 88 in fp32. Hold onto this: section 11
+is what happens when you want that max but refuse to look at the whole row at
+once.
+
+Block 0, head 0:
+
+```
+row 0:  [1.0, 0.0, 0.0]
+row 1:  [0.4617222610634308, 0.5382777389365693, 0.0]
+row 2:  [0.40723014611807345, 0.3461013875103963, 0.24666846637153012]
+```
+
+Checking row 1 by hand: the two finite scores differ by
+`−0.274457474803549 − (−0.12104634825232742) = −0.15341112655122158`, and
+`e^{−0.15341...} = 0.857678...`, so `p_0 = 0.857678/1.857678 = 0.461722` ✓.
+`TF2.forward.layers[0].heads[0].row_sums` is `[1.0, 1.0, 1.0]` — the generator
+records it because "the rows sum to one" is the property everything in 10.2
+hangs on.
+
+### 9.9 O = P·V is a convex combination of value rows
+
+```
+O_head = P_head Vh          (3, 3) @ (3, 2) -> (3, 2)
+O_head[i] = Σ_j P[i][j] · Vh[j]
+```
+
+`P[i]` is non-negative and sums to 1, so **`O[i]` is a convex combination of
+the value rows** — a weighted average of `V`, with weights chosen by the
+scores. That is the whole semantic content of attention: not "a matmul", but
+"each token's output is an average of the other tokens' values, and the
+weights are learned per pair".
+
+Row 2, head 0, longhand:
+
+```
+O[2][0] = 0.40723014611807345 × (−0.010512385903927298)
+        + 0.3461013875103963  × ( 0.794401042024352)
+        + 0.24666846637153012 × (−0.5938584436279045)
+        = −0.004281 + 0.274943 − 0.146487
+        = 0.12417619090514802
+```
+
+matching `TF2.forward.layers[0].heads[0].O[2][0]`. Because the weights sum to
+one, `O[i]` cannot leave the convex hull of the value rows — attention is
+strictly interpolative, and the only thing that lets a transformer produce
+values outside that hull is `Wo` and the MLP that follow it.
+
+### 9.10 Concat, output projection, and the first residual add
+
+The heads are concatenated back along the column axis, which is the exact
+inverse of the split in 9.5:
+
+```
+O = [ O_head0 | O_head1 ]       (3, 2) ++ (3, 2) -> (3, 4)
+```
+
+`TF2.forward.layers[0].concat[0]` is
+`[−0.010512385903927298, −0.284195017983456, −0.4019310798296812, 0.009090668393469167]`,
+which is head 0's `O[0]` followed by head 1's `O[0]` — literally a
+concatenation, no arithmetic. Then
+
+```
+A  = O Wo          (3,4) @ (4,4) -> (3,4)
+h1 = h + A
+```
+
+with `A[0] = [0.0013055608939119498, −0.11576802200548904, 0.02084116735985688, −0.02165839396614506]`
+and
+
+```
+h1[0][0] = 0.125 + 0.0013055608939119498 = 0.12630556089391196
+```
+
+matching `TF2.forward.layers[0].resid1[0][0]`. Note the magnitudes: the
+attention branch contributes about 1% of the stream's value at this element.
+The stream dominates its own updates, which is what "the block computes a
+correction" means quantitatively.
+
+`Wo`'s input is the concatenated head output, whose columns are already
+partitioned by head. That is precisely the layout a row-parallel matmul wants
+(15.2), which is why `Wo` is the row-parallel half of the attention sandwich
+and why no reshuffle is needed between them.
+
+### 9.11 LayerNorm 2, the MLP, and the second residual add
+
+```
+n2 = LN2(h1)
+U  = n2 W1        (3,4) @ (4,8) -> (3,8)      up-projection
+G  = gelu(U)      elementwise
+D  = G W2         (3,8) @ (8,4) -> (3,4)      down-projection
+h2 = h1 + D
+```
+
+`LN2` is a second, independent LayerNorm with its own `g` and `b`, and its own
+statistics: `TF2.forward.layers[0].ln2.rows[*].mu` is
+`[0.4399300780705337, 0.43916252366568986, 0.6206532885940523]` — different
+from LN1's `[0.46875, 0.4375, 0.625]`, because it is normalising the *post-attention*
+stream, not the input.
+
+The nonlinearity is the tanh approximation to GELU, which is what real
+transformers use:
+
+```
+gelu(x) = 0.5·x·(1 + tanh( sqrt(2/π)·(x + 0.044715·x³) ))
+```
+
+At `U[0][0] = 0.8098174415018771`:
+
+```
+x³            = 0.531077
+x + 0.044715x³= 0.833564
+× sqrt(2/π)   = 0.665086
+tanh(·)       = 0.581904
+0.5 × 0.8098174415018771 × 1.581904 = 0.640460235698186
+```
+
+matching `TF2.forward.layers[0].mlp.G[0][0]`. Unlike ReLU, GELU's derivative
+is a smooth real number rather than a 0/1 mask, which costs real memory in
+backward — 10.4.
+
+Finally `h2 = h1 + D`:
+
+```
+h2[0][0] = 0.12630556089391196 + 0.41456107901003214 = 0.5408666399039441
+```
+
+`TF2.forward.layers[0].resid2[0][0]` ✓. Block 1 repeats all of it with its own
+parameters, taking the stream to
+`TF2.forward.out[0] = [0.1428562375422946, 0.1996745735651073, 0.5960052732610901, 0.7622010133395878]`.
+
+### 9.12 The loss
+
+```
+L     = (1/(s·h)) Σ_{t,j} ( out[t][j] − target[t][j] )²
+dOut  = (2/(s·h)) ( out − target )
+```
+
+with `s·h = 12`. `TF2.loss = 0.15407555893014357`. The seed gradient, e.g.
+
+```
+dOut[0][0] = (2/12)(0.1428562375422946 − 0.1) = 0.007142706257049098
+```
+
+matching `TF2.dOut[0][0]`. Mean squared error against a fixed target is not
+what a language model trains on — that is a token-level cross-entropy over a
+vocabulary — but every backward step below is downstream of `dOut` and none of
+them cares where it came from. Substituting cross-entropy changes one seed
+vector and adds the vocabulary-sized logit tensor discussed in 17.4.
+
+### 9.13 What forward left in memory
+
+`TF2.activations` is the census, and it is the direct transformer analogue of
+section 2.5's three-line list. Per block:
+
+| Tensor | Elements | Why backward needs it |
+|---|---|---|
+| LN1 `xhat` (+ `1/σ`) | 12 | LayerNorm backward (10.1) |
+| `Q`, `K`, `V` | 36 | `dQ` needs `K`; `dK` needs `Q` (10.3) |
+| attention probs `P` | 18 | `dV = Pᵀ dO` — **`heads × seq²`** |
+| concat `O` | 12 | `dWo = Oᵀ dA` |
+| LN2 `xhat` (+ `1/σ`) | 12 | LayerNorm backward |
+| MLP pre-activation `U` | 24 | GELU backward needs the pre-activation |
+| MLP activation `G` | 24 | `dW2 = Gᵀ dD` |
+| **per block** | **138** | |
+| **× 2 blocks** | **276** | |
+
+276 saved activation elements against 288 parameters, at `seq = 3` and batch
+1. As in section 4.2, that ratio is an artifact of the toy — but the *shape* of
+the table is not. Six of the seven rows are linear in `seq`. One is quadratic:
+`P` is `heads × seq × seq`, and here it is 18 of 138, about 13%.
+
+Scale the sequence and watch the table deform. Multiply `seq` by 1000 and six
+rows grow by 1000 while `P` grows by 1,000,000. That single row is the
+`5·a·s/h` term in Korthikanti's per-layer formula (section 4.2), it is the
+reason a 70B model's activation bill was 521 GB per microbatch there, and it
+is the entire subject of section 11.
+
+---
+
+## 10. The transformer backward, derived
+
+Section 3 derived MLP backprop step by step from the chain rule. This section
+does the same for a transformer, and concentrates on the three places where
+the answer is not what a first attempt produces: LayerNorm, whose backward is
+not `g/σ`; softmax, whose Jacobian is not diagonal; and the residual, whose
+backward is so simple that its importance is easy to miss.
+
+`TF2.backward_steps` records 14 steps — seven per block, blocks visited in
+reverse — in this order:
+
+```
+resid2   the second residual add splits the stream gradient
+mlp      through W2, GELU, W1
+ln2      LayerNorm 2, and the skip copy merges back in
+wo       the output projection
+attn     P·V, the softmax Jacobian, and QKᵀ
+qkv      the three projections, whose input-gradients add
+ln1      LayerNorm 1, and the second skip copy merges back in
+```
+
+Everything in section 3 still applies unchanged — the shape rule (3.0), the
+fact that every `backward` is a vector-Jacobian product and never a Jacobian,
+and the outer-product structure `dW = deltaᵀ · input` of a linear layer. What
+follows is the part that is new.
+
+### 10.1 LayerNorm backward, derived properly
+
+**The wrong answer first, because it is the one everybody writes.** The
+forward pass looks elementwise:
+
+```
+y_j = g_j · xhat_j + b_j,      xhat_j = (x_j − mu)/sigma
+```
+
+so the obvious guess is
+
+```
+dL/dx_j  =  dL/dy_j · g_j / sigma          <- WRONG
+```
+
+It is wrong because `mu` and `sigma` are **not constants**. Both are functions
+of *every* element of the row. Perturbing `x_j` moves the mean, which moves
+the numerator of every other channel's `xhat`; and it moves the variance,
+which moves the denominator of every other channel's `xhat`. A LayerNorm is
+an all-to-all coupling within a token that happens to be written with
+elementwise-looking notation.
+
+**The derivation.** Write `dxhat_j = dL/dy_j · g_j`, the gradient with respect
+to the normalised value — this part genuinely *is* elementwise, because the
+affine `g ⊙ · + b` is. We need `∂xhat_k/∂x_j` for all pairs `(j, k)`.
+
+First the two statistics.
+
+```
+∂mu/∂x_j = 1/n
+```
+
+For the variance, note that `mu` itself depends on `x_j`:
+
+```
+∂var/∂x_j = ∂/∂x_j [ (1/n) Σ_k (x_k − mu)² ]
+          = (2/n) Σ_k (x_k − mu)(δ_jk − 1/n)
+          = (2/n) [ (x_j − mu) − (1/n) Σ_k (x_k − mu) ]
+          = (2/n)  (x_j − mu)
+```
+
+because `Σ_k (x_k − mu) = 0` identically. Then
+
+```
+∂sigma/∂x_j = (1/(2·sigma)) · ∂var/∂x_j = (x_j − mu)/(n·sigma) = xhat_j / n
+```
+
+which is a pleasant result worth pausing on: *the derivative of the standard
+deviation with respect to an element is that element's own normalised value,
+divided by n.*
+
+Now the quotient:
+
+```
+∂xhat_k/∂x_j = (1/sigma)(δ_jk − ∂mu/∂x_j) − (x_k − mu)/sigma² · ∂sigma/∂x_j
+             = (1/sigma)(δ_jk − 1/n)      − (xhat_k/sigma) · (xhat_j/n)
+             = (1/sigma) [ δ_jk − 1/n − xhat_j·xhat_k/n ]
+```
+
+Three terms: the direct one, the mean's correction, and the variance's
+correction. Contract with the incoming gradient:
+
+```
+dL/dx_j = Σ_k dxhat_k · ∂xhat_k/∂x_j
+        = (1/sigma) [ dxhat_j
+                      − (1/n) Σ_k dxhat_k
+                      − xhat_j · (1/n) Σ_k dxhat_k·xhat_k ]
+```
+
+which is exactly what `layernorm_bwd` implements:
+
+```
+dx_j = (1/sigma) [ dxhat_j − mean_k(dxhat_k) − xhat_j · mean_k(dxhat_k·xhat_k) ]
+                             \___ from mu ___/  \______ from sigma _________/
+```
+
+∎ The second term is the mean's contribution: a constant subtracted from every
+channel. The third is the variance's: a multiple of `xhat` itself subtracted
+from every channel. Both vanish only if the incoming gradient happens to be
+zero-mean across the row *and* uncorrelated with `xhat`, which nothing
+arranges.
+
+The parameter gradients are the easy half, and they are sums over tokens
+because `g` and `b` are shared along the sequence:
+
+```
+dg_j = Σ_tokens  dL/dy_j · xhat_j
+db_j = Σ_tokens  dL/dy_j
+```
+
+**Two invariants, and what they mean.** From the formula:
+
+```
+Σ_j dx_j = (1/sigma)[ Σ_j dxhat_j − n·mean(dxhat) − mean(dxhat·xhat)·Σ_j xhat_j ] = 0
+```
+
+exactly, using `Σ_j xhat_j = 0` from 9.3. And
+
+```
+Σ_j dx_j·xhat_j = (1/sigma)[ Σ_j dxhat_j xhat_j − mean(dxhat)·Σ_j xhat_j
+                             − mean(dxhat·xhat)·Σ_j xhat_j² ]
+                = (1/sigma)·mean(dxhat·xhat)·( n − Σ_j xhat_j² )
+```
+
+which is zero when `Σ xhat_j² = n` — true in the `eps → 0` limit, and only
+approximately true otherwise (9.3: this row's `Σ xhat² = 3.9994539`, not 4).
+
+Both invariants are symmetry statements in disguise, and that is the cleanest
+way to see that the naive formula cannot be right. LayerNorm is invariant to
+**shifting** a row by a constant (the mean subtraction removes it) and
+invariant to **scaling** a row (the division by `sigma` removes it, up to
+`eps`). So the loss is exactly flat along those two directions in input space,
+and a correct gradient must be orthogonal to both. `Σ_j dx_j = 0` *is*
+orthogonality to the all-ones direction; `Σ_j dx_j·xhat_j = 0` is
+orthogonality to the scaling direction.
+
+**The numerical evidence.** `layernorm_bwd` records, for every token of every
+LayerNorm, the naive answer beside the correct one:
+`TF2.backward_steps[*].ln_detail[*]` carries `naive_dx` (defined as
+`inv_std · dxhat_j`, the `g/σ` guess) next to `dx`, plus `mean_dxhat`,
+`mean_dxhat_xhat`, `inv_std` and `xhat`. Block 1's LN2, token 0:
+
+```
+dxhat     [  0.00726148, −0.00538075, −0.00196269,  0.00602273 ]
+xhat      [ −0.923240,   −0.940693,    0.419655,    1.444278   ]
+1/sigma   =  4.102944712
+mean(dxhat)        =  0.001485193233
+mean(dxhat·xhat)   =  0.001558095521
+
+naive_dx  [  0.02979347, −0.02207691, −0.00805281,  0.02471092 ]
+dx        [  0.02960187, −0.02215693, −0.01682924,  0.00938430 ]
+```
+
+Channel 2 is off by a factor of more than two. And the summary statistic is
+the invariant:
+
+```
+Σ naive_dx  =  0.0243747          <- should be 0
+Σ dx        =  3.469e-18          <- is 0, to floating point
+```
+
+Across all 12 LayerNorm rows in the model (2 blocks × 2 norms × 3 tokens), the
+worst element-wise disagreement is **0.1328** at block 0's LN2, token 0, and
+the worst spurious row-sum is **0.145**. Against that, the correct rows sum to
+at most `2.69e-17`, and the finite-difference check of 10.6 resolves
+differences down to `1.07e-11`. The naive formula is not subtly wrong by a
+rounding; it is wrong by ten orders of magnitude more than the check can see,
+and it asserts a large directional derivative along a direction in which the
+loss is provably flat. `site/08-transformer-backward.html` re-runs the
+LayerNorm forward in the browser along that direction to confirm the loss does
+not move.
+
+The second invariant is satisfied to `4.38e-05` rather than to `1e-17` — the
+residual is the `eps` term derived above, scaling like `eps/var`, and for
+`var ≈ 0.073` and `eps = 1e-5` that ratio is about `1.4e-4`. Stating it as
+"approximately zero" would be sloppy; it is *exactly* the `eps`.
+
+**The memory consequence.** Look at what the formula reads: `xhat` for every
+token and `1/sigma` for every token. Neither is recoverable from the layer's
+output without re-running the forward pass, so LayerNorm **saves both**. That
+is `seq·d_model + seq = 12 + 3 = 15` numbers per LayerNorm here, and there are
+two LayerNorms per block and two blocks: **60 saved numbers in a model with
+288 parameters.** LayerNorm looks like a cheap elementwise normalisation and
+behaves, in the memory accounting, like an activation checkpoint. (An
+implementation may instead save `x` and `1/sigma` and recompute `xhat`, or
+save `mu` and `1/sigma`; the count is the same to within `seq` elements. It
+cannot save nothing.)
+
+RMSNorm — used by Llama and most models since — drops the mean subtraction
+entirely, normalising by `sqrt(mean(x²) + eps)`. Its backward loses the
+`mean_k(dxhat_k)` term and keeps the other one, which is a genuine saving of
+one reduction in both directions, and it still is not `g/σ`.
+
+### 10.2 The softmax Jacobian is dense
+
+Softmax has the same structural property as LayerNorm for the same reason:
+there is a sum over the whole row in the denominator.
+
+```
+p_i = e^{s_i} / Z,        Z = Σ_k e^{s_k}
+```
+
+One quotient rule:
+
+```
+∂Z/∂s_j     = e^{s_j}
+∂p_i/∂s_j   = ( δ_ij e^{s_i} Z − e^{s_i} e^{s_j} ) / Z²
+            = δ_ij p_i − p_i p_j
+            = p_i ( δ_ij − p_j )
+```
+
+A full `seq × seq` matrix, not a diagonal. It is symmetric — `p_i p_j` is
+symmetric and the `δ` term is diagonal — so you never have to worry about
+which index you contract. The diagonal `p_i(1 − p_i)` is non-negative; the
+off-diagonals `−p_i p_j` are non-positive. The interpretation is
+conservation: raising one score steals probability mass from every other
+position, and the off-diagonal terms are the bookkeeping for that theft.
+
+**Contract it.** With `dp_j = dL/dp_j`:
+
+```
+dL/ds_i = Σ_j dp_j · ∂p_j/∂s_i
+        = Σ_j dp_j · p_j (δ_ji − p_i)
+        = p_i dp_i − p_i Σ_j dp_j p_j
+        = p_i ( dp_i − D ),     D = Σ_j dp_j·p_j
+```
+
+`D` is a **single scalar per row** — the `p`-weighted average of the incoming
+gradient — subtracted from every element before the elementwise multiply by
+`p`. `softmax_bwd_row` returns it alongside the gradient, and it is stored as
+`TF2.backward_steps[*].heads[*].softmax_dots`. For block 1, head 0, the three
+rows have `D = [−0.01580508, −0.01512004, 0.00496328]`.
+
+The whole contraction is therefore `O(seq)` per row, not `O(seq²)`: nobody
+ever builds the Jacobian, exactly as section 3.0 promised for the general
+case.
+
+**Every row of `dS` sums to zero. Proof.**
+
+```
+Σ_i dL/ds_i = Σ_i p_i dp_i − D Σ_i p_i
+            = Σ_i p_i dp_i − D · 1
+            = D − D
+            = 0
+```
+
+∎ using `Σ_i p_i = 1` twice: once to collapse the second term, and once
+because `Σ_i p_i dp_i` *is* the definition of `D`.
+
+`TF2.backward_steps[*].heads[*].row_sums_dS` records this directly, rounded to
+12 decimal places, and every entry of every row of every head of both blocks
+is `0.0` or `−0.0`.
+
+**Why it must be true, without algebra.** Softmax outputs sum to one, always,
+for every input. So the constraint `Σ_i p_i = 1` is a hard invariant of the
+forward map, and the loss — being a function of `p` only through that
+constrained output — cannot be changed by any perturbation of `s` that would
+"change the total". Equivalently: softmax is shift-invariant, `softmax(s + c·1) = softmax(s)`,
+so the loss is exactly flat along the all-ones direction, so the gradient must
+be orthogonal to it. `Σ_i dL/ds_i = 0` is that orthogonality. It is the same
+argument as LayerNorm's shift invariance in 10.1, and it is the reason both
+gradients have a "subtract a row statistic" term.
+
+This is also the point at which 9.6's scale argument cashes out. Row 0 of every
+head is a point mass under the causal mask, so `p_i(δ_ij − p_j) = 0` for every
+`(i, j)` and `dS[0] = [0, −0, 0]` — no gradient at all reaches the scores of a
+saturated row. Without the `1/√d_head` scale, *every* row would drift toward
+that state as `d_head` grew.
+
+### 10.3 Attention backward in full
+
+Three tensor products with a softmax in the middle; backward walks them in
+reverse.
+
+```
+O = P·V         ->   dP = dO·Vᵀ            dV = Pᵀ·dO
+P = softmax(S)  ->   dS = P ⊙ (dP − D)     (10.2, row-wise)
+S = (Q·Kᵀ)·scale->   dQ = dS·K·scale       dK = dSᵀ·Q·scale
+```
+
+Each line is an instance of one rule, worth extracting because it explains
+most of the activation census:
+
+> **The operand swap.** For `C = A·B`, `dA = dC·Bᵀ` and `dB = Aᵀ·dC`. You
+> never need `C` itself, and you always need **both** `A` and `B`.
+
+Applying it three times gives the memory bill directly:
+
+- `dP` needs `V`; `dV` needs `P`. **`P` and `V` are saved for each other.**
+- `dQ` needs `K`; `dK` needs `Q`. **`Q` and `K` are saved for each other** —
+  neither can be freed after the scores are computed, even though neither is
+  used again in the forward pass.
+- `dWo = Oᵀ·dA` needs the concatenated head output `O`.
+
+`P` is the `heads × seq × seq` one. Everything else on that list is
+`seq × d_model`. Section 11 removes `P` from it, and the way it does so is by
+attacking the *first* bullet: it keeps `V`, throws away `P`, and reconstructs
+`P` from `Q` and `K`, which were being kept anyway for the second bullet.
+
+The `scale` appears twice and not once: `S = (QKᵀ)·scale` is linear in the
+product, so the constant survives into both input gradients. A common bug is
+applying it to `dQ` only.
+
+**Masked positions need no special handling in backward.** Where `j > i`,
+`p_ij = 0` exactly (9.7), so `dS_ij = p_ij(dP_ij − D) = 0` automatically. The
+generator's comment says it plainly: the mask contributed `−inf`, whose
+gradient is zero, and the zero probability does the rest.
+
+**Per-head, then scattered back.** Each head's `dQh`, `dKh`, `dVh` are
+`(seq, d_head)` and are written into columns `[lo, hi)` of the full-width
+`(seq, d_model)` gradients — the exact inverse of the view taken in 9.5.
+`TF2.backward_steps[*]` for the `attn` step exposes `dQ`, `dK` and `dV` at
+full `d_model` width already reassembled, plus a `heads[]` array with the
+per-head intermediates `dP`, `dS`, `softmax_dots`, `row_sums_dS`. (The step's
+generic `value` field carries `dQ` alone, and the generator says so in a
+`value_is` field — an earlier version exposed only `dQ` and a consumer
+trusting `value` therefore saw one third of the attention input-gradient.
+Page 08 caught it; the fix is in the data, not in the prose.)
+
+### 10.4 The MLP, GELU, and the fan-in at Q/K/V
+
+```
+dW2 = Gᵀ·dD                      needs the saved GELU output G
+dG  = dD·W2ᵀ
+dU  = dG ⊙ gelu'(U)              needs the saved PRE-activation U
+dW1 = n2ᵀ·dU                     needs the saved LayerNorm output n2
+dn2 = dU·W1ᵀ
+```
+
+Structurally identical to section 3's steps 3a/4/6a — outer product for the
+weight gradient, transposed matmul for the input gradient — so the only new
+content is `gelu'`.
+
+`dgelu` in the generator differentiates the tanh approximation by the product
+and chain rules rather than quoting a formula:
+
+```
+inner   = sqrt(2/π)·(x + 0.044715·x³)
+gelu    = 0.5·x·(1 + tanh(inner))
+gelu'   = 0.5·(1 + tanh(inner)) + 0.5·x·(1 − tanh²(inner))·d(inner)/dx
+d(inner)/dx = sqrt(2/π)·(1 + 3·0.044715·x²)
+```
+
+Contrast this with ReLU (section 3, step 5). ReLU's derivative is a **bit**:
+backward needs only `sign(z)`, one bit per element, 1/32 of an fp32 tensor.
+GELU's derivative is a **real number that depends on the pre-activation**, so
+the pre-activation must be kept at full width. That is `seq × d_ff` = 24
+elements per block here, the largest single non-quadratic entry in the
+activation census of 9.13, and it is why the census has both `U` and `G` in
+it: `U` for the nonlinearity's backward, `G` for the weight gradient of `W2`.
+Choosing GELU over ReLU costs one full-width `(seq, d_ff)` tensor per block.
+
+**The fan-in at Q/K/V.** `n1` is read by three matrices, so three
+input-gradients arrive and the multivariable chain rule says to add them:
+
+```
+dn1 = dQ·Wqᵀ + dK·Wkᵀ + dV·Wvᵀ
+```
+
+This is the general rule for any tensor used more than once — the same rule
+that makes `broadcast`'s adjoint a `reduce` in 12.4, and the same rule that
+makes the residual add's backward a *copy* rather than a split in 10.5. Fan-out
+in forward is summation in backward, always.
+
+### 10.5 The residual is a gradient path, and here is what it is worth
+
+```
+h₂ = h₁ + D      ->      ∂h₂/∂h₁ = I,      ∂h₂/∂D = I
+```
+
+So when `dh₂` reaches a residual junction going backward it is not divided
+between the two branches. It is **copied**. One copy goes into the sub-layer
+and gets mangled — through `W₂`, through `gelu'`, through `W₁`, through
+LayerNorm's three-term rule — and arrives smaller and rotated. The other copy
+goes down the skip wire bit for bit unchanged. What continues below the
+junction is their *sum*, and it therefore contains a pristine copy of what
+arrived no matter what the branch did.
+
+The code makes the copy explicit: `dD = list(dh)` and `d_skip2 = list(dh)`,
+two independent copies of the same values, and later `dh1 = add(d_skip2, dh1_from_ln2)`.
+
+**Measured, on this model.** Taking Frobenius norms at each of the four
+junctions (two per block; arithmetic performed on `TF2.backward_steps` and
+`TF2.dOut`/`TF2.dx_in`, exactly as `site/08-transformer-backward.html`
+computes it live):
+
+| Junction | ‖dh‖ in | ‖branch‖ | branch / in | ‖dh‖ out | out / in |
+|---|---|---|---|---|---|
+| L1 residual 2 (MLP branch) | 0.22662 | 0.07259 | ×0.3203 | 0.23112 | ×1.0199 |
+| L1 residual 1 (attention branch) | 0.23112 | 0.12201 | ×0.5279 | 0.24037 | ×1.0400 |
+| L0 residual 2 (MLP branch) | 0.24037 | 0.09023 | ×0.3754 | 0.23532 | ×0.9790 |
+| L0 residual 1 (attention branch) | 0.23532 | 0.07611 | ×0.3234 | 0.27549 | ×1.1707 |
+
+Read the two ratio columns against each other.
+
+```
+through the branch alone, geometric mean   ×0.3785 per sub-layer
+through the residual stream                ×1.0500 per sub-layer
+```
+
+The stream figure is `(‖dx_in‖/‖dOut‖)^(1/4) = (0.275492/0.226624)^(1/4)`; the
+branch figure is the geometric mean of the four `branch/in` ratios. Now
+extrapolate to a real depth. Llama 3 70B has 80 layers
+(`T.reference_configs`), i.e. **160 sub-layers**:
+
+```
+residual stream:   1.0500^160 = 2.5e+3      (2467)
+branch only:       0.3785^160 = 3.1e-68     (3.113e-68)
+```
+
+And fp32's smallest normal number is `1.18e-38` (section 7.2). `3.1e-68` is
+thirty orders of magnitude below it — deep inside the subnormal range, and
+past even the smallest subnormal `1.4e-45`. **Without the skip connection the
+gradient arriving at the early layers would not be small; it would be exactly
+zero**, flushed by the format, and the first fifty layers of the model would
+never receive an update at all. That is the vanishing-gradient problem stated
+as an arithmetic fact about a number format rather than as an intuition.
+
+Three honest caveats on that extrapolation. The `×0.3785` is measured on a
+4-dimensional, 2-block, untrained model and there is no reason a trained
+70B-scale block would have the same contraction factor. Frobenius norms
+compound multiplicatively only if the per-layer factors are independent, which
+they are not. And the stream's `×1.05` is not a law — a stream that grew by
+5% per sub-layer for 160 sub-layers would also be a problem, in the other
+direction, which is what the final LayerNorm before the LM head and the
+various residual-scaling initialisations exist to manage. The load-bearing
+claim is only the *sign of the exponent*: the branch path contracts, the
+stream path does not, and 160 applications of that difference is the gap
+between `1e-68` and `1e+3`.
+
+Note also what the table does *not* say: `‖dh out‖` is not `‖dh in‖ + ‖branch‖`.
+At L0 residual 2 it is 0.23532 against 0.24037 + 0.09023 — the sum is smaller
+than either extreme, because the two copies point in different directions and
+partially cancel. The elementwise identity `skip + branch = out` holds to
+machine precision; the *norm* identity does not hold at all, and the residual
+is not a guarantee that the gradient grows.
+
+### 10.6 The gradient check
+
+`transformer_2layer.py` perturbs every one of the 288 parameters by
+`h = 1e-5` in each direction, re-runs the entire two-block forward pass twice
+per parameter, and compares the central difference against the hand-derived
+gradient. `TF2.gradcheck`:
+
+```
+per_param     20 tensors
+max_abs_err   1.0717472048726862e-11   (at L0.Wv)
+h             1e-5
+passed        true
+```
+
+Per tensor, worst absolute error:
+
+| Tensor | Elements | max abs err | | Tensor | Elements | max abs err |
+|---|---|---|---|---|---|---|
+| `L0.Wq` | 16 | 2.74e-12 | | `L1.Wq` | 16 | 1.76e-12 |
+| `L0.Wk` | 16 | 2.07e-12 | | `L1.Wk` | 16 | 1.69e-12 |
+| `L0.Wv` | 16 | **1.07e-11** | | `L1.Wv` | 16 | 3.96e-12 |
+| `L0.Wo` | 16 | 3.31e-12 | | `L1.Wo` | 16 | 4.42e-12 |
+| `L0.W1` | 32 | 4.75e-12 | | `L1.W1` | 32 | 6.03e-12 |
+| `L0.W2` | 32 | 7.18e-12 | | `L1.W2` | 32 | 1.57e-12 |
+| `L0.ln1.g` | 4 | 2.76e-12 | | `L1.ln1.g` | 4 | 9.04e-13 |
+| `L0.ln1.b` | 4 | 1.05e-12 | | `L1.ln1.b` | 4 | 1.50e-12 |
+| `L0.ln2.g` | 4 | 3.10e-12 | | `L1.ln2.g` | 4 | 1.64e-12 |
+| `L0.ln2.b` | 4 | 1.14e-12 | | `L1.ln2.b` | 4 | 1.09e-12 |
+
+`main()` raises `SystemExit` listing the offending tensors if any exceeds
+`1e-6`, so a `tf2.json` that exists is one whose LayerNorm backward, softmax
+Jacobian and attention chain have all been confirmed against finite
+differences.
+
+**Is `1.07e-11` the right size?** Section 5.2's model says the round-off floor
+of a central difference is about `eps·|L|/h`. Here `eps = 2.2e-16`,
+`L = 0.154`, `h = 1e-5`:
+
+```
+2.2e-16 × 0.154 / 1e-5  ≈  3.4e-12
+```
+
+against an observed worst case of `1.07e-11` — a factor of three, which is
+about as close as that estimate gets when the loss is a composition of two
+LayerNorms, two softmaxes and eight matmuls rather than a single quadratic.
+The generator's own note says the residual is on the finite-difference side,
+not the analytic one. Note also that `h = 1e-5` is a factor of ~1.6 above the
+`eps^(1/3) ≈ 6.1e-6` optimum derived in 5.2, and the error curve is flat
+enough there that it does not matter.
+
+**Three independent implementations now agree.** Taken with section 5, the
+project's calculus has been checked three ways that share no code:
+
+1. **Hand-derived analytic gradients** — `ground_truth.py` for the MLP,
+   `transformer_2layer.py` for the transformer, every derivative written out
+   longhand from the chain rule.
+2. **Central finite differences** — a completely different algorithm that
+   knows nothing about calculus, agreeing to `2.85e-10` on the MLP (5.3) and
+   `1.07e-11` on the transformer.
+3. **A framework's autograd** — `code/mlp_torch.py` runs the same 2-3-1 MLP
+   under PyTorch and reports that autograd's gradients match the hand-derived
+   ones at **exactly `0.000e+00`** across all 30 checks: not within a
+   tolerance, bit-identical. (`code/mlp_numpy.py` is a fourth, vectorised,
+   hand-written implementation, passing 359 element-wise checks at
+   `0.000e+00` against the trace.)
+
+There is no transformer equivalent of item 3 in this repository —
+`transformer_2layer.py` is checked against finite differences only, and I say
+so rather than implying a torch cross-check that does not exist.
+
+---
+
+## 11. FlashAttention
+
+Section 9.13 identified one row of the activation census that behaves
+differently from all the others: the attention probability matrix `P`, which is
+`heads × seq × seq`. Section 4.2 put a number on it — `5·a·s/h` of the
+`34 + 5·a·s/h` bytes per token per layer, which at `s = 4096` and `h = 8192`
+was 5.37 GB of the 6.51 GB per layer, i.e. **82% of a 70B model's activation
+memory was one tensor that exists only to be multiplied by `V` and then thrown
+away.**
+
+FlashAttention (Dao, Fu, Ermon, Rudra & Ré, 2022) deletes it. Not approximates
+it, not compresses it, not sparsifies it — computes exactly the same output
+without ever allocating it. `code/flash_attention.py` implements both versions
+and proves they agree; `assets/data/flash.json` (`FLASH` below) is the result,
+and `site/10-flash-attention.html` steps through the tiles.
+
+`FLASH.meta`: `seq = 8`, `d_head = 4`, tiles `Br = 4` × `Bc = 2`, causal, so
+there are 2 query blocks and 4 key blocks — big enough that tiling is visible,
+small enough that every intermediate is printed. `scale = 0.5 = 1/sqrt(4)`.
+
+### 11.1 The obstacle: softmax needs the whole row
+
+The tiled version wants to walk the keys in blocks and accumulate. Matmuls
+tile trivially — a partial sum is a partial sum. Softmax does not:
+
+```
+p_i = e^{s_i − m} / Σ_j e^{s_j − m},      m = max_j s_j
+```
+
+Both the maximum and the normaliser are reductions over the *entire* row. You
+appear to need all `seq` scores in hand before you can produce a single
+probability, and if you have all `seq` scores in hand you have materialised
+the row — and `seq` rows of that is the matrix you were trying to avoid.
+
+### 11.2 Online softmax, derived
+
+Carry two running numbers per row:
+
+```
+m = the largest score seen so far
+l = Σ exp(s − m) over everything seen so far
+```
+
+Process a new block of scores. Let `m_new = max(m_old, max(block))`. The
+already-accumulated `l_old` was computed relative to `m_old`:
+
+```
+l_old = Σ_{seen} e^{s − m_old}
+```
+
+and we want it relative to `m_new`. Multiply and divide:
+
+```
+Σ_{seen} e^{s − m_new} = Σ_{seen} e^{s − m_old} · e^{m_old − m_new}
+                       = l_old · e^{m_old − m_new}
+```
+
+**That single factor `exp(m_old − m_new)` is the entire trick.** It is a
+scalar, it is at most 1 (so it never overflows), and it converts every
+quantity that was normalised against the old maximum into one normalised
+against the new one. The update is then
+
+```
+correction = exp(m_old − m_new)
+l_new      = l_old · correction  +  Σ_{block} e^{s − m_new}
+m          = m_new
+```
+
+and the same correction is applied to the *output accumulator*, because the
+unnormalised `Σ p·V` carries the same `e^{−m}` factor:
+
+```
+acc ← acc · correction  +  Σ_{block} e^{s − m_new} · V_block
+```
+
+At the end, `O = acc / l`. Nothing was approximated: the final `m` is the true
+row maximum and the final `l` is the true normaliser, so the final `O` is the
+true output.
+
+`online_softmax_demo` runs it in one dimension on
+`xs = [1, 3, 2, 8, 7, 4]` with a block size of 2, and records every step
+(`FLASH.online_softmax_demo.steps`):
+
+| Block | Values | `m_old` | `m_new` | correction | `l_old` | `l_rescaled` | added | `l_new` |
+|---|---|---|---|---|---|---|---|---|
+| 0 | `[1, 3]` | — | 3.0 | — | 0.0 | 0.0 | 1.1353352832366128 | 1.1353352832366128 |
+| 1 | `[2, 8]` | 3.0 | 8.0 | 0.006737946999085467 | 1.1353352832366128 | 0.007649828964639984 | 1.0024787521766663 | 1.0101285811413063 |
+| 2 | `[7, 4]` | 8.0 | 8.0 | 1.0 | 1.0101285811413063 | 1.0101285811413063 | 0.3861950800601765 | 1.3963236612014829 |
+
+Block 1 is the interesting one: the maximum jumps from 3 to 8, the correction
+is `e^{−5} = 0.006737946999085467`, and everything accumulated so far shrinks
+by that factor before the new contribution is added. Block 2's maximum does
+not move, so the correction is exactly 1.0 and the rescale is a no-op — which
+is what makes the mechanism cheap in practice, since after the first few tiles
+the running max usually stops changing.
+
+The result against a direct softmax over the whole list:
+`FLASH.online_softmax_demo.max_abs_err = 0.0`. Exactly zero, not "within
+tolerance".
+
+### 11.3 The tiled kernel
+
+`flash_attention()` is two nested loops:
+
+```
+for each query block (Br rows):
+    m   = [−inf] * Br              running row maxima
+    l   = [0]    * Br              running row sums
+    acc = zeros(Br, d_head)        UNNORMALISED output accumulator
+
+    for each key/value block (Bc columns):
+        if causal and the whole tile is in the future:  skip it
+        tile = Q_block · K_blockᵀ · scale               (Br × Bc)
+        for each row in the block:
+            m_new = max(m, max(tile row))
+            corr  = exp(m − m_new)
+            l    ← l·corr + Σ exp(tile − m_new)
+            acc  ← acc·corr + Σ exp(tile − m_new)·V_block
+            m    ← m_new
+
+    O[block]   = acc / l
+    lse[block] = m + log(l)
+```
+
+Peak live memory for the score matrix is **one `Br × Bc` tile**:
+`FLASH.flash.peak_tile_elements = 8`, against
+`FLASH.standard.stored_elements = 64` for the `seq × seq` matrix at `seq = 8`.
+The tile is sized to fit in on-chip SRAM, which is the point of the whole
+exercise (11.6).
+
+Two details worth naming. **Causal tiles can be skipped whole.** If every key
+in a tile is in the future of every query in it (`k0 > last query row`), the
+tile contributes nothing and is never computed;
+`FLASH.flash.trace[*].steps[*].skipped` marks these, and this is where causal
+masking actually saves work rather than merely zeroing entries. And **the
+accumulator is unnormalised** until the very end — dividing by `l` on every
+tile would be both wasteful and, more importantly, would require knowing the
+final `l`, which is exactly what you do not have.
+
+### 11.4 The equivalence proof
+
+`FLASH.equivalence`:
+
+```
+output_max_abs_err = 3.469446951953614e-17
+passed             = true
+claim              = "Tiled attention with online softmax produces the SAME
+                      output as the version that materialises seq x seq.
+                      FlashAttention is exact, not an approximation. That is
+                      the single most important thing to know about it."
+```
+
+`3.469446951953614e-17` is exactly `5 × 2^-57` — a handful of last-bit
+roundings at magnitude ~1, arising because the tiled version adds the same
+products in a different order and applies a few extra multiplications by
+correction factors. It is the same category of residue as the `2^-54` of
+section 13.3 and the `2^-57` of 15.5: **not** an approximation error that
+happens to be small, but the arithmetic being reassociated.
+
+This is the fact people most often get wrong about FlashAttention. It is not
+in the family of linear attentions, low-rank approximations, sparse patterns
+or kernel tricks that trade accuracy for memory. It computes the same
+function. Turning it on cannot change your loss curve except by the last bits.
+
+### 11.5 Backward by recomputation
+
+Standard attention backward reads the stored `P` (10.3: `dV = Pᵀ·dO` and
+`dP = dO·Vᵀ`). FlashAttention has not got one. What it kept instead is two
+numbers per query row — the final `m` and `l`, folded into one:
+
+```
+lse_i = m_i + log(l_i)
+```
+
+`FLASH.flash.lse` is those 8 numbers, and `FLASH.flash.saved_elements = 16`,
+i.e. `2·seq`. From them the entire probability matrix is reconstructible:
+
+```
+p_ij = exp(s_ij − lse_i)
+```
+
+**Why that is exact.** By definition
+`lse_i = log Σ_j e^{s_ij}` (the max subtraction inside `m + log l` cancels:
+`m + log Σ_j e^{s_ij − m} = log Σ_j e^{s_ij}`). So
+
+```
+exp(s_ij − lse_i) = e^{s_ij} / Σ_k e^{s_ik} = p_ij
+```
+
+which is the definition of softmax. There is no approximation and no
+statistical assumption — one scalar per row is a *sufficient statistic* for
+the whole row's softmax, given the scores, and the scores are recomputable
+from `Q` and `K`, which 10.3 showed were being kept anyway.
+
+`flash_backward` does exactly this and checks it:
+
+```
+FLASH.backward.recompute_max_err   = 5.551115123125783e-17
+FLASH.backward.recompute_passed    = true
+```
+
+`5.551115123125783e-17` is exactly `2^-54` — one rounding at magnitude ~1, the
+same residue section 13.3 identifies for the data-parallel gradient. The
+recomputed `P` *is* the original `P`.
+
+The rest of backward is section 10.3 unchanged, with the recomputed
+probabilities standing in for the stored ones:
+
+```
+dV = Pᵀ·dO
+dP = dO·Vᵀ
+D_i = Σ_j dP_ij·P_ij                    the per-row scalar of 10.2
+dS_ij = P_ij·(dP_ij − D_i)              zero where the mask applies
+dQ = dS·K·scale
+dK = dSᵀ·Q·scale
+```
+
+`flash_backward` computes `D_i` per row and stores it as
+`FLASH.backward.row_dots`, which is the same object as `softmax_dots` in
+section 10.2 — and note that in a real kernel this too is computed tile by
+tile, since `D_i = Σ_j dP_ij P_ij` is a row reduction that accumulates exactly
+like `l` does.
+
+### 11.6 The trade, and the thing people get backwards
+
+**The cost.** Every tile's scores are computed twice: once in forward, once in
+backward. The generator states it as *"roughly +30% attention FLOPs in
+backward, because each tile's scores are recomputed rather than read"* — this
+is an estimate quoted from the source and the FlashAttention paper, **not
+derived here**. The shape of it: attention forward is two `seq²·d` matmuls
+(`QKᵀ` and `PV`), backward is four, and recomputing `QKᵀ` adds a fifth, so the
+attention block goes from 6 to 7 units of work, about +17% on attention and
+more once the softmax and rescale arithmetic is counted. Against the model's
+*total* FLOPs, where attention is a minority of the work at moderate sequence
+lengths, the end-to-end cost is smaller still.
+
+**The saving.** `FLASH.memory.table`, elements per head per layer:
+
+| `seq` | standard (`seq²`) | flash (`2·seq`) | ratio |
+|---|---|---|---|
+| 128 | 16,384 | 256 | 64× |
+| 512 | 262,144 | 1,024 | 256× |
+| 1,024 | 1,048,576 | 2,048 | 512× |
+| 2,048 | 4,194,304 | 4,096 | 1,024× |
+| 4,096 | 16,777,216 | 8,192 | 2,048× |
+| **8,192** | **67,108,864** | **16,384** | **4,096×** |
+| 32,768 | 1,073,741,824 | 65,536 | 16,384× |
+| 131,072 | 17,179,869,184 | 262,144 | 65,536× |
+
+Every row is a literal field in `FLASH.memory.table`; the ratio is `seq/2`,
+which is the whole formula: `seq²` against `2·seq`. At Llama 3 70B's sequence
+length of 8,192 (`T.reference_configs`), one head of one layer goes from
+**67,108,864 elements to 16,384** — and there are 64 heads and 80 layers.
+
+**And now the part that gets stated backwards.** The framing "FlashAttention
+trades compute for memory" is the wrong way round in the one respect that
+matters: **it is also faster.** `FLASH.memory.why_it_is_also_faster` says it
+directly — the `seq²` matrix never leaves SRAM, so the kernel stops being
+bound by HBM bandwidth.
+
+The reasoning, in the standard roofline terms (*stated as literature; no
+bandwidth figure here is in the data*). A standard attention implementation
+writes the `seq × seq` score matrix to HBM, reads it back to apply the
+softmax, writes the probabilities back, and reads them again for the `PV`
+matmul — several `O(seq²)` round trips to the slowest memory in the machine,
+in exchange for `O(seq²·d)` arithmetic. As `seq` grows, the kernel is
+bandwidth-bound: the GPU's arithmetic units idle while the memory system moves
+a matrix that exists only to be consumed by the next kernel. FlashAttention
+fuses the three operations, keeps the tile in on-chip SRAM (which is roughly
+an order of magnitude faster than HBM and about three orders of magnitude
+smaller), and touches HBM only for `Q`, `K`, `V` and `O` — all `O(seq·d)`.
+The recomputation in backward costs arithmetic on units that were idle anyway.
+
+So the honest summary is: **more FLOPs, less memory traffic, less memory,
+faster wall-clock, identical numerics.** The only genuine cost is
+implementation complexity, which is why it arrived as a hand-written CUDA
+kernel and why FlashAttention-2 (Dao, 2023) — which mainly reorganises the
+loop order and the work partitioning across warps to reduce non-matmul
+operations — was worth a second paper.
+
+**What this does to section 4.2's budget.** Deleting the `5·a·s/h` term takes
+the 70B-class per-layer activation figure from 6.51 GB to 1.14 GB and the
+whole-model figure from **521 GB to about 91 GB** per microbatch. Section 18.3
+assumes FlashAttention throughout for exactly this reason, and says so.
+
+**One caveat on the memory table.** It counts the probability matrix only.
+FlashAttention still saves `Q`, `K`, `V` and `O` (`4·seq·d_head` per head) —
+those were never the problem, being linear in `seq` — and adds `2·seq` for the
+statistics. The table's claim is narrow and exact: the quadratic term is gone.
+
+---
+
+## 12. The communication primitives
+
+Sections 12 through 18 are the distributed half of this document. Their ground
 truth is `assets/data/parallel.json`, generated by `code/parallel_toy.py` under
 the same rules as `trace.json`: pure standard-library Python, no numpy, no
 torch, no NCCL. It *simulates* four ranks running one training step of a small
@@ -1477,14 +2825,14 @@ quiet part out loud: *real models are not this tidy*.
 
 Why this matters at all: section 8 established 16 bytes per parameter for
 mixed-precision Adam. A 70B model is therefore 1.13 TB of static state before a
-single activation (the term-by-term arithmetic is in 14.3), against 85.9 GB on
+single activation (the term-by-term arithmetic is in 18.3), against 85.9 GB on
 an H100. The model does not fit. Everything below is a different answer to the
 question *which of those tensors do I refuse to replicate, and what does the
 network cost me for refusing*.
 
 `site/12-collectives.html` animates each primitive on four ranks.
 
-### 9.0 Notation
+### 12.0 Notation
 
 `N` ranks, numbered `0 .. N-1`. A buffer of `S` elements. Rank `i`'s copy is
 `x_i`. When a buffer is sharded, it is cut into `N` contiguous pieces of `S/N`
@@ -1503,7 +2851,7 @@ that ever appears is a sum of gradients.
 fp32. `PARALLEL` stores both (`elements`, `bytes_bf16`, `bytes_fp32` on every
 schedule entry).
 
-### 9.1 The eight collectives
+### 12.1 The eight collectives
 
 `PARALLEL.collectives` is the authoritative list — nine entries, the eight
 collectives below plus `p2p`, which is not a collective at all and is included
@@ -1524,7 +2872,7 @@ because pipeline parallelism runs on it.
 Every column of that table is a field in `PARALLEL.collectives[*]`: `op`,
 `sig`, `ring_factor`, `inverse`. The cost column is what
 `parallel_toy.py:ring_cost` implements, and it is the standard
-bandwidth-optimal analysis with latency terms dropped — 9.6 puts them back.
+bandwidth-optimal analysis with latency terms dropped — 12.6 puts them back.
 
 Now each one precisely. "Before" and "after" describe the contents of every
 rank's buffer; `r` denotes the root rank where one exists.
@@ -1598,7 +2946,7 @@ after:    rank i  holds  ( sum_j x_j )[shard(i)]         S/N elements
 
 Used for: ZeRO-2, ZeRO-3 and FSDP reducing gradients. Each rank ends up with
 the fully-summed gradient for exactly the parameters it will update, and never
-allocates a full-size gradient buffer at all. Section 11.3 is about why this
+allocates a full-size gradient buffer at all. Section 14.3 is about why this
 is free.
 
 **`all_reduce`.** Sum across ranks, answer on every rank.
@@ -1630,9 +2978,9 @@ sequence parallelism.
 no group, no synchronisation with anyone else. Used for: pipeline parallelism
 handing a boundary activation to the next stage and the corresponding gradient
 back to the previous one. Its irrelevance to the collectives table is the
-reason it survives on slow links (section 13.5).
+reason it survives on slow links (section 17.5).
 
-### 9.2 The decomposition identities
+### 12.2 The decomposition identities
 
 Four identities matter, and all four are one line of index algebra.
 
@@ -1643,7 +2991,7 @@ all_gather   =  gather          ;  broadcast
 reduce_scatter = reduce         ;  scatter
 ```
 
-Proof of the first, which is the one everything in section 11 hangs on. After
+Proof of the first, which is the one everything in section 14 hangs on. After
 `reduce_scatter`, rank `i` holds `(sum_j x_j)[shard(i)]`. An `all_gather` over
 those buffers concatenates shards `0 .. N-1` in rank order and leaves the
 result on every rank:
@@ -1665,10 +3013,10 @@ The cost decomposition follows immediately and agrees with the table:
 
 This is not merely an accounting curiosity. It is *how NCCL actually
 implements ring all-reduce*, and it is the reason ZeRO stage 2 costs nothing
-(11.3): if you were going to throw away the `all_gather` half anyway, stop
+(14.3): if you were going to throw away the `all_gather` half anyway, stop
 paying for it.
 
-### 9.3 Inverses and adjoints
+### 12.3 Inverses and adjoints
 
 The `inverse` field in `PARALLEL.collectives` pairs the operations up:
 
@@ -1701,7 +3049,7 @@ transpose sums and selects, which is `reduce_scatter`. `all_reduce` is the
 symmetric matrix `1_N ⊗ I` (an `N x N` block matrix of identities), and a
 symmetric matrix is its own transpose — hence self-adjoint.
 
-### 9.4 The conjugate pairs: forward and backward
+### 12.4 The conjugate pairs: forward and backward
 
 Reverse-mode autodiff of a linear map is multiplication by its adjoint
 (section 3 — every `backward` is a vector-Jacobian product, and for a linear
@@ -1721,7 +3069,7 @@ backward passes:
 | `p2p(i→j)` | `p2p(j→i)` | one hop, reversed |
 
 Take the `broadcast` row explicitly, because it is the one that produces
-Megatron's `f` operator in 12.4. Forward, rank `i` receives a copy `y_i = x`.
+Megatron's `f` operator in 15.4. Forward, rank `i` receives a copy `y_i = x`.
 The loss depends on `x` through all `N` copies, so by the multivariable chain
 rule
 
@@ -1744,9 +3092,9 @@ consumes exactly one output, and the sum collapses to `dL/dx_j = dL/dy_j` —
 an *identity*, no communication. That asymmetry is real and is the entire
 content of Megatron's `f`/`g` pair: one of them communicates in forward and is
 free in backward, the other is free in forward and communicates in backward.
-Details in 12.4.
+Details in 15.4.
 
-### 9.5 The ring all-reduce, derived
+### 12.5 The ring all-reduce, derived
 
 Arrange the `N` ranks in a logical ring: rank `i` sends only to rank `i+1 mod
 N` and receives only from rank `i-1 mod N`. Cut every rank's buffer into `N`
@@ -1816,7 +3164,7 @@ Second, `parallel_toy.py:ring_cost` charges `broadcast`, `reduce` and `p2p`
 the full `S` and does not model the reduction arithmetic itself; the docstring
 says so.
 
-### 9.6 Ring versus tree: bandwidth-optimal versus latency-optimal
+### 12.6 Ring versus tree: bandwidth-optimal versus latency-optimal
 
 Drop the assumption that only bytes matter. The standard α-β cost model —
 *stated as literature* (Hockney; Thakur, Rabenseifner & Gropp) — charges a
@@ -1876,7 +3224,7 @@ actual tree is a *double binary tree* (two complementary trees, each rank
 interior in one and a leaf in the other) which recovers roughly half the
 bandwidth penalty; that refinement is literature, not derived here.
 
-The practical consequence, which reappears in 11.4 and 13.3: **splitting one
+The practical consequence, which reappears in 14.4 and 17.3: **splitting one
 big collective into many small ones is free in bandwidth and expensive in
 latency.** The `(N-1)/N` factor is linear in payload, so four `all_gather`s of
 `S/4` send exactly as many bytes as one `all_gather` of `S` — but they cost
@@ -1884,11 +3232,11 @@ four times the `α`. That is the entire tension in FSDP's wrapping policy.
 
 ---
 
-## 10. Data parallelism
+## 13. Data parallelism
 
 `site/13-data-parallel.html` runs the four-rank version step by step.
 
-### 10.1 The statement
+### 13.1 The statement
 
 Data parallelism replicates the model and shards the batch. It is correct
 because of a single fact about the loss:
@@ -1900,7 +3248,7 @@ Nothing about the network, the architecture, or the optimizer enters. It is a
 property of the loss being a *mean over examples* and of differentiation being
 *linear*.
 
-### 10.2 The proof
+### 13.2 The proof
 
 Let the loss over a batch of `B` examples be
 
@@ -1956,7 +3304,7 @@ often enough to matter:
    compounds: once two replicas differ, nothing in DDP ever pulls them back
    together.
 
-### 10.3 Numerical verification
+### 13.3 Numerical verification
 
 `parallel_toy.py:run_data_parallel` runs the four ranks with one sample each,
 averages their gradients elementwise, and compares against the single-rank
@@ -1995,11 +3343,11 @@ same number.
 
 The same is true of the two other exact-equivalence claims in the file:
 `PARALLEL.strategies.tp.verify.forward_max_err = 6.938893903907228e-18`, which
-is `2^-57` (section 12.5), and the ZeRO and pipeline strategies, which report
+is `2^-57` (section 15.5), and the ZeRO and pipeline strategies, which report
 `forward_max_err = 0.0` because they do not change the arithmetic at all —
 only where numbers are stored and when.
 
-### 10.4 Why the reduction is a mean and not a sum
+### 13.4 Why the reduction is a mean and not a sum
 
 `all_reduce` sums. The theorem needs a mean. Something must divide by `N`.
 
@@ -2047,7 +3395,7 @@ Large-Batch Training*, 2018 — literature) more examples per step stop buying
 proportionally faster convergence, which is the real ceiling on how far pure
 data parallelism can take you.
 
-### 10.5 Bucketing and overlap, derived
+### 13.5 Bucketing and overlap, derived
 
 The all-reduce in `PARALLEL.strategies.ddp.schedule` is one entry:
 
@@ -2098,7 +3446,7 @@ produced last by backward — has nothing left to hide behind. Everything else
 overlaps completely. With `K = 25` buckets, 96% of the communication is free.
 
 **Why not `K = ∞`.** Because `T_c` itself depends on `K`. Under the α-β model
-of 9.6, `K` buckets of total size `S` cost
+of 12.6, `K` buckets of total size `S` cost
 
 ```
 T_c(K) = K·(2(N-1)·α)  +  2(N-1)/N · S · β
@@ -2132,13 +3480,13 @@ Three implementation details fall out of the same analysis:
 - **Buckets are flat contiguous buffers.** One `all_reduce` of 25 MB beats a
   thousand of 25 KB by the `α` argument, and NCCL needs contiguity anyway.
   The flat buffer is *additional* memory on top of the gradients (section
-  15.1).
+  19.1).
 - **Unused parameters break it.** A parameter whose gradient is never produced
   leaves its bucket permanently incomplete, and the step hangs. Hence
   `find_unused_parameters`, which walks the autograd graph to mark them ready
   — and costs a graph traversal per step, which is why it is off by default.
 
-### 10.6 The memory bill is unchanged
+### 13.6 The memory bill is unchanged
 
 This is DDP's defining limitation and it is visible directly in the data.
 `PARALLEL.strategies.ddp.memory_per_gpu`:
@@ -2164,20 +3512,20 @@ the one class that was already the easiest to control (section 4.3).
 
 So: **DDP scales throughput, not capacity.** If the model does not fit on one
 device, `N` copies of it fit on `N` devices exactly as badly. The strategies in
-sections 11 to 13 all start from this observation.
+sections 14 to 17 all start from this observation.
 
 ---
 
-## 11. ZeRO and FSDP
+## 14. ZeRO and FSDP
 
 `site/14-zero-fsdp.html` steps through the three stages on four ranks.
 
 DDP replicates three things it does not need to. ZeRO (Rajbhandari et al.,
 2020) removes them one at a time, in increasing order of how much
-communication the removal costs. The remarkable result — derived in 11.3 — is
+communication the removal costs. The remarkable result — derived in 14.3 — is
 that the first two removals cost *nothing*.
 
-### 11.1 The memory ladder, derived
+### 14.1 The memory ladder, derived
 
 Notation follows the ZeRO paper, so that the formulas below are directly
 comparable to its Table 1:
@@ -2270,12 +3618,12 @@ Numerically, at `Psi = 70.6e9`, `K = 12` (arithmetic performed on
 | 32 | 1129.6 GB | 308.88 GB | 172.09 GB | 35.3 GB |
 | 64 | 1129.6 GB | 295.64 GB | 156.64 GB | **17.65 GB** |
 
-The DDP column is constant, which is section 10.6 in one line. The ZeRO-1 and
+The DDP column is constant, which is section 13.6 in one line. The ZeRO-1 and
 ZeRO-2 columns flatten out toward their floors of 282.4 GB and 141.2 GB. Only
 the last column keeps falling, and it is the only one that ever fits in an
 H100's 85.9 GB.
 
-### 11.2 The toy's ladder
+### 14.2 The toy's ladder
 
 `parallel_toy.py` counts *elements*, not bytes, with one element of weight,
 one of gradient, and two of optimizer state (`m` and `v`) per parameter — so
@@ -2306,10 +3654,10 @@ identical 192 elements. They shard the same total state; they differ entirely
 in *which axis* they cut it along and *what the network bill is* — which is
 the subject of the next three sections.
 
-### 11.3 Why stage 2 is communication-free relative to stage 1
+### 14.3 Why stage 2 is communication-free relative to stage 1
 
 This is the result that makes ZeRO look like a free lunch, and it is a direct
-corollary of the decomposition identity in 9.2.
+corollary of the decomposition identity in 12.2.
 
 Start from stage 1 as literally scheduled in
 `PARALLEL.strategies.zero1.schedule`:
@@ -2332,7 +3680,7 @@ optimizer state for slice `i` only. It updates slice `i` only. It reads
 gradient slice `i` only. The other `(N-1)/N` of the buffer is delivered,
 stored, and never read.
 
-Apply 9.2:
+Apply 12.2:
 
 ```
 all_reduce  =  reduce_scatter  ;  all_gather
@@ -2383,10 +3731,10 @@ gradients must be reduce-scattered *as they are produced*, bucket by bucket
 during the backward pass, so that a bucket can be reduced and its non-local
 portion freed before the next bucket is allocated. If you wait until backward
 finishes, you have materialised the full gradient buffer and saved nothing.
-ZeRO-2 therefore requires the bucketing machinery of 10.5 for correctness of
+ZeRO-2 therefore requires the bucketing machinery of 13.5 for correctness of
 the memory claim, where DDP only wanted it for speed.
 
-### 11.4 ZeRO-3's 1.5x, derived
+### 14.4 ZeRO-3's 1.5x, derived
 
 Stage 3 shards the parameters themselves, so a rank no longer *has* the
 weights it needs to run a layer. It must fetch them. Per step, per parameter:
@@ -2401,7 +3749,7 @@ weights it needs to run a layer. It must fetch them. Per step, per parameter:
    away, so they are gathered a *second* time. Volume `Psi`.
 4. **`reduce_scatter` the gradients.** Volume `Psi`.
 
-In ring terms, with the `(N-1)/N` factor from 9.5:
+In ring terms, with the `(N-1)/N` factor from 12.5:
 
 ```
 ZeRO-3   = 3 · (N-1)/N · Psi
@@ -2430,7 +3778,7 @@ where every element goes:
 sum to `30 + 54 + 54 + 6.75 = 144.75`, which is exactly `(N-1)/N × 193` — the
 same as one all-gather of the whole model. Splitting a collective by layer
 costs nothing in bytes, because `(N-1)/N` is linear in payload. It costs four
-times the latency (9.6). That is the whole of FSDP's wrapping-granularity
+times the latency (12.6). That is the whole of FSDP's wrapping-granularity
 problem, and it is why the answer is neither "wrap every linear" nor "wrap the
 whole model".
 
@@ -2442,7 +3790,7 @@ seen from two sides.
 
 The second cost is structural and worse than the bandwidth: ZeRO-3's
 collectives sit on the **critical path of every layer**, not at the end of the
-step. DDP's all-reduce can hide behind backward (10.5) because nothing in the
+step. DDP's all-reduce can hide behind backward (13.5) because nothing in the
 step is waiting for it. ZeRO-3's forward all-gather for layer `L` blocks layer
 `L`'s matmul. The only way to hide it is to prefetch — issue layer `L+1`'s
 all-gather while layer `L` computes — which requires knowing the execution
@@ -2451,7 +3799,7 @@ the memory saving. This is why ZeRO-3 throughput is so much more sensitive to
 network quality than DDP throughput, and why its latency exposure grows with
 the number of shard units rather than with the parameter count.
 
-### 11.5 FSDP
+### 14.5 FSDP
 
 PyTorch's FSDP is the ZeRO-3 algorithm with a different organising principle
 and a different vocabulary. Worth stating the mapping, because the papers and
@@ -2463,10 +3811,10 @@ the API do not use the same words.
   stores piece `i`. This matters because a transformer block has dozens of
   parameter tensors of wildly different shapes; sharding each one
   independently would produce dozens of tiny collectives per block, and
-  section 9.6 says that is the expensive failure mode. Flattening turns them
+  section 12.6 says that is the expensive failure mode. Flattening turns them
   into one.
 - **The wrapping policy is the tuning knob**, and it is exactly the
-  granularity trade-off of 11.4. `transformer_auto_wrap_policy` wrapping one
+  granularity trade-off of 14.4. `transformer_auto_wrap_policy` wrapping one
   block per unit is the standard answer for a reason: a block is large enough
   that the collective is bandwidth-bound rather than latency-bound, and small
   enough that one gathered unit fits comfortably. Wrap too finely and you pay
@@ -2475,7 +3823,7 @@ the API do not use the same words.
   whole model in one unit gathers the entire model and is strictly worse than
   DDP.
 - **Prefetching** (`forward_prefetch`, `backward_prefetch`) is the
-  critical-path mitigation from 11.4, and it costs one extra gathered unit of
+  critical-path mitigation from 14.4, and it costs one extra gathered unit of
   memory.
 - **`HYBRID_SHARD`** shards within a node and replicates across nodes: a
   `world = node_size × n_nodes` factorisation where the expensive per-layer
@@ -2483,15 +3831,15 @@ the API do not use the same words.
   DDP-style all-reduce per step. It exists because pure ZeRO-3 puts
   `3·(N-1)/N·Psi` of latency-sensitive, critical-path traffic on the slow
   fabric, which is the wrong place for it — the same topology argument as
-  section 14.2.
+  section 18.2.
 - **`CPUOffload`** moves the sharded optimizer state and master weights to host
   memory, trading PCIe bandwidth for HBM. It changes the memory formulas of
-  11.1 by removing `K·Psi/N` from the device entirely, at the cost of a
+  14.1 by removing `K·Psi/N` from the device entirely, at the cost of a
   host-device round trip per optimizer step.
 
 ---
 
-## 12. Tensor parallelism
+## 15. Tensor parallelism
 
 `site/15-tensor-parallel.html` splits the toy's hidden layer four ways and
 shows the partial sums arriving.
@@ -2502,7 +3850,7 @@ slice and the slices are combined only where the mathematics forces it. The
 question is where that is, and the answer is a short piece of block-matrix
 algebra.
 
-### 12.1 Column-parallel: splitting the output dimension
+### 15.1 Column-parallel: splitting the output dimension
 
 Let `X` be `(R, k)` and `A` be `(k, n)`, so `Y = XA` is `(R, n)`. `R` is the
 number of rows — tokens, i.e. batch × sequence — and is written `R` rather
@@ -2536,7 +3884,7 @@ What this means operationally:
 - A bias on this layer splits with the columns: `b_i` is the slice of `b`
   matching `A_i`, and each rank adds its own slice locally.
 
-### 12.2 Row-parallel: splitting the contraction dimension
+### 15.2 Row-parallel: splitting the contraction dimension
 
 Now let `B` be `(n, m)` and cut it into `N` *row* blocks, with the input
 already column-split in the matching way:
@@ -2562,7 +3910,7 @@ Y[r][j] = sum_{i} ( sum_{q in block i} X[r][q] · B[q][j] )
 
 ∎
 
-The structural difference from 12.1 is everything:
+The structural difference from 15.1 is everything:
 
 - Rank `i` stores only `B_i` and needs only `X_i` — which it already has, if
   `X` came out of a column-parallel layer. **The shard boundaries line up,
@@ -2580,7 +3928,7 @@ The structural difference from 12.1 is everything:
   comment *"bias added ONCE, after the sum"* — and it is a classic
   off-by-a-factor-of-`N` bug in hand-written tensor parallelism.
 
-### 12.3 The central result: column-then-row lets a nonlinearity through
+### 15.3 The central result: column-then-row lets a nonlinearity through
 
 Consider the two-matmul sandwich that every transformer MLP is:
 
@@ -2591,9 +3939,9 @@ Z = f(X A) B          f elementwise (GeLU, SwiGLU, ReLU)
 Split `A` column-wise and `B` row-wise. Then:
 
 ```
-XA = [ X A_1 | ... | X A_N ]                          (12.1, no communication)
+XA = [ X A_1 | ... | X A_N ]                          (15.1, no communication)
 f(XA) = [ f(X A_1) | ... | f(X A_N) ]                 (f is elementwise)
-f(XA) B = sum_i f(X A_i) B_i                          (12.2, one all_reduce)
+f(XA) B = sum_i f(X A_i) B_i                          (15.2, one all_reduce)
 ```
 
 The middle line is the whole trick. **`f` is elementwise, so it commutes with
@@ -2630,10 +3978,10 @@ boundary on an axis the nonlinearity does not touch; row-parallel consumes
 that same boundary. Every tensor-parallel transformer implementation is built
 out of this one pairing, repeated.
 
-### 12.4 The conjugate operators `f` and `g`
+### 15.4 The conjugate operators `f` and `g`
 
 Megatron-LM names the two synchronisation points. They are the
-`broadcast`/`reduce` adjoint pair of section 9.4, specialised:
+`broadcast`/`reduce` adjoint pair of section 12.4, specialised:
 
 ```
 f  :  identity in forward,   all_reduce in backward     (block input)
@@ -2654,7 +4002,7 @@ into the previous block, it is an `all_reduce`. Free forward, collective
 backward.
 
 **Deriving `g`.** At the block output, `Z = sum_i Z_i`. Forward, that is the
-`all_reduce` of 12.2. Backward, `dZ/dZ_i = I` for every `i`, so
+`all_reduce` of 15.2. Backward, `dZ/dZ_i = I` for every `i`, so
 
 ```
 dL/dZ_i = dL/dZ
@@ -2663,7 +4011,7 @@ dL/dZ_i = dL/dZ
 and every rank already holds `dL/dZ` — it came out of the `all_reduce`'s
 adjoint on the downstream side. Collective forward, free backward.
 
-The two are conjugates in the precise sense of 9.3: `f = g*`. The toy records
+The two are conjugates in the precise sense of 12.3: `f = g*`. The toy records
 this directly. `PARALLEL.strategies.tp.schedule` step 1 is an op of type
 `"none"` with the note *"No communication. The column split leaves each GPU
 with whole output units, and ReLU is elementwise, so it runs on the shard
@@ -2671,7 +4019,7 @@ untouched"*, and step 5 is the matching backward `all_reduce` of `dL/dinput`
 with the note *"Forward's no-op becomes backward's all-reduce, and vice versa
 — the two are conjugates."*
 
-### 12.5 Numerical verification
+### 15.5 Numerical verification
 
 `parallel_toy.py:run_tensor_parallel` pairs the toy's four layers into two
 column-then-row blocks — layers `(0,1)` and `(2,3)` — shards each 8-wide
@@ -2686,7 +4034,7 @@ claim           = "Summing the per-GPU partial products reproduces the
                    single-GPU forward pass exactly."
 ```
 
-`6.938893903907228e-18` is exactly `2^-57`. As with DDP in 10.3, this is a
+`6.938893903907228e-18` is exactly `2^-57`. As with DDP in 13.3, this is a
 single rounding, not a drift: the four partial products are added in a
 different order than the single-rank contraction, and one addition landed on
 the other side of a tie. **Tensor parallelism computes the same numbers.**
@@ -2714,13 +4062,13 @@ Two forward all-reduces (one per block, at the row-parallel layer) and two
 backward all-reduces (one per block, at the column-parallel layer input) —
 `f` and `g` firing once each per block. Total 126 elements sent per rank
 against DDP's 289.5, and per-rank model state of 192 elements against DDP's
-772 (11.2).
+772 (14.2).
 
 The toy's two blocks map onto one real transformer layer: block 0 plays the
 attention sub-layer and block 1 plays the MLP sub-layer. Hence the standard
 count — **two all-reduces forward and two backward per transformer layer.**
 
-### 12.6 Applied to a transformer block
+### 15.6 Applied to a transformer block
 
 A transformer layer is two column-then-row sandwiches, and Megatron shards
 both.
@@ -2741,7 +4089,7 @@ both.
 
 - The up-projection (and the gate projection, for SwiGLU) is
   **column-parallel**, splitting the `d_ff` axis.
-- The nonlinearity is elementwise and runs on the shard untouched — 12.3.
+- The nonlinearity is elementwise and runs on the shard untouched — 15.3.
 - The down-projection is **row-parallel** over the same `d_ff` axis.
 - One `all_reduce` at the end — `g` again.
 
@@ -2784,26 +4132,14 @@ without sequence parallelism:   s·b·h·( 10 + 24/t + 5·a·s/(h·t) )
 with sequence parallelism:      s·b·h·( 34/t + 5·a·s/(h·t) )
 ```
 
-**Sequence parallelism** (Korthikanti et al., 2022) closes that gap. The
-observation is that LayerNorm and dropout are independent *per token*: they
-reduce over `h` but never over `s`. So in the regions where the hidden axis
-must stay whole, shard the *sequence* axis instead — rank `i` holds tokens
-`shard(i)` at full width. The `g` operator's `all_reduce` at the block output
-then becomes a `reduce_scatter` (sum, and land in sequence-sharded layout),
-and the `f` operator's entry point becomes an `all_gather` (back to
-hidden-sharded layout). By 9.2 those two together cost exactly one
-`all_reduce`:
+That `10` is a floor no amount of tensor parallelism can move: raising `t`
+from 1 to 32 divides one term by 32 and the other by 1. **Sequence
+parallelism** (Korthikanti et al., 2022) is what removes it, and it is free in
+bandwidth for the same reason ZeRO stage 2 was — an identity from 12.2 that
+lets you split a collective in half and do useful work in the gap. It is the
+whole of section 16, with its own generator and its own numerical check.
 
-```
-reduce_scatter + all_gather  =  2·(N-1)/N·S  =  all_reduce
-```
-
-**So sequence parallelism is free in bandwidth and removes the replicated
-`10·s·b·h`.** It is one of the few genuinely free wins in this document, and
-like ZeRO stage 2 it is free for the same reason: an identity from 9.2 that
-lets you split a collective and use both halves for something.
-
-### 12.7 The communication volume, and why TP stays inside a node
+### 15.7 The communication volume, and why TP stays inside a node
 
 Per transformer layer, per microbatch, tensor parallelism moves 4 all-reduces
 (2 forward, 2 backward) of `s·b·h` elements each. In ring terms, bytes sent
@@ -2824,7 +4160,7 @@ x 80 layers      =                        75.2 GB per microbatch (whole model)
 ```
 
 Now the comparison that decides the topology. Take a pipeline stage of 20
-layers (the `PP = 4` recipe of 14.3), so each rank moves
+layers (the `PP = 4` recipe of 18.3), so each rank moves
 `939.5 MB × 20 = 18.79 GB` per microbatch, and compare against its compute for
 the same microbatch:
 
@@ -2850,7 +4186,7 @@ fabrics — is the load-bearing part, and it is robust to any plausible choice.
 
 Fifteen percent is a tax. A hundred and thirty-nine percent is a
 reclassification: the GPU spends more than half its time waiting on the
-network. And unlike DDP's all-reduce (10.5), **none of this is overlappable**,
+network. And unlike DDP's all-reduce (13.5), **none of this is overlappable**,
 because the next matmul consumes the reduced result directly. There is no
 independent work to hide it behind.
 
@@ -2862,7 +4198,270 @@ where the model's own structure stops cooperating.
 
 ---
 
-## 13. Pipeline parallelism
+## 16. Sequence parallelism
+
+`site/16-sequence-parallel.html` sits directly after the tensor-parallel page
+for the same reason this section sits directly after section 15: it removes
+exactly the activations tensor parallelism leaves behind.
+
+Its ground truth is `assets/data/seqpar.json`, written by
+`code/sequence_parallel.py` (`SEQPAR` below), under the same rules as
+everything else here. It runs one `LayerNorm → MLP → residual` region three
+ways — on one rank, under tensor parallelism, and under tensor plus sequence
+parallelism — and checks all three against each other.
+`SEQPAR.meta`: `seq = 4`, `d_model = 4`, `d_ff = 8`, `t = 2`, so the sequence
+divides evenly by the tensor-parallel degree and every tensor prints.
+
+### 16.1 The observation: what TP leaves replicated
+
+Section 15.6 established the boundary. Tensor parallelism shards the
+**attention** and **MLP** regions of a block; it leaves the **LayerNorm,
+dropout and residual** regions replicated, because a LayerNorm's statistic is
+a reduction over the hidden dimension and sharding that dimension would put a
+collective inside every norm.
+
+`tp_only()` makes the redundancy literal. Every rank runs
+
+```
+ln = [layernorm(X[t], GAIN, BIAS) for t in range(SEQ)]
+```
+
+— the identical computation, over the identical full sequence, producing the
+identical tensor, on every rank. `SEQPAR.tp_only.ranks[*].resident` labels the
+three tensors:
+
+| Tensor | Shape | Elements | Status |
+|---|---|---|---|
+| LN output | `(4, 4)` | 16 | **REPLICATED** — every rank computed the identical tensor |
+| MLP hidden | `(4, 4)` | 16 | sharded — column-parallel `W_in` gives each rank whole neurons |
+| residual stream | `(4, 4)` | 16 | **REPLICATED** — the addition is elementwise; every rank does all of it |
+
+```
+SEQPAR.tp_only.replicated_elements         = 32
+SEQPAR.tp_only.sharded_elements            = 16
+SEQPAR.tp_only.activation_elements_per_rank = 48
+```
+
+Two thirds of the activation memory in this region is untouched by tensor
+parallelism, and — this is the part that matters — *raising `t` does not
+change that*. `TP = 8` divides the weights by 8, divides the MLP hidden state
+by 8, and divides the LayerNorm output and residual stream by **1**. The
+`SEQPAR.tp_only.note` field says it: *"Raising TP does not shrink those at
+all."*
+
+### 16.2 The idea: nothing in those regions mixes tokens
+
+Look at what actually happens in the replicated regions:
+
+```
+LayerNorm   reduces over the hidden axis, independently per token
+dropout     elementwise, independently per element
+residual    elementwise addition, independently per element
+```
+
+**None of them mixes tokens.** Token `t`'s LayerNorm output depends on token
+`t`'s hidden vector and on nothing else in the sequence — that is exactly the
+property derived in 9.3, and it is why LayerNorm cannot be hidden-sharded.
+The same property that blocks one axis opens the other: if no operation in
+these regions reads across the sequence, the sequence is a free axis to cut.
+
+So shard it. Rank `r` owns sequence rows `[r·s/t, (r+1)·s/t)` at **full hidden
+width**, and computes the LayerNorm, the dropout and the residual add for its
+own tokens only. Tensor parallelism keeps the sequence whole and cuts the
+hidden dimension; sequence parallelism keeps the hidden dimension whole and
+cuts the sequence. The two are complementary cuts of the same tensor, using
+the same `t` ranks and the same communicator group.
+
+`SEQPAR.tp_plus_sp.ranks[*].resident`, at `t = 2`:
+
+| Tensor | Shape | Elements | Status |
+|---|---|---|---|
+| LN output | `(2, 4)` | 8 | sharded by SEQ |
+| MLP hidden | `(4, 4)` | 16 | sharded by HIDDEN (unchanged from TP) |
+| residual stream | `(2, 4)` | 8 | sharded by SEQ |
+
+```
+SEQPAR.memory.tp_only_per_rank = 48
+SEQPAR.memory.tp_sp_per_rank   = 32
+SEQPAR.memory.saved            = 16      (33.3%)
+```
+
+`SEQPAR.tp_plus_sp.note`: *"Every activation in the block is now sharded along
+one axis or the other. Nothing is replicated."*
+
+### 16.3 The transitions, and why they are free
+
+A sequence-sharded region and a hidden-sharded region want different layouts,
+so something has to happen at each boundary.
+
+**Entering the TP region (SP → TP).** The column-parallel matmul contracts
+over the hidden dimension, so every rank needs every token's full hidden
+vector. Rank `r` holds only its own sequence shard. The transition is an
+**`all_gather` along the sequence axis**.
+
+**Leaving the TP region (TP → SP).** The row-parallel matmul leaves every rank
+holding a *full-shape partial sum* (15.2), which must be added. But the
+result is only needed one sequence shard at a time. Summing and then
+distributing shards is one operation: a **`reduce_scatter` along the sequence
+axis**.
+
+`SEQPAR.tp_plus_sp.schedule` is those three steps:
+
+| Step | Op | Region | Elements | Why |
+|---|---|---|---|---|
+| 1 | `none` | SP | 0 | LayerNorm is per-token: rank `r` normalises only its own rows and needs nothing from anyone. This is the work TP was duplicating. |
+| 2 | `all_gather` | SP → TP | 16 | the TP region needs the full sequence |
+| 3 | `reduce_scatter` | TP → SP | 16 | the partials must be added *and* the result is only needed one shard at a time, so one collective does both |
+
+Now the result. Tensor parallelism alone pays for one `all_reduce` at the
+row-parallel layer (`SEQPAR.tp_only.collectives`). And by the decomposition
+identity of 12.2:
+
+```
+all_reduce  =  reduce_scatter  ;  all_gather
+```
+
+**The two collectives sequence parallelism needs are the two halves of the one
+collective tensor parallelism was already running.** SP does not add a
+collective; it splits an existing one and does useful sharding in the gap
+between the halves.
+
+`comm_argument()` charges both with the ring costs of 12.5 and prints the
+comparison. At `t = 2` on a payload of `S = seq·d_model = 16` elements
+(`SEQPAR.communication`):
+
+| Strategy | Ops | Sent per rank |
+|---|---|---|
+| TP only | `all_reduce` | `2(N-1)/N · S` = **16.0** |
+| TP + SP | `all_gather` + `reduce_scatter` | `0.5·16 + 0.5·16` = **16.0** |
+
+```
+SEQPAR.communication.tp_total_sent = 16.0
+SEQPAR.communication.sp_total_sent = 16.0
+SEQPAR.communication.identical     = true
+```
+
+Identical, not "comparable". The bandwidth is the same to the element, and the
+memory is strictly less. This is the third genuinely free result in this
+document, after ZeRO stage 2 (14.3) and the column-then-row ordering (15.3),
+and all three are the same identity being used a different way.
+
+**The honest caveat, stated by the generator itself**
+(`SEQPAR.communication.caveat`): *"Latency is not free: two collectives have
+two launch and sync costs where one had one. On short sequences that can
+outweigh the memory win."* Under the α-β model of 12.6 the bandwidth terms are
+equal by construction, but the `α` term doubles — two kernel launches, two
+synchronisations, two ring traversals of `N-1` hops each instead of `2(N-1)`
+in one call. Whether that matters depends on `s·b·h` per boundary against the
+latency-bandwidth product of the link, exactly as in 12.6, and it is why the
+win is described as "close to free" rather than "free".
+
+### 16.4 Numerical verification
+
+`SEQPAR.equivalence`:
+
+```
+tp_err  = 5.551115123125783e-17
+sp_err  = 5.551115123125783e-17
+passed  = true
+claim   = "Both reproduce the single-GPU output exactly. Sequence
+           parallelism changes where activations live, never what
+           is computed."
+```
+
+Both errors are exactly `2^-54` — one rounding at magnitude ~1, the same
+residue as the data-parallel check of 13.3 and the FlashAttention backward of
+11.5. The partial sums are added in a different order than a single rank would
+add them, one addition rounded the other way, and that is the entire
+difference. `main()` raises `SystemExit("EQUIVALENCE FAILED")` otherwise.
+
+### 16.5 At scale: the replicated floor
+
+`at_scale()` uses the per-layer coefficients from Korthikanti et al. (2022),
+Table 2. **These coefficients are quoted, not derived here** —
+`SEQPAR.at_scale._source` says so explicitly, and the same caveat attaches to
+the `34 + 5·a·s/h` formula used in section 4.2 and 15.6. What *is* computed
+here is the arithmetic on top of them.
+
+```
+TP only :  s·b·h·( 10 + 24/t )  per layer
+TP + SP :  s·b·h·(      34/t )  per layer
+```
+
+Bytes per token per layer (`SEQPAR.at_scale.table`, every value a literal
+field):
+
+| `t` | TP only | TP + SP | saving |
+|---|---|---|---|
+| 1 | 34.0 | 34.0 | 0.0% |
+| 2 | 22.0 | 17.0 | 22.7% |
+| 4 | 16.0 | 8.5 | 46.9% |
+| 8 | **13.0** | **4.25** | **67.3%** |
+| 16 | 11.5 | 2.125 | 81.5% |
+| 32 | 10.75 | 1.062 | 90.1% |
+
+Three readings.
+
+**They agree exactly at `t = 1`.** `10 + 24/1 = 34` and `34/1 = 34`. They must:
+with one rank there is nothing to shard and nothing to replicate, so any
+correct pair of formulas has to coincide there. It is a free consistency check
+on the coefficients, and it is the reason the split is `10 + 24` and not some
+other partition of 34.
+
+**TP-only asymptotes at 10.** `lim_{t→∞} (10 + 24/t) = 10`. That is the
+replicated floor made arithmetic: past `t = 8` the sharded term is already
+below the replicated one, and every further GPU you add to the tensor-parallel
+group buys you less and less. At `t = 32` you have spent 32 GPUs to get from 34
+bytes per token per layer to 10.75.
+
+**TP+SP has no floor.** `34/t` keeps dividing. At `t = 8` — the practical
+maximum imposed by NVLink domain width and by `n_kv_heads` (15.6) — sequence
+parallelism is worth **67.3%** of the region's activation memory, for zero
+extra bytes on the wire. That is why Megatron turns it on by default whenever
+tensor parallelism is on, and why section 18.3's activation budget uses the
+`34/t` form.
+
+The consequence for section 18: with SP on, a pipeline stage's boundary
+tensors are themselves sequence-sharded, so pipeline `p2p` payloads also drop
+by a factor of `t` — the parenthetical at the end of 17.5.
+
+### 16.6 Sequence parallelism is not context parallelism
+
+Two different things are called "sequence parallelism" in the literature and
+they are not interchangeable. The distinction is worth stating precisely,
+because it decides which one you can turn on for free.
+
+**Sequence parallelism (this section; Korthikanti et al., 2022).** Shards the
+sequence axis only in the regions where the hidden axis must stay whole —
+LayerNorm, dropout, residual. Attention itself still runs on the *full*
+sequence on every rank, because the TP region gathers it back. So:
+
+- it needs no new communication, only a re-use of TP's existing all-reduce;
+- it does not extend the maximum context length, since the `seq × seq`
+  attention is unchanged;
+- it uses the tensor-parallel group and degree, so it is not a fourth axis in
+  the factorisation of 18.1.
+
+**Context parallelism / ring attention.** Shards the sequence axis *through
+the attention computation itself*. Rank `r` holds only its own queries, keys
+and values, so computing attention requires every rank's keys and values to
+meet every rank's queries — which is arranged as a ring exchange: each rank
+passes its `K`/`V` block to its neighbour and accumulates partial attention
+outputs, `N` steps around the ring. The online-softmax machinery of 11.2 is
+what makes those partial results combinable, which is not a coincidence: ring
+attention is FlashAttention's accumulator distributed across devices instead
+of across tiles.
+
+So context parallelism *is* a genuine extra axis, it *does* extend the maximum
+trainable context (this is what makes 128K-token training possible), and it
+*does* cost real communication — `O(s·b·h/N)` per ring step for `N` steps,
+overlappable with the attention compute but not free. Section 18.4 lists it as
+one of the axes not simulated in this repository; sequence parallelism, by
+contrast, now is.
+
+---
+
+## 17. Pipeline parallelism
 
 `site/17-pipeline-parallel.html` animates the grid below filling and draining.
 
@@ -2880,12 +4479,12 @@ not even a reordered summation to round differently.
 
 The cost is not arithmetic. It is idleness.
 
-### 13.1 The bubble, derived
+### 17.1 The bubble, derived
 
 `P` stages, `M` microbatches. Microbatch `m` cannot start on stage `s` until
 it has finished on stage `s-1`, and stage `s` cannot start microbatch `m`
 until it has finished microbatch `m-1`. Take one microbatch-on-one-stage as
-the unit of time (assume the stages are balanced — 13.4 revisits that). Then
+the unit of time (assume the stages are balanced — 17.4 revisits that). Then
 the earliest slot at which stage `s` can begin microbatch `m` is
 
 ```
@@ -2955,11 +4554,11 @@ never used.
 
 The catch is that `M` is not free. The global batch is
 `DP × M × microbatch_size`, so driving the bubble down by raising `M` inflates
-the global batch, and section 10.4's critical-batch-size ceiling is waiting at
+the global batch, and section 13.4's critical-batch-size ceiling is waiting at
 the other end. Pipeline depth is bounded above by what your convergence
 budget will tolerate in batch size.
 
-### 13.2 GPipe versus 1F1B: same bubble, different memory
+### 17.2 GPipe versus 1F1B: same bubble, different memory
 
 The grid above is the **GPipe** order: all `M` forwards, then all `M`
 backwards. (`parallel_toy.py:build_pipeline_grid` is docstring'd as 1F1B, but
@@ -3015,7 +4614,7 @@ The asymmetry `in_flight(s) = P - s` also means stage 0 is the memory
 bottleneck: it holds `P` microbatches while the last stage holds one. Some
 implementations exploit this by giving stage 0 fewer layers.
 
-### 13.3 Interleaving: virtual stages
+### 17.3 Interleaving: virtual stages
 
 The bubble `(P-1)/(M+P-1)` has `P-1` in the numerator because fill and drain
 cost one *stage-time* each. Interleaved 1F1B (Narayanan et al., 2021) attacks
@@ -3032,7 +4631,7 @@ bubble_interleaved = (P - 1) / ( v·M + P - 1 )
 ```
 
 The bubble falls by roughly the factor `v`. For the `P = 4`, `M = 16`
-configuration of 14.3 (arithmetic on the formula):
+configuration of 18.3 (arithmetic on the formula):
 
 ```
 v = 1:   3 / (16 + 3)  = 15.8%
@@ -3042,14 +4641,14 @@ v = 4:   3 / (64 + 3)  =  4.5%
 
 What it costs: every chunk boundary is a device boundary, so the number of
 point-to-point messages per microbatch multiplies by `v`, each one carrying
-the same `s·b·h` payload. Section 13.5 shows there is a lot of headroom for
+the same `s·b·h` payload. Section 17.5 shows there is a lot of headroom for
 that, which is why the trade is usually worth taking. It also complicates the
 schedule considerably and interacts badly with anything that assumes
 contiguous layer ownership.
 
-### 13.4 Load imbalance
+### 17.4 Load imbalance
 
-The derivation in 13.1 assumed every stage takes the same time. Nothing
+The derivation in 17.1 assumed every stage takes the same time. Nothing
 enforces that, and the slowest stage sets the clock for all of them — a
 pipeline runs at the rate of its slowest stage, so a 20% overloaded stage
 costs 20% *everywhere*, on top of the bubble.
@@ -3090,7 +4689,7 @@ in the sharded space (Megatron's vocab-parallel cross-entropy, which reduces a
 scalar per token instead of gathering the logits); and chunk the loss
 computation over the sequence.
 
-### 13.5 Why pipeline parallelism tolerates slow links
+### 17.5 Why pipeline parallelism tolerates slow links
 
 Every other strategy here communicates with collectives. Pipeline parallelism
 communicates with `send`/`recv` between adjacent stages, and that difference
@@ -3130,11 +4729,11 @@ one boundary tensor       = s·b·h·2 bytes = 134.2 MB
 per rank per microbatch   = one forward send + one backward send = 268.4 MB
 per rank per step (M=16)  = 4.29 GB
 at an assumed 50 GB/s     = 0.086 s
-against ~4.3 s of step compute (14.3)   ->  2%
+against ~4.3 s of step compute (18.3)   ->  2%
 ```
 
 Two percent, on the slowest link in the machine. Compare tensor parallelism's
-139% on the same link (12.7). **This is why the 3D layout puts pipeline
+139% on the same link (15.7). **This is why the 3D layout puts pipeline
 parallelism across nodes**: it is the only axis whose communication is small
 enough, rare enough, and asynchronous enough to survive there.
 
@@ -3144,12 +4743,12 @@ the payload drops by a further factor of `t` — 0.537 GB per rank per step at
 
 ---
 
-## 14. Composing them
+## 18. Composing them
 
 `site/19-3d-parallelism.html` lets you factor a world size and see the
 resulting per-GPU budget.
 
-### 14.1 The factorisation
+### 18.1 The factorisation
 
 The three axes are orthogonal, in the precise sense that each cuts a different
 index of the problem:
@@ -3168,7 +4767,7 @@ world = TP × PP × DP
 
 Each rank gets a coordinate `(t, p, d)` with `0 <= t < TP`, `0 <= p < PP`,
 `0 <= d < DP`, and — with `TP` innermost, which is the layout every framework
-uses and 14.2 justifies — the flat rank id is
+uses and 18.2 justifies — the flat rank id is
 
 ```
 rank = d·(PP·TP) + p·TP + t
@@ -3193,10 +4792,10 @@ the TP group is contiguous in rank id (so it maps onto one node).
 
 `parallel_toy.py` simulates each axis in isolation; the composition is
 arithmetic on top and **is not simulated in `parallel.json`.** The numbers in
-14.3 are derived from `T.reference_configs` and `T.memory.recipes` plus the
-formulas of sections 11-13, and I say where each comes from.
+18.3 are derived from `T.reference_configs` and `T.memory.recipes` plus the
+formulas of sections 14-17, and I say where each comes from.
 
-### 14.2 The topology argument
+### 18.2 The topology argument
 
 Why `TP` innermost, `DP` outermost, `PP` across nodes? Three properties
 decide it, and they point the same way.
@@ -3212,19 +4811,19 @@ magnitude (75.2 GB per microbatch for a 70B model at `t = 8`, versus 4.3 GB
 per *step* for pipeline), it fires four times per layer, and it is
 fundamentally non-overlappable: the `all_reduce` at the end of the MLP block
 produces the input to the next LayerNorm, and there is no independent work to
-interleave. The only lever left is to make the link fast. 12.7's arithmetic:
+interleave. The only lever left is to make the link fast. 15.7's arithmetic:
 15% overhead on NVLink, 139% on InfiniBand.
 
 **DP goes outermost, on whatever is left.** Its traffic is large in absolute
 terms but it happens *once per step*, it is not on the critical path of any
-layer, and 10.5 showed the exposed fraction is `1/K` with bucketing. A
+layer, and 13.5 showed the exposed fraction is `1/K` with bucketing. A
 gradient all-reduce that takes 88 ms on a slow fabric costs nearly nothing if
 it hides behind 4 seconds of backward pass. DP is the axis that tolerates the
 worst link, so it is the one that gets stretched across the most switch hops.
 
 **PP goes across nodes.** It has the smallest payload of the three, it is
 point-to-point rather than collective, and the pipeline structure already
-provides the overlap. 13.5's arithmetic: 2% overhead on the slow fabric. It is
+provides the overlap. 17.5's arithmetic: 2% overhead on the slow fabric. It is
 also the axis with the *fewest* messages: `P-1` boundaries, not `n_layers`
 collectives.
 
@@ -3232,7 +4831,7 @@ collectives.
 critical-path profile with DP's group membership — the worst of both. Running
 pure ZeRO-3 across a slow inter-node fabric puts `3·(N-1)/N·Psi` of
 latency-sensitive, non-overlappable traffic in exactly the wrong place. That
-is what `HYBRID_SHARD` (11.5) exists to fix: shard within the node, replicate
+is what `HYBRID_SHARD` (14.5) exists to fix: shard within the node, replicate
 across it, so the frequent collectives stay fast and the inter-node traffic
 reverts to one DDP-style all-reduce per step.
 
@@ -3240,7 +4839,7 @@ The general rule, worth extracting: **sort your parallelism axes by
 communication intensity and your network links by bandwidth, then match them
 in order.**
 
-### 14.3 A worked recipe: 70B on 64 H100s
+### 18.3 A worked recipe: 70B on 64 H100s
 
 Model and device from `T.reference_configs` (`_source`: *"published model
 architecture parameters; external to this model, quoted not derived"*):
@@ -3282,7 +4881,7 @@ and that is what is used from here on.)
 ```
 
 `TP = 8` because that is the NVLink domain width and also `n_kv_heads`
-(12.6). `PP = 4` gives `80/4 = 20` layers per stage, an exact division.
+(15.6). `PP = 4` gives `80/4 = 20` layers per stage, an exact division.
 `DP = 2` is what is left; ZeRO stage 1 is applied along it, sharding the
 optimizer state across the 2 data-parallel replicas.
 
@@ -3300,18 +4899,18 @@ optimizer (K=12)  = 2.206e9 × 12         = 26.48 GB
 model state per GPU                      = 22.06 GB
 ```
 
-Sanity check against 11.1: the ZeRO-1 formula `2Psi + 2Psi + K·Psi/N` applied
+Sanity check against 14.1: the ZeRO-1 formula `2Psi + 2Psi + K·Psi/N` applied
 to the per-GPU parameter count `2.206e9` with `N = DP = 2` gives
 `(2 + 2 + 6) × 2.206e9 = 22.06 GB`. ✓
 
 Without ZeRO-1 it would be 35.3 GB — sharding the optimizer state along the
 one remaining axis is worth 13.2 GB per GPU for zero extra communication
-(11.3).
+(14.3).
 
 **Step 3 — activation memory per GPU.**
 
 Using Korthikanti et al.'s per-layer formula with tensor and sequence
-parallelism (*literature*, section 12.6), and assuming FlashAttention so the
+parallelism (*literature*, section 15.6), and assuming FlashAttention so the
 `5·a·s/(h·t)` attention-matrix term vanishes (section 4.2):
 
 ```
@@ -3319,7 +4918,7 @@ s·b·h                         = 8192 · 1 · 8192      = 67.1e6
 per layer, no parallelism     = 34 · 67.1e6          =  2.28 GB
 per layer, ÷ TP = 8           =                         0.285 GB
 × 20 layers per stage         =                         5.70 GB  per microbatch
-× P = 4 microbatches in flight (1F1B, stage 0, 13.2)  = 22.82 GB
+× P = 4 microbatches in flight (1F1B, stage 0, 17.2)  = 22.82 GB
 ```
 
 **Step 4 — the budget.**
@@ -3333,7 +4932,7 @@ activations           22.82 GB
 
 41 GB of headroom for allocator fragmentation, CUDA context, NCCL buffers, the
 gathered-parameter prefetch buffer, and kernel workspace — all of which are
-real and none of which are in the arithmetic above (section 15.1). Fifty
+real and none of which are in the arithmetic above (section 19.1). Fifty
 percent headroom is roughly what a configuration needs to actually run.
 
 **Step 5 — the batch and the bubble.**
@@ -3341,8 +4940,8 @@ percent headroom is roughly what a configuration needs to actually run.
 ```
 global batch  = DP × M × microbatch = 2 × 16 × 1 = 32 sequences
               = 32 × 8192 = 262,144 tokens per step
-bubble (13.1) = (P-1)/(M+P-1) = 3/19 = 15.8%
-  interleaved v=2 (13.3)  = 3/35 = 8.6%
+bubble (17.1) = (P-1)/(M+P-1) = 3/19 = 15.8%
+  interleaved v=2 (17.3)  = 3/35 = 8.6%
 ```
 
 **Step 6 — the communication, all three axes.**
@@ -3370,8 +4969,8 @@ overlappable, TP is not.
 
 **Every bandwidth and FLOP-rate figure in Step 6 is an assumed spec-sheet
 value, not present in either data file.** The volumes are derived: from
-`T.reference_configs` dimensions, the ring factors of 9.5, and the per-layer
-counts of 12.7 and 13.5.
+`T.reference_configs` dimensions, the ring factors of 12.5, and the per-layer
+counts of 15.7 and 17.5.
 
 **Step 7 — what to change if it does not fit.** In rough order of what to
 reach for:
@@ -3382,22 +4981,24 @@ reach for:
    floor at stage 3, at 1.5x traffic on the axis that tolerates it best.
 3. Turn on activation recomputation at block boundaries — `+33%` step time for
    most of the activation memory (section 4.3).
-4. Raise `TP` past the node width — last resort, because 12.7 says the
+4. Raise `TP` past the node width — last resort, because 15.7 says the
    overhead goes from 15% to over 100% the moment a TP group crosses a node.
 
-### 14.4 Axes not simulated here
+### 18.4 Axes not simulated here
 
-Three further factorisations exist. All three are **outside
-`parallel.json`** — nothing below is simulated or numerically verified by
-`parallel_toy.py`, and I flag it rather than smuggling it in beside the
-checked numbers.
+Three further factorisations exist beyond `TP × PP × DP`. One of them —
+sequence parallelism — has since been given its own generator and its own
+section; the other two are **outside every data file in this repository**, and
+I flag them rather than smuggling them in beside the checked numbers.
 
 - **Sequence parallelism (SP).** Not really a fourth axis: it is a
   modification *of* tensor parallelism that shards the block-boundary tensors
   along the sequence axis in the regions where the hidden axis must stay
-  whole (12.6). Same group, same degree `t`, same bandwidth (`reduce_scatter +
-  all_gather = all_reduce`, by 9.2), and it removes the replicated
-  `10·s·b·h` per layer. Essentially always on when TP is on.
+  whole (15.6). Same group, same degree `t`, same bandwidth (`reduce_scatter +
+  all_gather = all_reduce`, by 12.2), and it removes the replicated
+  `10·s·b·h` per layer. Essentially always on when TP is on. It is **not**
+  simulated by `parallel_toy.py`, but it *is* simulated and numerically
+  verified by `code/sequence_parallel.py` — section 16.
 - **Context parallelism (CP), also called sequence parallelism in a different
   sense.** A genuine fourth axis that shards the sequence dimension across
   ranks *through the attention computation*, which requires exchanging keys
@@ -3407,7 +5008,7 @@ checked numbers.
   steps, overlappable with the attention compute.
 - **Expert parallelism (EP).** For mixture-of-experts models, the experts of
   one MoE layer are distributed across ranks and each token is routed to its
-  chosen expert(s). The communication primitive is `all_to_all` (9.1) —
+  chosen expert(s). The communication primitive is `all_to_all` (12.1) —
   tokens out to the ranks holding their experts, results back — twice per MoE
   layer. It is the only place in mainstream training where `all_to_all` is on
   the critical path, and its cost depends on the *routing distribution*, so it
@@ -3417,16 +5018,16 @@ checked numbers.
 
 A frontier MoE training job may therefore factor its world as
 `TP × CP × PP × DP × EP`, with the expert dimension overlaid on the data
-dimension. The ordering principle of 14.2 is unchanged: sort the axes by
+dimension. The ordering principle of 18.2 is unchanged: sort the axes by
 communication intensity, sort the links by bandwidth, and match them up.
 
 ---
 
-## 15. Caveats and further reading
+## 19. Caveats and further reading
 
-### 15.1 What these estimates omit
+### 19.1 What these estimates omit
 
-Every byte figure in sections 8, 11 and 14 is a **first-order lower bound**.
+Every byte figure in sections 8, 14 and 18 is a **first-order lower bound**.
 Real allocations exceed them, sometimes substantially. In rough order of size:
 
 - **Allocator fragmentation.** PyTorch's caching allocator pools
@@ -3441,9 +5042,9 @@ Real allocations exceed them, sometimes substantially. In rough order of size:
   by processes per node.
 - **Communication buffers.** NCCL allocates internal buffers per
   communicator, and a 3D-parallel job builds *three* communicators per rank
-  (14.1). DDP/FSDP gradient bucketing allocates flat contiguous buffers
+  (18.1). DDP/FSDP gradient bucketing allocates flat contiguous buffers
   *additional* to the gradients themselves; ZeRO-3 prefetch needs a second
-  gathered parameter buffer in flight while the first is in use (11.4).
+  gathered parameter buffer in flight while the first is in use (14.4).
 - **Kernel workspace.** cuBLAS split-k reductions, cuDNN algorithm
   workspaces, fused-attention scratch, and temporaries from any non-fused
   elementwise chain. Transient, but they count against the peak.
@@ -3462,10 +5063,10 @@ optimistic direction:
 - **The ring assumes a homogeneous ring.** As soon as it crosses a node
   boundary, one link in the ring is 9x slower than the rest and sets the pace.
   NCCL's real answer is hierarchical — separate intra-node and inter-node
-  rings, composed — which changes the constants in 9.5 without changing its
+  rings, composed — which changes the constants in 12.5 without changing its
   conclusion.
 - **Sustained bandwidth is not peak bandwidth.** Every bandwidth number in
-  section 12.7 and 14.3 is a spec-sheet figure, explicitly flagged where used.
+  section 15.7 and 18.3 is a spec-sheet figure, explicitly flagged where used.
   Achieved bus bandwidth for a well-tuned NCCL all-reduce is typically 60-80%
   of it, and much less for small messages.
 - **Nothing here models the tail.** A single slow rank — thermal throttling, a
@@ -3474,7 +5075,7 @@ optimistic direction:
   Straggler effects are absent from every formula above and are frequently the
   dominant term in practice.
 
-### 15.2 What these models omit
+### 19.2 What these models omit
 
 The 2-3-1 network of sections 1-8 honestly demonstrates the chain rule, the
 shape rule, the activation-lifetime problem, and the optimizer-state question.
@@ -3482,28 +5083,55 @@ It does not exercise batching (a sum over an axis), normalisation layers
 (cross-element dependencies in backward, and more saved than just the input),
 attention (quadratic in sequence, and the reason FlashAttention exists),
 dropout (its mask must be saved), or weight tying (accumulation into a shared
-gradient buffer). Each adds terms; none changes the structure derived in
-section 3.
+gradient buffer). Sections 9-11 supply the middle two of those; the rest add
+terms and none of them changes the structure derived in section 3.
 
-The four-rank simulation of sections 9-14 proves the algebra and nothing else.
+The 2-block transformer of sections 9-10 supplies normalisation, attention,
+multiple heads, causal masking, a residual stream and a GELU MLP, all checked
+against finite differences. Specifically, `transformer_2layer.py`:
+
+- **Has no embedding and no LM head**, so the vocabulary axis — the single
+  largest tensor in a real model, and the source of the pipeline imbalance
+  derived in 17.4 — is absent. The loss is mean squared error against a fixed
+  target rather than a token-level cross-entropy.
+- **Has no batch axis and no dropout.** Batching adds a sum; dropout adds a
+  saved mask and one of the three tensors section 16 shards.
+- **Is `d_model = 4`, `seq = 3`, untrained.** Every *ratio* computed from it —
+  the activation census of 9.13, the residual contraction factor of 10.5 — is
+  an artifact of that size and is flagged where it is used. Every *structural*
+  claim is not.
+- **Uses LayerNorm, not RMSNorm**, and absolute rather than rotary position
+  handling (in fact no positional encoding at all, since the input is given
+  directly as a `(seq, d_model)` tensor).
+- **Is checked against finite differences only.** There is no PyTorch
+  cross-check of the transformer, unlike the MLP (10.6).
+
+`flash_attention.py` implements one head, one layer, no batch, in Python, and
+proves an algebraic identity — it makes **no** performance measurement
+whatsoever. The `+30%` FLOP figure and the entire SRAM-versus-HBM argument of
+11.6 are quoted, not measured here. `sequence_parallel.py` covers one
+`LayerNorm → MLP → residual` region at `t = 2` with no attention region, no
+dropout tensor, and closed-form ring costs rather than a network.
+
+The four-rank simulation of sections 12-18 proves the algebra and nothing else.
 Specifically, `parallel_toy.py`:
 
 - **Has no network.** It computes payload sizes and applies closed-form ring
   costs; it never measures a transfer, never models latency, congestion,
-  overlap or straggling. Every timing claim in sections 12.7, 13.5 and 14.3 is
+  overlap or straggling. Every timing claim in sections 15.7, 17.5 and 18.3 is
   arithmetic on assumed bandwidths, flagged where it appears.
 - **Uses floor division for shard sizes**, so `193/4` appears as `48` and the
   memory ladder reads `772 / 482 / 337 / 192` rather than the exact
-  `772 / 482.5 / 337.75 / 193` (11.2).
+  `772 / 482.5 / 337.75 / 193` (14.2).
 - **Schedules ZeRO-1 in the naive full-`all_reduce` form**, which makes it
   1.5x DDP rather than the literature's 1.0x. The reason and the reconciliation
-  are in 11.3.
-- **Emits a GPipe schedule from a function named for 1F1B** (13.2). The bubble
+  are in 14.3.
+- **Emits a GPipe schedule from a function named for 1F1B** (17.2). The bubble
   is identical; the memory is not, and the difference is derived rather than
   simulated.
 - **Simulates each axis in isolation.** There is no 3D-parallel run; section
   14 is arithmetic composed on top of the verified single-axis results.
-- **Has no sequence, context or expert parallelism** (14.4), no activation
+- **Has no sequence, context or expert parallelism** (18.4), no activation
   recomputation, no mixed precision (it computes in Python floats throughout,
   which is fp64), and no optimizer step — it verifies the *gradients*, not the
   updates.
@@ -3512,7 +5140,7 @@ What it does prove, numerically and per-strategy, is the only thing that
 actually needs proving: that every one of these strategies computes the same
 numbers as one GPU would.
 
-### 15.3 Papers
+### 19.3 Papers
 
 Roughly this order.
 
@@ -3525,10 +5153,47 @@ Roughly this order.
   (ICLR 2018). The fp32-master-copy and loss-scaling arguments.
 - **Gradient checkpointing** — Chen, Xu, Zhang & Guestrin, *Training Deep Nets
   with Sublinear Memory Cost* (2016). The `sqrt(n)` result.
-- **FlashAttention** — Dao, Fu, Ermon, Rudra & Ré (NeurIPS 2022) and Dao,
-  *FlashAttention-2* (2023). Why the `5*a*s/h` term can be deleted.
 - **Optimizer state compression** — Shazeer & Stern, *Adafactor* (2018);
   Dettmers et al., *8-bit Optimizers via Block-wise Quantization* (2022).
+
+**The transformer.**
+
+- **The architecture** — Vaswani, Shazeer, Parmar, Uszkoreit, Jones, Gomez,
+  Kaiser & Polosukhin, *Attention Is All You Need* (NeurIPS 2017). Source of
+  scaled dot-product attention and of the `1/√d_head` argument reproduced in
+  9.6. Note that it specifies **post**-LN.
+- **Pre-LN placement** — Xiong, Yang, He, Zheng, Zheng, Xing, Zhang, Lan, Wang
+  & Liu, *On Layer Normalization in the Transformer Architecture* (ICML 2020).
+  Why moving the norm inside the branch removes the need for a warm-up
+  schedule; the structural half of that argument is derived in 10.5.
+- **LayerNorm** — Ba, Kiros & Hinton, *Layer Normalization* (2016), and
+  Zhang & Sennrich, *Root Mean Square Layer Normalization* (NeurIPS 2019) for
+  the RMSNorm variant that drops the mean-subtraction term of 10.1.
+- **Residual connections** — He, Zhang, Ren & Sun, *Deep Residual Learning for
+  Image Recognition* (CVPR 2016), and *Identity Mappings in Deep Residual
+  Networks* (ECCV 2016) for the clean-identity-path analysis that 10.5
+  measures.
+- **GELU** — Hendrycks & Gimpel, *Gaussian Error Linear Units* (2016). The
+  tanh approximation differentiated in 10.4 is equation (2) there.
+
+**Making attention fit.**
+
+- **FlashAttention** — Dao, Fu, Ermon, Rudra & Ré, *FlashAttention: Fast and
+  Memory-Efficient Exact Attention with IO-Awareness* (NeurIPS 2022). The
+  online-softmax recurrence of 11.2, the exactness claim of 11.4, the
+  `p_ij = exp(s_ij − lse_i)` recomputation of 11.5, and the IO-awareness
+  argument of 11.6 — the word *exact* is in the title for a reason. Its
+  antecedent is Milakov & Gimelshein, *Online normalizer calculation for
+  softmax* (2018), which is where the running-max recurrence itself comes from.
+- **FlashAttention-2** — Dao (2023). Reorganises the loop order and the
+  partitioning of work across warps to cut non-matmul operations; roughly a
+  2x kernel speedup over the original at the same numerics. (FlashAttention-3,
+  Shah et al. 2024, does the Hopper-specific version with asynchrony and FP8;
+  outside the scope of section 11.)
+- **Ring attention** — Liu, Zaharia & Abbeel, *Ring Attention with Blockwise
+  Transformers for Near-Infinite Context* (2023). The distributed cousin of
+  11.2, and the context parallelism distinguished from sequence parallelism in
+  16.6.
 
 **Collectives.**
 
@@ -3539,61 +5204,76 @@ Roughly this order.
   write-up, *Bringing HPC Techniques to Deep Learning* (2017), and its
   productisation is Sergeev & Del Balso, *Horovod: fast and easy distributed
   deep learning in TensorFlow* (2018). Source of the `2(N-1)/N · S` result
-  derived in 9.5.
+  derived in 12.5.
 
 **Sharding the state.**
 
 - **ZeRO** — Rajbhandari, Rajbhandari, Ruwase & He, *ZeRO: Memory
   Optimizations Toward Training Trillion Parameter Models* (SC 2020). Table 1
-  is the per-stage memory accounting derived in 11.1; section 7 is the
-  communication analysis behind 11.3 and 11.4. Then *ZeRO-Infinity* (2021) for
+  is the per-stage memory accounting derived in 14.1; section 7 is the
+  communication analysis behind 14.3 and 14.4. Then *ZeRO-Infinity* (2021) for
   the offload hierarchy.
 - **PyTorch FSDP** — Zhao et al., *PyTorch FSDP: Experiences on Scaling Fully
   Sharded Data Parallel* (VLDB 2023). The engineering as distinct from the
   algorithm: `FlatParameter`, wrapping policies, prefetch, `HYBRID_SHARD`
-  (11.5).
+  (14.5).
 
 **Sharding the model.**
 
 - **Megatron-LM tensor parallelism** — Shoeybi, Patwary, Puri, LeGresley,
   Casper & Catanzaro, *Megatron-LM: Training Multi-Billion Parameter Language
-  Models Using Model Parallelism* (2019). The column-then-row split of 12.3
-  and the `f`/`g` conjugate operators of 12.4.
-- **Reducing activation recomputation** — Korthikanti, Casper, Lym, McAfee,
+  Models Using Model Parallelism* (2019). The column-then-row split of 15.3
+  and the `f`/`g` conjugate operators of 15.4.
+- **Megatron-LM sequence parallelism** — Korthikanti, Casper, Lym, McAfee,
   Andersch, Shoeybi & Catanzaro, *Reducing Activation Recomputation in Large
-  Transformer Models* (2022). Source of the `s*b*h*(34 + 5*a*s/h)` formula in
-  section 4.2, of its tensor- and sequence-parallel refinements in 12.6, and of
-  sequence parallelism itself.
+  Transformer Models* (2022). This is the sequence-parallelism paper, and it
+  is also the source of the activation accounting used throughout: the
+  `s*b*h*(34 + 5*a*s/h)` formula of section 4.2, its tensor-parallel
+  refinement `10 + 24/t` and sequence-parallel refinement `34/t` in 15.6, and
+  the Table 2 coefficients tabulated in 16.5. Section 16 derives the
+  communication argument (`reduce_scatter + all_gather = all_reduce`) and
+  verifies it; the coefficients themselves are quoted from the paper and are
+  marked as such wherever they appear. Its companion is the selective
+  activation recomputation scheme, which recomputes only the attention region
+  — the cheap-to-recompute, expensive-to-store part identified in 9.13 — and
+  which section 4.3's uniform-cost model does not capture.
 
 **Sharding the depth.**
 
 - **GPipe** — Huang, Cheng, Bapna, Firat, Chen, Chen, Lee, Ngiam, Le, Wu &
   Chen, *GPipe: Efficient Training of Giant Neural Networks using Pipeline
-  Parallelism* (NeurIPS 2019). The bubble analysis of 13.1 and the `O(M)`
-  activation peak of 13.2.
+  Parallelism* (NeurIPS 2019). The bubble analysis of 17.1 and the `O(M)`
+  activation peak of 17.2.
 - **PipeDream / 1F1B** — Narayanan, Harlap, Phanishayee, Seshadri, Devanur,
   Ganger, Gibbons & Zaharia, *PipeDream: Generalized Pipeline Parallelism for
   DNN Training* (SOSP 2019), and Narayanan, Phanishayee, Shi, Chen & Zaharia,
   *Memory-Efficient Pipeline-Parallel DNN Training* (ICML 2021) for the
-  flush-based 1F1B used in practice. The `O(P)` activation peak of 13.2.
+  flush-based 1F1B used in practice. The `O(P)` activation peak of 17.2.
 
 **Composing them.**
 
 - **3D parallelism** — Narayanan, Shoeybi, Casper, LeGresley, Patwary,
   Korthikanti et al., *Efficient Large-Scale Language Model Training on GPU
   Clusters Using Megatron-LM* (SC 2021). The interleaved pipeline schedule of
-  13.3, the `TP × PP × DP` topology argument of 14.2, and the empirical
+  17.3, the `TP × PP × DP` topology argument of 18.2, and the empirical
   scaling study that justifies the ordering.
 - **Large-batch training** — Goyal et al., *Accurate, Large Minibatch SGD*
   (2017) for linear learning-rate scaling and warm-up; McCandlish, Kaplan,
   Amodei et al., *An Empirical Model of Large-Batch Training* (2018) for the
-  critical batch size that bounds how far data parallelism goes (10.4).
+  critical batch size that bounds how far data parallelism goes (13.4).
 
-### 15.4 Reproducing everything here
+### 19.4 Reproducing everything here
+
+Five commands, no dependencies, no network, no build step. Each writes both a
+`.json` (for this document) and a `.js` (for the site) into `assets/data/`,
+and each exits non-zero if its own check fails.
 
 ```
-python3 code/ground_truth.py      # sections 1-8
-python3 code/parallel_toy.py      # sections 9-14
+python3 code/ground_truth.py         # sections 1-8    -> trace.json,    trace.js
+python3 code/transformer_2layer.py   # sections 9-10   -> tf2.json,      tf2.js
+python3 code/flash_attention.py      # section 11      -> flash.json,    flash.js
+python3 code/parallel_toy.py         # sections 12-18  -> parallel.json, parallel.js
+python3 code/sequence_parallel.py    # section 16      -> seqpar.json,   seqpar.js
 ```
 
 `ground_truth.py` prints the forward pass, both weight gradients, the
@@ -3604,10 +5284,45 @@ whose calculus has been verified against finite differences. Change `LR` at
 the top and the entire site — and sections 2, 3, 5 and 6 of this document —
 changes with it.
 
+`transformer_2layer.py` prints the model dimensions, the loss, a per-tensor
+gradient-check table over all 20 parameter tensors, the softmax row sums, and
+the counts of backward steps and partitioning entries. It raises
+`SystemExit("GRADIENT CHECK FAILED for: ...")` naming the offending tensors if
+any exceeds `1e-6`, so a `tf2.json` that exists is one whose LayerNorm
+backward, softmax Jacobian and attention chain have been confirmed against
+central differences. Change `D_MODEL`, `N_HEADS`, `SEQ`, `D_FF`, `N_LAYERS` or
+`WORLD` at the top and sections 9 and 10 — and pages 07, 08 and 18 — move
+together.
+
+`flash_attention.py` prints the tiling geometry, three independent
+`max |Δ|` checks (online softmax against direct softmax, tiled attention
+against standard attention, recomputed `P` against stored `P`), the stored
+element counts for both versions, and the memory table. It raises
+`SystemExit("EQUIVALENCE PROOF FAILED")` unless all three pass, so a
+`flash.json` that exists is one in which FlashAttention has been proved exact
+rather than described. Change `SEQ`, `D_HEAD`, `BR`, `BC` or `CAUSAL` at the
+top; `BR` and `BC` change the tiling without changing the output, which is the
+point.
+
 `parallel_toy.py` prints the per-strategy equivalence table, the per-GPU
 memory and collective counts, then writes `assets/data/parallel.json` and
 `assets/data/parallel.js`. It raises `SystemExit("EQUIVALENCE PROOF FAILED")`
 if any strategy's result diverges from the single-GPU baseline, so a
-`parallel.json` that exists is one in which every claim of sections 10 to 13
+`parallel.json` that exists is one in which every claim of sections 13 to 17
 has been checked numerically. Change `DIMS`, `WORLD` or `BATCH` at the top and
 the ladders, schedules and bubble fractions all move together.
+
+`sequence_parallel.py` prints both equivalence errors against the single-rank
+baseline, the per-rank activation element counts with the replicated portion
+called out, the sent-per-rank comparison between TP and TP+SP, and the
+Korthikanti table. It raises `SystemExit("EQUIVALENCE FAILED")` if either
+strategy diverges. Change `SEQ`, `D_MODEL`, `D_FF` or `TP` at the top — `SEQ`
+must remain divisible by `TP`, which is the one structural constraint sequence
+parallelism imposes and the reason ragged batches complicate it.
+
+Two further scripts verify rather than generate, and are described in
+`code/README.md`: `mlp_numpy.py` (359 element-wise checks against the trace at
+`0.000e+00`, numpy only) and `mlp_torch.py` (30 checks including PyTorch
+autograd against the hand-derived gradients at exactly `0.000e+00`, plus the
+`data_ptr` / `stride` / `.grad` memory tour). `memory_accounting.py` is a CLI
+calculator that extends section 8's arithmetic to arbitrary configurations.

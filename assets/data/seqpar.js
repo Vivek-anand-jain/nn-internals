@@ -596,6 +596,13 @@ window.SEQPAR = {
   "caveat": "Latency is not free: two collectives have two launch and sync costs where one had one. On short sequences that can outweigh the memory win."
  },
  "at_scale": {
+  "coefficients": {
+   "tp_only_floor_A": 10,
+   "tp_only_divisible_B": 24,
+   "tp_sp_C": 34,
+   "reading": "TP-only = A + B/t. TP+SP = C/t, and C = A + B, which is why the two agree exactly at t=1. A is the floor SP exists to remove.",
+   "floor_includes": "LayerNorm output, dropout mask, and the residual stream"
+  },
   "_source": "Korthikanti et al. 2022, 'Reducing Activation Recomputation in Large Transformer Models', Table 2. Coefficients quoted, not derived here.",
   "formula_tp_only": "s*b*h*(10 + 24/t) per layer",
   "formula_tp_sp": "s*b*h*(34/t) per layer",
@@ -637,6 +644,7 @@ window.SEQPAR = {
     "saving_pct": 90.1
    }
   ],
+  "toy_caveat": "The simulation in this file has no dropout, so its replicated 32 elements are the LayerNorm output and the residual stream only. Korthikanti's A=10 also counts a dropout mask. The toy therefore understates the floor slightly; the argument is unaffected.",
   "reading": "At t=1 the two agree, as they must. As t grows, TP-only flattens out at 10 bytes per token per layer no matter how many GPUs you add -- that is the replicated floor. TP+SP keeps dividing."
  }
 };
