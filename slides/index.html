@@ -2531,7 +2531,7 @@ S({
         return { sym: fc.sym, role: fc.role, rule: fc.rule, cls: fc.cls,
                  op: "·", zero: fc.num === 0 };
       }), true), "f-left"),
-      d("cols wide-l", [
+      el("div", { class: "cols wide-l", style: { alignItems: "flex-start" } }, [
         d("stack", [
           frag(eqline("&nbsp;", FCS.map(function (fc) {
             return { sym: f(fc.num, 3), role: fc.role, cls: fc.cls, op: "×",
@@ -2586,7 +2586,7 @@ S({
         return { sym: f(fc.num, 3), role: fc.role, rule: fc.rule, cls: fc.cls,
                  op: "×", zero: fc.num === 0 };
       }), true), "f-left"),
-      d("cols wide-l", [
+      el("div", { class: "cols wide-l", style: { alignItems: "flex-start" } }, [
         d("stack", [
           frag(vbox(diff < 1e-12,
             "product = <b class='v-gradient'>" + f(prod, 6) + "</b> &nbsp;·&nbsp; " +
