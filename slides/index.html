@@ -1109,6 +1109,16 @@ const SECTIONS = [
       "than saying it. Ask who in the room thinks it trades accuracy for " +
       "memory before you show them." },
 
+  { id: "scale", part: 2, title: "Scaling to 70B", cls: "weight",
+    q: "Add up every byte a real training step needs. Does it fit on anything?",
+    toy: TOY_REAL,
+    say: "This is the slide run that motivates the whole of part three, so " +
+      "let it land. The arithmetic is not subtle - weights, gradients, the " +
+      "fp32 master copy, Adam's two moments, then activations on top - but " +
+      "the total is, and people consistently guess low. Ask for a guess " +
+      "before you show the number. The gap between it and one device is the " +
+      "reason every technique that follows exists." },
+
   /* ----------------------------------------------------------- Part III */
   { id: "part3", kind: "part", part: 3, title: "Many GPUs", cls: "accent",
     q: "When one card is not enough, which of the four classes do you stop replicating?",
@@ -9509,6 +9519,12 @@ S({
 });
 
 }  /* end if (FA) — the FlashAttention run */
+
+/* The memory wall is its own chapter on the site (11 Scaling to 70B), so it
+   gets its own separator here. Without it the FlashAttention card's range
+   swept in these slides and its "new model" chip named the attention toy
+   while they were back on Llama 3 shapes. */
+SEP("scale");
 
 /* Scenario choices — not facts about the model or the hardware, so they are
    not in the trace, and every slide that uses one says so. */
