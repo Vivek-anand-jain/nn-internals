@@ -717,6 +717,8 @@ body { background: var(--page); }
 <script src="../assets/data/transformer.js"></script>
 <script src="../assets/data/parallel.js"></script>
 <script src="../assets/data/tf2.js"></script>
+<script src="../assets/data/flash.js"></script>
+<script src="../assets/data/seqpar.js"></script>
 <script src="../assets/js/ui.js"></script>
 <script>
 (function () {
@@ -974,6 +976,8 @@ function S(o) { SLIDES.push(o); }
 const ROMAN = ["", "I", "II", "III"];
 const _M2META = (window.TF2 && window.TF2.meta) || {};
 const _PAMETA = (window.PARALLEL && window.PARALLEL.meta) || {};
+const _FAMETA = (window.FLASH && window.FLASH.meta) || {};
+const _SPMETA = (window.SEQPAR && window.SEQPAR.meta) || {};
 
 const TOY_MLP  = T.meta.architecture + " · " + NPARAM + " parameters";
 const TOY_TF2  = _M2META.n_layers + " stacked pre-LN blocks · " +
@@ -981,6 +985,12 @@ const TOY_TF2  = _M2META.n_layers + " stacked pre-LN blocks · " +
                  " tokens × " + _M2META.d_model + " channels";
 const TOY_REAL = MODEL.name + " · d = " + CFG.d + " · " + CFG.layers +
                  " layers · " + bn(CFG.params) + " parameters";
+const TOY_FA   = "one causal attention head · seq " + _FAMETA.seq +
+                 " × d_head " + _FAMETA.d_head + " · tiles " + _FAMETA.Br +
+                 "×" + _FAMETA.Bc + " · every score printable";
+const TOY_SP   = "one pre-LN MLP region · seq " + _SPMETA.seq + " × d " +
+                 _SPMETA.d_model + " · d_ff " + _SPMETA.d_ff + " · TP " +
+                 _SPMETA.tp + " on " + _SPMETA.tp + " ranks";
 const TOY_PAR  = _PAMETA.world + " simulated GPUs · " +
                  (_PAMETA.dims || []).join("→") + " MLP · " +
                  _PAMETA.n_params + " parameters";
@@ -1083,6 +1093,22 @@ const SECTIONS = [
       "then bytes per parameter. This run motivates every single thing in " +
       "part three, so do not rush it." },
 
+  { id: "flash", part: 2, title: "FlashAttention", cls: "activation",
+    q: "What if the seq² matrix simply never existed?",
+    toy: TOY_FA, toyNew: true,
+    say: "The answer to the term the last run just identified, and it earns " +
+      "its own section because the idea inside it is small enough to hold in " +
+      "your head and important enough to be worth the room. New object: one " +
+      "causal attention head at seq " + (_FAMETA.seq || 8) + ", tiled " +
+      (_FAMETA.Br || 4) + "×" + (_FAMETA.Bc || 2) + ", every score on the " +
+      "screen. Set two expectations before you start. The centre of the run " +
+      "is online softmax in ONE dimension — no attention, six numbers, four " +
+      "slides — and if that lands, everything after it is bookkeeping. And " +
+      "the punchline is that FlashAttention is EXACT: it is not an " +
+      "approximation, not a sparsity pattern, and the deck proves it rather " +
+      "than saying it. Ask who in the room thinks it trades accuracy for " +
+      "memory before you show them." },
+
   /* ----------------------------------------------------------- Part III */
   { id: "part3", kind: "part", part: 3, title: "Many GPUs", cls: "accent",
     q: "When one card is not enough, which of the four classes do you stop replicating?",
@@ -1130,9 +1156,23 @@ const SECTIONS = [
       "meaningless before the all-reduce puts them back together — that is the " +
       "moment it clicks. Pause on why this axis stays inside a node." },
 
+  { id: "seqpar", part: 3, title: "Sequence Parallelism", cls: "activation",
+    q: "What about the activations tensor parallelism leaves replicated?",
+    toy: TOY_SP, toyNew: true,
+    say: "The other half of tensor parallelism, and the one people skip. TP " +
+      "shards the regions that contract over the hidden dimension and leaves " +
+      "the LayerNorms, the dropout and the residual stream replicated on " +
+      "every rank — raising the TP degree does not shrink those at all. This " +
+      "run shards them along the sequence instead. The slide to land is the " +
+      "communication one: TP alone and TP+SP put exactly the same number of " +
+      "bytes on the wire, because all-reduce IS reduce-scatter plus " +
+      "all-gather, and we established that identity back in the collectives " +
+      "run. Same wire, less memory. Let people try to find the catch — there " +
+      "is one, and it is latency, not bandwidth." },
+
   { id: "pp", part: 3, title: "Pipeline Parallel", cls: "activation",
     q: "What if the layers do not fit — and how much of the time is anybody idle?",
-    toy: TOY_PAR,
+    toy: TOY_PAR, toyNew: true,
     say: "Split by depth instead of by width. The bubble is the whole story: " +
       "derive it, watch micro-batching shrink it, then GPipe against 1F1B, " +
       "which have the same bubble and very different activation memory. Good " +
@@ -7567,6 +7607,1909 @@ S({
   }
 });
 
+
+/* ======================================================================== */
+/*  PART BF · FLASHATTENTION                                                */
+/*  window.FLASH (assets/data/flash.js, generated by code/flash_attention.py)*/
+/*  is one causal attention head at seq 8, d_head 4, tiled Br x Bc = 4 x 2,  */
+/*  traced tile by tile: the standard seq x seq matrix, the online-softmax   */
+/*  recurrence in one dimension, the tiled forward, a numerical proof that   */
+/*  the two agree to the last bit, and the backward pass that rebuilds every */
+/*  tile from two saved numbers per row. It is the answer to the seq^2 term  */
+/*  the census slides just identified, so it sits directly after them and    */
+/*  ahead of the memory-wall accounting, which assumes it throughout.        */
+/* ======================================================================== */
+
+SEP("flash");
+
+const FA = window.FLASH || null;
+if (!FA) {
+  console.error("nn-internals slides: flash.js did not load. " +
+                "Run `python3 code/flash_attention.py` to regenerate it.");
+}
+
+if (FA) {
+
+const FM   = FA.meta;
+const FSEQ = FM.seq, FDH = FM.d_head, FBR = FM.Br, FBC = FM.Bc;
+const FNQ  = FM.n_q_blocks, FNK = FM.n_k_blocks;
+const FSTD = FA.standard, FFL = FA.flash, FEQ = FA.equivalence;
+const FBW  = FA.backward, FOS = FA.online_softmax_demo, FMEM = FA.memory;
+
+const FQLAB = [], FKLAB = [];
+for (let i = 0; i < FSEQ; i++) { FQLAB.push("q" + i); FKLAB.push("k" + i); }
+
+/* Thousands separators. NN.count would render 67108864 as "67.1M", which is
+   the one place in this run where rounding hides the argument. */
+function fgrp(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
+
+/* The backward FLOP premium. The generator states it in prose only, so the
+   figure is lifted out of that string rather than typed beside it. */
+const FPCT = (function () {
+  const m = String(FMEM.compute_cost).match(/\+?\s*(\d+(?:\.\d+)?)\s*%/);
+  if (!m) {
+    console.warn("nn-internals slides: no percentage found in " +
+                 "FLASH.memory.compute_cost");
+    return null;
+  }
+  return m[1];
+})();
+const FPCTS = FPCT ? "+" + FPCT + "%" : "the backward recompute premium";
+
+/* the row of FLASH.memory.table that matches the deck's reference model */
+const FMROW = FMEM.table.filter(function (r) { return r.seq === CFG.seq; })[0] ||
+              FMEM.table[FMEM.table.length - 1];
+const FMLAST = FMEM.table[FMEM.table.length - 1];
+/* the whole stack, one sequence, bf16 — derived, never typed */
+function faStackBytes(elemsPerHead) {
+  return elemsPerHead * CFG.heads * CFG.layers * BF16B;
+}
+
+/* tile bookkeeping, counted off the trace rather than asserted */
+const FTILES = FNQ * FNK;
+const FSKIP = (function () {
+  let k = 0;
+  FFL.trace.forEach(function (qb) {
+    qb.steps.forEach(function (st) { if (st.skipped) k++; });
+  });
+  return k;
+})();
+function fstep(qi, ki) { return FFL.trace[qi].steps[ki]; }
+function frow(st, row) {
+  return (st.rows || []).filter(function (r) { return r.row === row; })[0];
+}
+function fmoved(qi, ki) {
+  const g = (fstep(qi, ki).rows || []).filter(function (r) { return r.real_rescale; })
+    .map(function (r) { return "q" + r.row; });
+  return g.length ? g.join(" and ") : "nothing";
+}
+/* One phrase per outcome. A first tile is an initialisation, not a rescale:
+   m starts at -inf so max_moved is trivially true and there is nothing
+   accumulated to correct. Only real_rescale is the interesting case. */
+function fkind(r) {
+  return !r ? "—"
+       : r.all_masked ? "all masked · nothing to fold in"
+       : r.real_rescale ? "GENUINE RESCALE"
+       : r.first_tile ? "first tile · initialisation"
+       : "max held · × 1";
+}
+function fkindCell(r) {
+  return el("td", { style: { textAlign: "left" }, html: r && r.real_rescale
+    ? "<span class='v-activation'>" + fkind(r) + "</span>"
+    : "<span class='muted'>" + fkind(r) + "</span>" });
+}
+/* every tile the walk has already finished, in traversal order */
+function fdone(qi, ki) {
+  const out = [];
+  for (let a = 0; a <= qi; a++) {
+    for (let b = 0; b < FNK; b++) {
+      if (a === qi && b >= ki) break;
+      out.push([a, b]);
+    }
+  }
+  return out;
+}
+function fskips() {
+  const out = [];
+  FFL.trace.forEach(function (qb, a) {
+    qb.steps.forEach(function (st, b) { if (st.skipped) out.push([a, b]); });
+  });
+  return out;
+}
+/* the causal mask, exactly as the generator applied it */
+function fmask(i, j) { return FM.causal && j > i; }
+
+/* Independent re-run: the deck computes standard attention from FLASH.input
+   in JavaScript and compares against both the shipped probability matrix and
+   the shipped tiled output. Two programs agreeing is a stronger claim than
+   either one alone, and a silent divergence is the failure this deck exists
+   to avoid. */
+const FCHK = (function () {
+  const Q = FA.input.Q, K = FA.input.K, V = FA.input.V, sc = FM.scale;
+  const P = [], O = [];
+  for (let i = 0; i < FSEQ; i++) {
+    const sr = [];
+    for (let j = 0; j < FSEQ; j++) {
+      sr.push(fmask(i, j) ? null
+        : sum(Q[i].map(function (v, t) { return v * K[j][t]; })) * sc);
+    }
+    const m = Math.max.apply(null, sr.filter(function (v) { return v !== null; }));
+    const e = sr.map(function (v) { return v === null ? 0 : Math.exp(v - m); });
+    const l = sum(e);
+    P.push(e.map(function (v) { return v / l; }));
+    const orow = [];
+    for (let dd = 0; dd < FDH; dd++) {
+      let acc = 0;
+      for (let j = 0; j < FSEQ; j++) acc += P[i][j] * V[j][dd];
+      orow.push(acc);
+    }
+    O.push(orow);
+  }
+  const err = Math.max(maxdiff2(P, FSTD.P), maxdiff2(O, FFL.O));
+  if (err > 1e-12) {
+    console.warn("nn-internals slides: the deck's own attention re-run " +
+                 "disagrees with FLASH by " + err);
+  }
+  return { P: P, O: O, err: err };
+})();
+
+/* ---- how many rescales are REAL ----------------------------------------
+   max_moved is trivially true on the first tile a row ever sees, where m
+   starts at -inf and there is nothing accumulated to rescale. The generator
+   flags those separately, so the deck can animate the genuine mid-stream
+   rescales and label the rest as initialisation instead of crying wolf. */
+const FROWSTATS = (function () {
+  let rows = 0, masked = 0, moved = 0, first = 0, real = 0;
+  FFL.trace.forEach(function (qb) {
+    qb.steps.forEach(function (st) {
+      if (st.skipped) return;
+      (st.rows || []).forEach(function (r) {
+        if (r.all_masked) { masked++; return; }
+        rows++;
+        if (r.max_moved) moved++;
+        if (r.first_tile) first++;
+        if (r.real_rescale) real++;
+      });
+    });
+  });
+  return { rows: rows, masked: masked, moved: moved, first: first, real: real };
+})();
+const FREAL = (function () {
+  const out = [];
+  FFL.trace.forEach(function (qb, a) {
+    qb.steps.forEach(function (st, b) {
+      if (st.skipped) return;
+      (st.rows || []).forEach(function (r) {
+        if (r.real_rescale) out.push({ q: a, k: b, cols: st.cols, r: r });
+      });
+    });
+  });
+  return out;
+})();
+
+/* ---- the output accumulator, per row, per tile -------------------------
+   FLASH ships acc_after, which is the accumulator once the tile has been
+   folded in, and it is exact: replaying the recurrence from it reproduces
+   FLASH.flash.O to the last bit, and the assertion below checks that on
+   every element. It also ships acc_before and acc_rescaled, and those two
+   DISAGREE with the same replay by up to 0.6 -- they are snapshots taken at
+   the wrong point -- so the deck derives both instead of rendering them, and
+   says so out loud if they are ever fixed. */
+const FACC = (function () {
+  const V = FA.input.V, byKey = {}, D = FDH;
+  let shippedErr = 0, chainErr = 0;
+  FFL.trace.forEach(function (qb, a) {
+    const acc = {};
+    qb.rows.forEach(function (i) { acc[i] = new Array(D).fill(0); });
+    qb.steps.forEach(function (st, b) {
+      if (st.skipped) return;
+      (st.rows || []).forEach(function (r) {
+        if (r.all_masked) return;
+        const before = acc[r.row].slice();
+        const c = r.first_tile ? 0 : r.correction;
+        const resc = before.map(function (v) { return v * c; });
+        const after = resc.map(function (v, k) {
+          let s2 = v;
+          for (let bb = 0; bb < st.cols.length; bb++) {
+            s2 += r.p_tile[bb] * V[st.cols[bb]][k];
+          }
+          return s2;
+        });
+        for (let k = 0; k < D; k++) {
+          chainErr = Math.max(chainErr, Math.abs(after[k] - r.acc_after[k]));
+          if (r.acc_before) {
+            shippedErr = Math.max(shippedErr, Math.abs(before[k] - r.acc_before[k]));
+          }
+          if (r.acc_rescaled) {
+            shippedErr = Math.max(shippedErr, Math.abs(resc[k] - r.acc_rescaled[k]));
+          }
+        }
+        byKey[a + ":" + b + ":" + r.row] = { before: before, rescaled: resc, after: after };
+        acc[r.row] = after;
+      });
+    });
+    /* and the finished accumulator, divided by l, must be the shipped output */
+    qb.rows.forEach(function (i, idx) {
+      for (let k = 0; k < D; k++) {
+        chainErr = Math.max(chainErr,
+          Math.abs(acc[i][k] / qb.final_l[idx] - FFL.O[i][k]));
+      }
+    });
+  });
+  if (chainErr > 1e-12) {
+    console.warn("nn-internals slides: the deck's accumulator replay disagrees " +
+                 "with FLASH.flash.acc_after / FLASH.flash.O by " + chainErr);
+  }
+  return { at: function (a, b, row) { return byKey[a + ":" + b + ":" + row]; },
+           chainErr: chainErr, shippedErr: shippedErr };
+})();
+
+/* shared heat scales, so the same quantity is the same shade on every slide */
+const FPMAX = Math.max.apply(null, mflat(FSTD.P));
+const FSMAX = Math.max.apply(null, mflat(FSTD.S)
+  .filter(function (v) { return v !== null; })
+  .map(Math.abs));
+
+/* ----------------------------------------------------------------------- */
+/**
+ * The seq x seq score matrix, drawn as a GHOST.
+ *
+ * The argument of this whole run is that the matrix is never materialised, so
+ * the picture must never show it filled. Every cell is an empty dashed
+ * outline; only the (Br x Bc) tile the kernel holds at this instant is solid
+ * and carries numbers. A tile already processed goes back to an outline with
+ * a dashed border round it -- the memory was reused. Tiles the causal mask
+ * lets the kernel skip are hatched AND labelled "skip"; masked cells inside a
+ * live tile are hatched AND read "-inf". Every state carries a border style
+ * and a word, so none of it depends on telling two greens apart.
+ *
+ *   .set({ solid:[qi,ki], done:[[qi,ki]...], skipped:[[qi,ki]...],
+ *          values:(i,j)=>number|null, digits, max })
+ */
+let _ghostUID = 0;
+function ghostMat(o) {
+  const n = o.n, cs = o.cell || 44, br = o.br, bc = o.bc;
+  const GL = 30, GT = 18;
+  const Wd = GL + n * cs + 4, Ht = GT + n * cs + 4;
+  const uid = "fghost" + (_ghostUID++);
+  const s = SV("svg", { viewBox: "0 0 " + Wd + " " + Ht, width: "100%",
+                        height: Ht, class: "collsvg", role: "img" });
+  const defs = SV("defs", {});
+  const pat = SV("pattern", { id: uid, width: 6, height: 6,
+    patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)" });
+  pat.appendChild(SV("rect", { width: 6, height: 6, fill: "var(--surface-2)" }));
+  pat.appendChild(SV("line", { x1: 0, y1: 0, x2: 0, y2: 6,
+    stroke: "var(--ink-muted)", "stroke-width": 1.6, opacity: .38 }));
+  defs.appendChild(pat);
+  s.appendChild(defs);
+
+  function dash(e, v) {
+    if (v) e.setAttribute("stroke-dasharray", v);
+    else e.removeAttribute("stroke-dasharray");
+  }
+  const X = function (j) { return GL + j * cs; };
+  const Y = function (i) { return GT + i * cs; };
+
+  for (let j = 0; j < n; j++) {
+    const t = SV("text", { x: X(j) + cs / 2, y: GT - 5, "text-anchor": "middle",
+      "font-size": 9.5, "font-family": "var(--mono)", fill: "var(--ink-muted)" });
+    t.textContent = "k" + j; s.appendChild(t);
+  }
+  for (let i = 0; i < n; i++) {
+    const t = SV("text", { x: GL - 5, y: Y(i) + cs / 2 + 3.5, "text-anchor": "end",
+      "font-size": 9.5, "font-family": "var(--mono)", fill: "var(--ink-muted)" });
+    t.textContent = "q" + i; s.appendChild(t);
+  }
+
+  const cellR = [], cellT = [], cellTip = [];
+  for (let i = 0; i < n; i++) {
+    cellR.push([]); cellT.push([]); cellTip.push([]);
+    for (let j = 0; j < n; j++) {
+      const r = SV("rect", { x: X(j) + 1, y: Y(i) + 1, width: cs - 2,
+        height: cs - 2, rx: 3, fill: "none", stroke: "var(--hairline)",
+        "stroke-width": 1, "stroke-dasharray": "2 3" });
+      const tip = SV("title", {});
+      tip.textContent = "q" + i + " · k" + j;
+      r.appendChild(tip);
+      const t = SV("text", { x: X(j) + cs / 2, y: Y(i) + cs / 2 + 3.5,
+        "text-anchor": "middle", "font-size": 9.5, "font-family": "var(--mono)",
+        fill: "var(--ink-2)" });
+      s.appendChild(r); s.appendChild(t);
+      cellR[i].push(r); cellT[i].push(t); cellTip[i].push(tip);
+    }
+  }
+
+  const tileR = [], tileT = [];
+  for (let qi = 0; qi < n / br; qi++) {
+    tileR.push([]); tileT.push([]);
+    for (let ki = 0; ki < n / bc; ki++) {
+      const r = SV("rect", { x: X(ki * bc) + .5, y: Y(qi * br) + .5,
+        width: bc * cs - 1, height: br * cs - 1, rx: 4,
+        fill: "none", stroke: "var(--hairline-2)", "stroke-width": 1.2 });
+      const t = SV("text", { x: X(ki * bc) + bc * cs / 2,
+        y: Y(qi * br) + br * cs / 2 + 4, "text-anchor": "middle",
+        "font-size": 12, "font-weight": 700, "font-family": "var(--mono)",
+        "letter-spacing": ".08em", "paint-order": "stroke",
+        stroke: "var(--page)", "stroke-width": 4, "stroke-linejoin": "round",
+        fill: "var(--ink-2)", opacity: 0 });
+      s.appendChild(r); s.appendChild(t);
+      tileR[qi].push(r); tileT[qi].push(t);
+    }
+  }
+
+  s.set = function (sp) {
+    sp = sp || {};
+    const solid = sp.solid || null;
+    const done  = sp.done || [];
+    const skip  = sp.skipped || [];
+    const mx    = sp.max || 1;
+    const has = function (list, qi, ki) {
+      for (let a = 0; a < list.length; a++) {
+        if (list[a][0] === qi && list[a][1] === ki) return true;
+      }
+      return false;
+    };
+    for (let qi = 0; qi < tileR.length; qi++) {
+      for (let ki = 0; ki < tileR[qi].length; ki++) {
+        const st = (solid && solid[0] === qi && solid[1] === ki) ? "live"
+                 : has(skip, qi, ki) ? "skip"
+                 : has(done, qi, ki) ? "done" : "ghost";
+        const R = tileR[qi][ki], T = tileT[qi][ki];
+        R.setAttribute("stroke",
+          st === "live" || st === "done" ? "var(--activation)"
+          : st === "skip" ? "var(--ink-muted)" : "var(--hairline-2)");
+        R.setAttribute("stroke-width", st === "live" ? 2.6 : 1.3);
+        dash(R, st === "done" ? "5 4" : null);
+        T.setAttribute("opacity", st === "skip" ? 1 : 0);
+        T.textContent = st === "skip" ? "skip" : "";
+        for (let a = 0; a < br; a++) for (let b = 0; b < bc; b++) {
+          const i = qi * br + a, j = ki * bc + b;
+          const cell = cellR[i][j], txt = cellT[i][j], tip = cellTip[i][j];
+          const v = (st === "live" && sp.values) ? sp.values(i, j) : undefined;
+          if (st === "skip") {
+            cell.setAttribute("fill", "url(#" + uid + ")");
+            cell.setAttribute("stroke", "var(--ink-muted)");
+            dash(cell, "2 3");
+            txt.textContent = "";
+            tip.textContent = "q" + i + " · k" + j +
+              " — in a tile the causal mask deletes; never computed";
+          } else if (st === "live" && v === null) {
+            cell.setAttribute("fill", "url(#" + uid + ")");
+            cell.setAttribute("stroke", "var(--ink-muted)");
+            dash(cell, "2 3");
+            txt.textContent = "−∞";
+            txt.setAttribute("fill", "var(--ink-2)");
+            txt.setAttribute("font-weight", "700");
+            tip.textContent = "q" + i + " · k" + j + " — masked: query " + i +
+              " may not read key " + j;
+          } else if (st === "live" && v !== undefined) {
+            cell.setAttribute("fill", "color-mix(in srgb, var(--activation) " +
+              Math.round(Math.min(1, Math.abs(v) / mx) * 74) + "%, transparent)");
+            cell.setAttribute("stroke", "var(--activation)");
+            dash(cell, null);
+            txt.textContent = f(v, sp.digits === undefined ? 2 : sp.digits);
+            txt.setAttribute("fill", "var(--ink)");
+            txt.setAttribute("font-weight", "400");
+            tip.textContent = "q" + i + " · k" + j + " = " + v;
+          } else {
+            cell.setAttribute("fill", "none");
+            cell.setAttribute("stroke", "var(--hairline)");
+            dash(cell, "2 3");
+            txt.textContent = "";
+            txt.setAttribute("fill", "var(--ink-2)");
+            txt.setAttribute("font-weight", "400");
+            tip.textContent = "q" + i + " · k" + j +
+              (st === "done" ? " — computed, consumed, released"
+                             : " — never materialised");
+          }
+        }
+      }
+    }
+  };
+  s.set({});
+  return s;
+}
+
+/** The written key for the ghost picture. Colour never carries it alone. */
+function ghostKey() {
+  const sw = function (style) {
+    return el("i", { style: Object.assign({ width: "16px", height: "11px",
+      borderRadius: "2px", display: "inline-block" }, style) });
+  };
+  return d("rowflex", [
+    el("span", { class: "ckey" }, [
+      sw({ background: "var(--activation)" }),
+      "live tile — the only scores in memory"]),
+    el("span", { class: "ckey" }, [
+      sw({ background: "transparent", border: "1.5px dashed var(--activation)" }),
+      "dashed border — computed, consumed, released"]),
+    el("span", { class: "ckey" }, [
+      sw({ background: "repeating-linear-gradient(45deg, var(--surface-3), " +
+           "var(--surface-3) 3px, var(--ink-muted) 3px, var(--ink-muted) 4px)" }),
+      "hatched + “skip” — causally impossible"]),
+    el("span", { class: "ckey" }, [
+      sw({ background: "transparent", border: "1px dashed var(--ink-muted)" }),
+      "outline only — never materialised"])
+  ]);
+}
+
+/* --------------------------------------------- F1. the tensor that must not exist */
+S({
+  chapter: "FlashAttention · the problem",
+  plain: "P is seq × seq — " + fgrp(FMROW.standard_elements_per_head) +
+         " numbers per head at " + fgrp(CFG.seq) + " tokens",
+  notes: "Restate the problem as one object. This is the probability matrix " +
+    "for a single causal head at seq " + FSEQ + ": " + FSTD.stored_elements +
+    " numbers, one per query-key pair, with the upper triangle at zero because " +
+    "a token may not read the future. Everything else in a transformer block " +
+    "grows like seq; this grows like its square. Now put the real number on " +
+    "it. " + MODEL.name + " runs at " + fgrp(CFG.seq) + " tokens, so one " +
+    "head's matrix is " + fgrp(FMROW.standard_elements_per_head) +
+    " elements — " + BY(FMROW.standard_elements_per_head * BF16B) +
+    " in bf16 — and there are " + CFG.heads + " heads in each of " +
+    CFG.layers + " layers, which is " + BY(faStackBytes(FMROW.standard_elements_per_head)) +
+    " for one sequence if you write it all down. Nobody writes it down. The " +
+    "next twenty slides are why they do not have to, and the memory-wall " +
+    "accounting that follows this run has been assuming it all along.",
+  build: function (ctx) {
+    ctx.hm = heatGrid({ rows: FSEQ, cols: FSEQ, cell: 50,
+      rowLab: FQLAB, colLab: FKLAB,
+      caption: "P = softmax(mask(Q·Kᵀ / √" + FDH + ")) · one head · seq " + FSEQ });
+    return [
+      kicker("FlashAttention · the tensor this run is about"),
+      title("Every other tensor grows like <span class='mono'>seq</span>. " +
+            "This one grows like <span class='mono'>seq²</span>.", true),
+      d("cols wide-r", [
+        d("stack", [
+          frag(NN.formula({ rule: "here, at seq " + FSEQ,
+            sub: FSEQ + " × " + FSEQ,
+            result: FSTD.stored_elements + " elements, one head",
+            cls: "activation" }), "f-left"),
+          frag(NN.formula({ rule: "at " + MODEL.name + "'s " + fgrp(CFG.seq) + " tokens",
+            sub: fgrp(CFG.seq) + " × " + fgrp(CFG.seq),
+            result: fgrp(FMROW.standard_elements_per_head) + " elements, one head",
+            cls: "activation" }), "f-left"),
+          frag(NN.formula({ rule: "× " + CFG.heads + " heads × " + CFG.layers +
+              " layers, bf16",
+            sub: FMEM.formula_standard,
+            result: BY(faStackBytes(FMROW.standard_elements_per_head)) +
+                    " for one sequence",
+            cls: "activation" }), "f-left"),
+          frag(NN.callout("warn", "And it is not the FLOPs that hurt",
+            "The multiply-accumulates are unavoidable — every query really does " +
+            "have to score every visible key. What is avoidable is <em>keeping " +
+            "the answer</em>. A naive kernel writes the matrix to HBM, reads it " +
+            "back for the softmax, reads it again for the value average, and " +
+            "reads it a fourth time in the backward pass. FlashAttention keeps " +
+            "the arithmetic and deletes the tensor."), "f-left")
+        ]),
+        d("panel a", [ctx.hm, h("small muted", FSTD.note)])
+      ])
+    ];
+  },
+  render: function (n, ctx) {
+    ctx.hm.paint(grid2(FSEQ, FSEQ, function (i, j) {
+      return fmask(i, j) ? null : FSTD.P[i][j];
+    }), { color: "var(--activation)", digits: 2, max: FPMAX, maskText: "0" });
+  }
+});
+
+/* ------------------------------------------- F2. why you cannot just stream it */
+S({
+  chapter: "FlashAttention · why it is hard",
+  plain: "Softmax needs the whole row before it can emit any of it",
+  notes: "The obvious fix — compute the matrix a piece at a time and throw each " +
+    "piece away — does not work, and it is worth being exact about why. " +
+    "Softmax has a denominator and the denominator is a sum over the entire " +
+    "row. Row " + (FSEQ - 1) + " of this head has a maximum of " +
+    f(FSTD.row_stats[FSEQ - 1].max, 5) + " and a sum of exponentials of " +
+    f(FSTD.row_stats[FSEQ - 1].sumexp, 5) + ", and neither is known until " +
+    "every key has been scored. Worse, the maximum is needed BEFORE the first " +
+    "exponential, because exp of a large score overflows. So a naive streaming " +
+    "kernel needs one pass to find the maximum, a second to accumulate the " +
+    "sum and a third to divide — and the only way to avoid three passes is to " +
+    "keep the scores, which is the tensor we are trying not to keep. The trick " +
+    "that breaks the deadlock is on the next slide, and it is not about " +
+    "attention at all.",
+  build: function () {
+    const i = FSEQ - 1, rs = FSTD.row_stats[i];
+    const rows = FSTD.row_stats.map(function (r) {
+      return el("tr", {}, [
+        el("td", { style: { textAlign: "left" } }, "q" + r.row),
+        el("td", { class: "n" }, String(r.row + 1)),
+        el("td", { class: "n v-activation" }, f(r.max, 5)),
+        el("td", { class: "n v-activation" }, f(r.sumexp, 5)),
+        el("td", { class: "n v-activation" }, f(r.logsumexp, 5))
+      ]);
+    });
+    return [
+      kicker("FlashAttention · the obstacle"),
+      title("You cannot finish one entry without having seen them all", true),
+      d("cols wide-r", [
+        d("stack", [
+          frag(NN.formula({ rule: "pᵢⱼ = exp(sᵢⱼ − mᵢ) / lᵢ",
+            sub: "mᵢ = maxⱼ sᵢⱼ,   lᵢ = Σⱼ exp(sᵢⱼ − mᵢ)",
+            cls: "activation" }), "f-left"),
+          frag(NN.formula({ rule: "row " + i + "'s denominator",
+            sub: "a sum over all " + (i + 1) + " visible keys",
+            result: f(rs.sumexp, 6), cls: "activation" }), "f-left"),
+          frag(NN.callout("key", "Two global quantities, at opposite ends",
+            "<span class='mono'>mᵢ</span> is needed <em>before</em> the first " +
+            "exponential, so that <span class='mono'>exp()</span> cannot " +
+            "overflow. <span class='mono'>lᵢ</span> is only known " +
+            "<em>after</em> the last one. A single left-to-right pass has " +
+            "neither — which is why the textbook implementation materialises " +
+            "the row, and, since it does that for every row at once, the whole " +
+            "matrix."), "f-left"),
+          frag(NN.callout("why", "Three passes, or one tensor",
+            "Pass one for the maximum, pass two for the sum, pass three to " +
+            "divide and multiply into V. Three reads of a " + FSEQ + "×" + FSEQ +
+            " object — or one read and " + FSTD.stored_elements +
+            " elements of storage. Both are unacceptable at " + fgrp(CFG.seq) +
+            " tokens."), "f-left")
+        ]),
+        d("panel a", [ph("what a full softmax has to know, per row"),
+          el("table", { class: "data" }, [
+            el("thead", {}, el("tr", {}, [
+              el("th", { style: { textAlign: "left" } }, "row"),
+              el("th", {}, "visible keys"), el("th", {}, "max mᵢ"),
+              el("th", {}, "Σ exp  lᵢ"), el("th", {}, "log-sum-exp")])),
+            el("tbody", {}, rows)
+          ]),
+          h("small muted", "Both mᵢ and lᵢ come from the whole row. Watch the " +
+            "last column — it is the only thing FlashAttention ends up keeping.")])
+      ])
+    ];
+  }
+});
+
+/* ------------------------------ F3. online softmax, one dimension, the setup */
+S({
+  chapter: "FlashAttention · online softmax",
+  plain: "Forget attention: softmax over " + FOS.xs.length + " numbers, " +
+         FOS.block + " at a time",
+  notes: "Put attention down completely for the next four slides. Here are " +
+    FOS.xs.length + " numbers — " + FOS.xs.join(", ") + " — and the job is a " +
+    "softmax over them computed " + FOS.block + " at a time, never seeing more " +
+    "than " + FOS.block + " of them at once. That constraint is exactly the " +
+    "constraint a tiled attention kernel is under. The device is two running " +
+    "numbers: m, the largest value seen so far, and l, the sum of exp(x − m) " +
+    "over everything seen so far. Both start empty — m at minus infinity, l at " +
+    "zero. The whole of FlashAttention is the update rule for that pair. If " +
+    "the room takes one thing away from this run it should be the next three " +
+    "slides, not anything about GPUs.",
+  build: function () {
+    const blocks = FOS.steps.map(function (st, b) {
+      return d("panel acc tight", [
+        ph("block " + b),
+        h("midnum", st.values.map(function (v) { return f(v, 0); }).join("  ")),
+        h("small muted", "positions " + (b * FOS.block) + "–" +
+          (b * FOS.block + st.values.length - 1))
+      ]);
+    });
+    return [
+      kicker("FlashAttention · the one idea · in one dimension"),
+      title("Two running numbers. That is the entire algorithm.", true),
+      frag(d("rowflex", [
+        h("say", "the list, and it arrives in pieces:"),
+        tn({ name: "xs", shape: [FOS.xs.length], values: [FOS.xs],
+             cls: "activation", digits: 0,
+             note: "seen " + FOS.block + " at a time" })
+      ]), "f-fade"),
+      frag(d("cols3", blocks), "f-pop"),
+      frag(d("cols", [
+        NN.formula({ rule: "m  ·  the largest value seen so far",
+          sub: "starts at −∞", result: "one number", cls: "activation" }),
+        NN.formula({ rule: "l  ·  Σ exp(x − m) over everything seen so far",
+          sub: "starts at 0", result: "one number", cls: "activation" })
+      ]), "f-fade"),
+      frag(NN.callout("key", "The problem, stated exactly",
+        "l is defined <em>relative to m</em>. The moment a later block pushes " +
+        "the maximum up, every term already inside l was scaled by the wrong " +
+        "exponential and l is quietly wrong. Either you go back and redo it — " +
+        "which needs the values you threw away — or you find a correction " +
+        "factor that repairs the running total in place. There is one, it is " +
+        "exact, and it is a single multiply."), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------ F4. block 0: nothing to correct */
+S({
+  chapter: "FlashAttention · online softmax",
+  plain: "Block 0: m −∞ → " + f(FOS.steps[0].m_new, 0) + ", l 0 → " +
+         f(FOS.steps[0].l_new, 4),
+  notes: "Block 0 is the easy case, and it is easy for a reason worth naming: " +
+    "nothing has been accumulated yet, so there is nothing to correct. The " +
+    "block is " + FOS.steps[0].values.join(" and ") + ", its maximum is " +
+    f(FOS.steps[0].m_new, 0) + ", and since m was minus infinity the running " +
+    "maximum simply becomes that. l goes from zero to exp(" +
+    f(FOS.steps[0].values[0], 0) + "−" + f(FOS.steps[0].m_new, 0) + ") + exp(" +
+    f(FOS.steps[0].values[1], 0) + "−" + f(FOS.steps[0].m_new, 0) + ") = " +
+    f(FOS.steps[0].l_new, 6) + ". The correction the generator records for " +
+    "this step is " + f(FOS.steps[0].correction, 0) + " — it multiplies l_old, " +
+    "which is zero, so its value cannot matter. Step the build and watch the " +
+    "two registers fill.",
+  build: function (ctx) {
+    const st = FOS.steps[0];
+    ctx.st = st;
+    ctx.m = h("midnum v-activation", "−∞");
+    ctx.l = h("midnum v-activation", "0");
+    ctx.note = h("say", "");
+    return [
+      kicker("FlashAttention · online softmax · block <b>0</b> of " +
+             FOS.steps.length),
+      title("Nothing accumulated yet, so nothing to rescale", true),
+      d("cols wide-l", [
+        d("stack", [
+          frag(d("cols", [
+            d("panel a", [ph("m · running maximum"), ctx.m]),
+            d("panel a", [ph("l · running Σ exp(x − m)"), ctx.l])
+          ]), "f-pop"),
+          ctx.note
+        ]),
+        d("stack", [
+          frag(NN.formula({ rule: "the block", sub: "values",
+            result: st.values.map(function (v) { return f(v, 0); }).join(", "),
+            cls: "activation" }), "f-right"),
+          frag(NN.formula({ rule: "m ← max(m_old, max of block)",
+            sub: "max(−∞, " + f(st.m_new, 0) + ")",
+            result: f(st.m_new, 0), cls: "activation" }), "f-right"),
+          frag(NN.formula({ rule: "added = Σ exp(x − m_new)",
+            sub: st.values.map(function (v) {
+              return "exp(" + f(v, 0) + " − " + f(st.m_new, 0) + ")"; }).join(" + "),
+            result: f(st.added, 8), cls: "activation" }), "f-right"),
+          frag(NN.formula({ rule: "l ← l_old × correction + added",
+            sub: f(st.l_old, 0) + " × " + f(st.correction, 0) + " + " +
+                 f(st.added, 6),
+            result: f(st.l_new, 8), cls: "activation" }), "f-right")
+        ])
+      ]),
+      frag(NN.callout("mem", "What is in memory right now",
+        "Two scalars and the " + FOS.block + " values of the current block. " +
+        "The " + (FOS.xs.length - FOS.block) + " numbers not yet seen have not " +
+        "been touched, and the ones already consumed can be overwritten. Peak " +
+        "storage does not grow with the length of the list — that is the " +
+        "property being bought, and it is the only property that matters."), "f-fade")
+    ];
+  },
+  render: function (n, ctx) {
+    const st = ctx.st;
+    ctx.m.textContent = n >= 3 ? f(st.m_new, 0) : "−∞";
+    ctx.l.textContent = n >= 5 ? f(st.l_new, 6) : "0";
+    ctx.note.innerHTML = n >= 5
+      ? "After block 0: <b>m = " + f(st.m_new, 0) + "</b>, <b>l = " +
+        f(st.l_new, 6) + "</b>. The block's values can now be discarded."
+      : n >= 3
+        ? "The maximum moved from −∞ to " + f(st.m_new, 0) +
+          ". Because l_old is 0, the rescale is invisible here."
+        : "Both registers empty. m = −∞, l = 0.";
+  }
+});
+
+/* --------------------------------- F5. block 1: THE MAX JUMPS — the rescale */
+S({
+  chapter: "FlashAttention · the rescale",
+  plain: "Block 1: the max jumps " + f(FOS.steps[1].m_old, 0) + " → " +
+         f(FOS.steps[1].m_new, 0) + " and everything accumulated is rescaled",
+  notes: "This is the slide the run exists for. Block 1 is " +
+    FOS.steps[1].values.join(" and ") + ", and that " +
+    f(FOS.steps[1].m_new, 0) + " beats anything seen so far, so the running " +
+    "maximum jumps from " + f(FOS.steps[1].m_old, 0) + " to " +
+    f(FOS.steps[1].m_new, 0) + ". Everything already inside l was measured " +
+    "against the old maximum: each term is exp(x − " +
+    f(FOS.steps[1].m_old, 0) + ") and needs to be exp(x − " +
+    f(FOS.steps[1].m_new, 0) + "). Divide one by the other and the x cancels, " +
+    "so the ratio is the same for every term: exp(" +
+    f(FOS.steps[1].m_old, 0) + " − " + f(FOS.steps[1].m_new, 0) + ") = " +
+    f(FOS.steps[1].correction, 8) + ". One multiply repairs the entire " +
+    "accumulated total, whatever it contains and however many terms went into " +
+    "it. l collapses from " + f(FOS.steps[1].l_old, 6) + " to " +
+    f(FOS.steps[1].l_rescaled, 8) + ", the new block adds " +
+    f(FOS.steps[1].added, 6) + ", and the total is " +
+    f(FOS.steps[1].l_new, 8) + ". Step it slowly and let the collapse land. " +
+    "That correction factor is FlashAttention; everything on the remaining " +
+    "slides is bookkeeping around it.",
+  build: function (ctx) {
+    const st = FOS.steps[1];
+    ctx.st = st;
+    ctx.m = h("midnum v-activation", f(st.m_old, 0));
+    ctx.l = h("midnum v-activation", f(st.l_old, 6));
+    ctx.bar = el("div", { class: "memstrip" });
+    ctx.seg = el("div", { class: "memseg a", style: { flexGrow: "1" } }, "");
+    ctx.free = el("div", { class: "memseg free", style: { flexGrow: "0.001" } }, "");
+    ctx.bar.appendChild(ctx.seg); ctx.bar.appendChild(ctx.free);
+    ctx.lab = h("phaselabel", "");
+    return [
+      kicker("FlashAttention · online softmax · block <b>1</b> · " +
+             "<span class='v-activation'>the maximum moves</span>"),
+      title("One multiply repairs everything accumulated so far", true),
+      d("cols wide-l", [
+        d("stack", [
+          frag(d("cols", [
+            d("panel a", [ph("m · running maximum"), ctx.m]),
+            d("panel a", [ph("l · running Σ exp(x − m)"), ctx.l])
+          ]), "f-pop"),
+          frag(d("panel a tight", [ctx.lab, ctx.bar,
+            h("small muted", "l drawn to scale against the largest value it " +
+              "takes during this block")]), "f-fade")
+        ]),
+        d("stack", [
+          frag(NN.formula({ rule: "the block · " +
+              st.values.map(function (v) { return f(v, 0); }).join(", ") +
+              " — the " + f(st.m_new, 0) + " is a new record",
+            result: "m_new = " + f(st.m_new, 0), cls: "activation" }), "f-right"),
+          frag(NN.formula({ rule: "correction = exp(m_old − m_new)",
+            sub: "exp(" + f(st.m_old, 0) + " − " + f(st.m_new, 0) + ")",
+            result: f(st.correction, 8), cls: "activation" }), "f-right"),
+          frag(NN.formula({ rule: "l_rescaled = l_old × correction",
+            sub: f(st.l_old, 6) + " × " + f(st.correction, 6),
+            result: f(st.l_rescaled, 8), cls: "activation" }), "f-right"),
+          frag(NN.formula({ rule: "added = Σ exp(x − m_new)",
+            sub: st.values.map(function (v) {
+              return "exp(" + f(v, 0) + "−" + f(st.m_new, 0) + ")"; }).join(" + "),
+            result: f(st.added, 8), cls: "activation" }), "f-right"),
+          frag(NN.formula({ rule: "l ← l_rescaled + added",
+            sub: f(st.l_rescaled, 6) + " + " + f(st.added, 6),
+            result: f(st.l_new, 8), cls: "activation" }), "f-right")
+        ])
+      ]),
+      frag(NN.callout("key", "Why one factor is enough — and why it is exact",
+        "Every term inside l is <span class='mono'>exp(x − m_old)</span> and " +
+        "every one of them wants to be <span class='mono'>exp(x − " +
+        "m_new)</span>. Divide the second by the first and the x cancels: the " +
+        "ratio is <span class='mono'>exp(m_old − m_new)</span> for " +
+        "<em>all</em> of them, no matter what they are or how many there were. " +
+        "That is not an approximation and it does not accumulate error — it is " +
+        "the same algebra that lets you subtract the row maximum in an " +
+        "ordinary softmax."), "f-fade")
+    ];
+  },
+  render: function (n, ctx) {
+    const st = ctx.st;
+    const stage = NN.clamp(n - 2, 0, 5);
+    const val = stage >= 5 ? st.l_new : stage >= 3 ? st.l_rescaled : st.l_old;
+    ctx.m.textContent = stage >= 1 ? f(st.m_new, 0) : f(st.m_old, 0);
+    ctx.l.textContent = f(val, 6);
+    const top = Math.max(st.l_old, st.l_new);
+    ctx.seg.style.flexGrow = String(Math.max(0.001, val));
+    ctx.free.style.flexGrow = String(Math.max(0.001, top - val));
+    ctx.seg.textContent = f(val, 4);
+    ctx.lab.textContent =
+      stage >= 5 ? "l = l_rescaled + added = " + f(st.l_new, 6) + " — block folded in"
+    : stage >= 4 ? "adding the new block's " + f(st.added, 6)
+    : stage >= 3 ? "RESCALED — l × " + f(st.correction, 6) + " = " + f(st.l_rescaled, 6)
+    : stage >= 2 ? "correction = exp(" + f(st.m_old, 0) + " − " + f(st.m_new, 0) +
+                   ") = " + f(st.correction, 6)
+    : stage >= 1 ? "the maximum jumped to " + f(st.m_new, 0) +
+                   " — l is now measured against the wrong number"
+    : "before block 1 · l = " + f(st.l_old, 6) + " measured against m = " +
+      f(st.m_old, 0);
+  }
+});
+
+/* ------------------------------------- F6. block 2: the max holds, corr = 1 */
+S({
+  chapter: "FlashAttention · the rescale",
+  plain: "Block 2: the max holds, so the correction is exactly " +
+         f(FOS.steps[2].correction, 0),
+  notes: "The last block is " + FOS.steps[2].values.join(" and ") +
+    ", both below the running maximum of " + f(FOS.steps[2].m_new, 0) +
+    ", so the maximum does not move. The generator records max_moved as " +
+    String(FOS.steps[2].max_moved) + " and the correction as exactly " +
+    f(FOS.steps[2].correction, 0) + " — exp(0) — so the rescale is a multiply " +
+    "by one and the accumulator is simply added to. Two things worth saying. " +
+    "This is the common case: a running maximum settles quickly, so most tiles " +
+    "cost nothing but the add. And the branch is not skipped in practice — the " +
+    "multiply by one is executed unconditionally, because a data-dependent " +
+    "branch inside a warp costs more than the arithmetic it saves. The price " +
+    "of the correction is one fused multiply-add per element, always, whether " +
+    "or not it does anything.",
+  build: function (ctx) {
+    const st = FOS.steps[2];
+    ctx.st = st;
+    ctx.m = h("midnum v-activation", f(st.m_new, 0));
+    ctx.l = h("midnum v-activation", f(st.l_old, 6));
+    return [
+      kicker("FlashAttention · online softmax · block <b>2</b> · the max holds"),
+      title("When nothing beats the record, the correction is a multiply by one", true),
+      d("cols wide-l", [
+        frag(d("cols", [
+          d("panel a", [ph("m · running maximum"), ctx.m,
+            h("small muted", "unchanged by this block")]),
+          d("panel a", [ph("l · running Σ exp(x − m)"), ctx.l])
+        ]), "f-pop"),
+        d("stack", [
+          frag(NN.formula({ rule: "the block",
+            sub: "values " + st.values.map(function (v) { return f(v, 0); }).join(", ") +
+                 " — both below " + f(st.m_new, 0),
+            result: "max_moved = " + String(st.max_moved),
+            cls: "activation" }), "f-right"),
+          frag(NN.formula({ rule: "correction = exp(m_old − m_new)",
+            sub: "exp(" + f(st.m_old, 0) + " − " + f(st.m_new, 0) + ") = exp(0)",
+            result: f(st.correction, 0), cls: "activation" }), "f-right"),
+          frag(NN.formula({ rule: "l ← l × 1 + added",
+            sub: f(st.l_rescaled, 6) + " + " + f(st.added, 6),
+            result: f(st.l_new, 8), cls: "activation" }), "f-right")
+        ])
+      ]),
+      frag(d("cols", [
+        NN.callout("why", "The branch nobody takes",
+          "A kernel does not test <span class='mono'>max_moved</span> and skip " +
+          "the multiply. Divergent branches inside a warp cost more than the " +
+          "arithmetic they save, so the correction is applied every time — " +
+          "usually as a multiply by one. Predictable cost, no divergence."),
+        NN.callout("mem", "Total storage across all " + FOS.steps.length + " blocks",
+          "Two scalars, plus whatever one block occupies. It never grew, and it " +
+          "would not have grown if the list had " + fgrp(CFG.seq) +
+          " entries instead of " + FOS.xs.length + ". The storage is " +
+          "independent of the length being reduced — which is the entire point.")
+      ]), "f-fade")
+    ];
+  },
+  render: function (n, ctx) {
+    ctx.l.textContent = f(n >= 4 ? ctx.st.l_new : ctx.st.l_old, 6);
+  }
+});
+
+/* ---------------------------------------- F7. the 1-D proof, and the payoff */
+S({
+  chapter: "FlashAttention · online softmax",
+  plain: "Blockwise softmax = ordinary softmax, max|Δ| = " + f(FOS.max_abs_err, 1),
+  notes: "Now check it. The blockwise answer — computed " + FOS.block +
+    " numbers at a time, never holding more than that — against the ordinary " +
+    "softmax computed with the whole list in front of it. The largest " +
+    "disagreement across all " + FOS.xs.length + " entries is " +
+    f(FOS.max_abs_err, 1) + ". Not small: zero. On this data the two " +
+    "computations produce bit-identical doubles, because the correction factor " +
+    "is an exact algebraic identity rather than a numerical approximation to " +
+    "one. Say the consequence out loud, because it is the single most " +
+    "misunderstood thing about FlashAttention: it is not a linear-attention " +
+    "approximation, it is not a sparsity pattern, and it does not trade " +
+    "accuracy for memory. It computes the same function. What it changes is " +
+    "which intermediate results are ever written down.",
+  build: function () {
+    const rows = FOS.xs.map(function (x, i) {
+      return el("tr", {}, [
+        el("td", { class: "n" }, f(x, 0)),
+        el("td", { class: "n v-activation" }, f(FOS.online[i], 8)),
+        el("td", { class: "n" }, f(FOS.direct[i], 8)),
+        el("td", { class: "n" }, f(Math.abs(FOS.online[i] - FOS.direct[i]), 1))
+      ]);
+    });
+    return [
+      kicker("FlashAttention · online softmax · verified"),
+      title("Same numbers. Not nearly the same numbers.", true),
+      d("cols wide-l", [
+        d("panel a", [
+          ph("blockwise (" + FOS.block + " at a time) against the ordinary softmax"),
+          el("table", { class: "data" }, [
+            el("thead", {}, el("tr", {}, [
+              el("th", {}, "x"), el("th", {}, "online"),
+              el("th", {}, "direct"), el("th", {}, "|Δ|")])),
+            el("tbody", {}, rows)
+          ])]),
+        d("stack", [
+          frag(NN.tiles([
+            { k: "max |Δ| over all " + FOS.xs.length + " entries",
+              v: f(FOS.max_abs_err, 1),
+              s: FOS.passed ? "PASS" : "FAIL", cls: "activation" },
+            { k: "numbers held at once", v: String(FOS.block + 2),
+              s: "one block + m + l", cls: "activation" },
+            { k: "the direct version holds", v: String(FOS.xs.length),
+              s: "the whole list" }
+          ]), "f-right"),
+          frag(NN.callout("key", "This is FlashAttention",
+            "Everything from here is the same recurrence with two changes: the " +
+            "list being reduced is one <em>row</em> of the score matrix, and " +
+            "the thing accumulated alongside l is not a scalar but a running " +
+            "weighted sum of value vectors — which gets rescaled by exactly " +
+            "the same factor. There is no second idea."), "f-right"),
+          frag(NN.callout("warn", "And what it is not",
+            "Not an approximation. Not sparse attention. Not a different " +
+            "attention function. The same softmax, the same output, computed " +
+            "in an order that never requires a whole row to be resident."), "f-right")
+        ])
+      ])
+    ];
+  }
+});
+
+/* ----------------------------------------- F8. lifting it into two dimensions */
+S({
+  chapter: "FlashAttention · tiling",
+  plain: "Lift it to attention: carry m, l and an unnormalised output per row",
+  notes: "Now put attention back. The list being reduced is one row of the " +
+    "score matrix, so m and l are carried per QUERY ROW rather than one of " +
+    "each. The single addition is the accumulator: alongside l we keep an " +
+    "unnormalised output row, the running sum of exp(s − m) times v, and when " +
+    "the maximum moves we rescale it by the very same factor before adding the " +
+    "new tile's contribution. At the end the output is the accumulator divided " +
+    "by l. The loop structure follows: an outer loop over query blocks of " +
+    FBR + " rows, an inner loop over key blocks of " + FBC + " columns, which " +
+    "at seq " + FSEQ + " is " + FNQ + " query blocks by " + FNK +
+    " key blocks. Peak live score storage is one tile — " +
+    FFL.peak_tile_elements + " elements — plus m and l per row. Nothing in " +
+    "that list has a square in it.",
+  build: function () {
+    return [
+      kicker("FlashAttention · from one dimension to two"),
+      title("Three registers per query row, one tile at a time", true),
+      frag(d("cols3", [
+        panel("a", [ph("m  ·  " + FBR + " numbers"),
+          h("midnum v-activation", "running max"),
+          h("small muted", "one per query row in the block")]),
+        panel("a", [ph("l  ·  " + FBR + " numbers"),
+          h("midnum v-activation", "running Σ exp"),
+          h("small muted", "one per query row in the block")]),
+        panel("a", [ph("O_acc  ·  " + FBR + " × " + FDH),
+          h("midnum v-activation", "unnormalised out"),
+          h("small muted", "rescaled by the same factor")])
+      ]), "f-pop"),
+      frag(d("cols", [
+        NN.formula({ rule: "on every tile, with c = exp(m_old − m_new)",
+          sub: "l ← l·c + Σp     and     O_acc ← O_acc·c + p·V_tile",
+          result: "one factor, both accumulators", cls: "activation" }),
+        NN.formula({ rule: "once, at the end of the query block",
+          sub: "O = O_acc / l     and     lse = m + ln(l)",
+          result: "the normalisation happens exactly once", cls: "activation" })
+      ]), "f-fade"),
+      frag(d("cols4", [
+        NN.tiles([{ k: "query blocks · Br = " + FBR, v: String(FNQ),
+                    s: "the outer loop", cls: "activation" }]),
+        NN.tiles([{ k: "key blocks · Bc = " + FBC, v: String(FNK),
+                    s: "the inner loop", cls: "activation" }]),
+        NN.tiles([{ k: "peak live tile", v: FFL.peak_tile_elements + " elems",
+                    s: FBR + " × " + FBC, cls: "activation" }]),
+        NN.tiles([{ k: "instead of", v: FSTD.stored_elements + " elems",
+                    s: "seq × seq" }])
+      ])),
+      frag(NN.callout("key", "Why the accumulator can be rescaled too",
+        "O_acc is <span class='mono'>Σⱼ exp(sⱼ − m)·vⱼ</span>. Every term in " +
+        "it carries the same <span class='mono'>exp(−m)</span> as the matching " +
+        "term in l, so the same single multiply corrects both. That is why the " +
+        "output never has to be recomputed when the maximum moves — and it is " +
+        "why the value average can be folded into the same pass as the " +
+        "softmax instead of waiting for it to finish."), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------------------- F9. the ghost matrix */
+S({
+  chapter: "FlashAttention · the ghost matrix",
+  plain: "The picture for the rest of this run: an outline that is never filled",
+  notes: "Establish the picture before walking it, because every slide from " +
+    "here uses it. The " + FSEQ + "×" + FSEQ + " grid is drawn as an outline " +
+    "and it stays an outline, because there is no instant at which those " +
+    FSTD.stored_elements + " numbers exist together. Over it sits the tile " +
+    "decomposition: " + FNQ + " query blocks of " + FBR + " rows by " + FNK +
+    " key blocks of " + FBC + " columns, " + FTILES + " tiles in all. Exactly " +
+    "one is solid at any instant — the " + FBR + "×" + FBC +
+    " tile in registers, " + FFL.peak_tile_elements + " numbers. A tile that " +
+    "has been processed reverts to an outline with a dashed border, because " +
+    "its memory was reused. And " + FSKIP + " of the " + FTILES +
+    " tiles are hatched and labelled skip: the causal mask makes them entirely " +
+    "impossible, so the kernel never issues the matmul. Point at the encoding " +
+    "while you say it — every state has a border style and a word, so none of " +
+    "this depends on telling two greens apart.",
+  build: function (ctx) {
+    ctx.gm = ghostMat({ n: FSEQ, cell: 44, br: FBR, bc: FBC });
+    ctx.cap = h("phaselabel", "");
+    return [
+      kicker("FlashAttention · the picture"),
+      title("The matrix is drawn as a ghost because it never exists", true),
+      d("cols wide-r", [
+        d("stack", [
+          frag(NN.formula({ rule: "the grid",
+            sub: FSEQ + " × " + FSEQ,
+            result: FSTD.stored_elements + " query-key pairs",
+            cls: "activation" }), "f-left"),
+          frag(NN.formula({ rule: "cut into tiles",
+            sub: FNQ + " query blocks of " + FBR + "   ×   " + FNK +
+                 " key blocks of " + FBC,
+            result: FTILES + " tiles", cls: "activation" }), "f-left"),
+          frag(NN.formula({ rule: "tiles the causal mask deletes entirely",
+            sub: FSKIP + " of " + FTILES,
+            result: f(FSKIP / FTILES * 100, 0) + "% never computed",
+            cls: "activation" }), "f-left"),
+          frag(NN.formula({ rule: "solid at any one instant",
+            sub: FBR + " × " + FBC,
+            result: FFL.peak_tile_elements + " elements",
+            cls: "activation" }), "f-left"),
+          frag(ghostKey(), "f-fade")
+        ]),
+        d("panel a", [ctx.cap, ctx.gm])
+      ])
+    ];
+  },
+  render: function (n, ctx) {
+    if (n >= 4) {
+      ctx.gm.set({ solid: [0, 0], skipped: fskips(),
+        values: function (i, j) { return fmask(i, j) ? null : FSTD.S[i][j]; },
+        digits: 2, max: FSMAX });
+      ctx.cap.textContent = "one live tile · " + FSKIP + " skipped · " +
+        "the rest has never been written";
+    } else if (n >= 3) {
+      ctx.gm.set({ skipped: fskips() });
+      ctx.cap.textContent = FSKIP + " of " + FTILES +
+        " tiles are causally impossible — hatched, never computed";
+    } else if (n >= 2) {
+      ctx.gm.set({});
+      ctx.cap.textContent = FTILES + " tiles of " + FBR + " × " + FBC;
+    } else {
+      ctx.gm.set({});
+      ctx.cap.textContent = FSEQ + " × " + FSEQ +
+        " outline — nothing in it is real";
+    }
+  }
+});
+
+/* ------------------------------------------------ F10. q-block 0 × k-block 0 */
+S({
+  chapter: "FlashAttention · the walk",
+  plain: "Tile (q0–q" + (FBR - 1) + ", k" + fstep(0, 0).cols[0] + "–k" +
+         fstep(0, 0).cols[FBC - 1] + "): the first tile, nothing to correct",
+  notes: "The walk begins. Query block 0 holds rows " +
+    FFL.trace[0].rows.join(", ") + ", and the inner loop starts on key block " +
+    "0, columns " + fstep(0, 0).cols.join(" and ") + ". Load the tile: " +
+    FBR + " × " + FBC + " = " + FFL.peak_tile_elements + " scores, computed " +
+    "straight from Q and K and written nowhere but registers. One cell is " +
+    "masked — q0 may not read k1 — and it is hatched and reads minus infinity. " +
+    "Then the recurrence, per row. Every row has m_old at minus infinity " +
+    "because nothing has been accumulated yet, which is why the generator " +
+    "records the correction as " + f(frow(fstep(0, 0), 0).correction, 0) +
+    " on all " + FBR + ": there is nothing to rescale. Read row 1's numbers " +
+    "off the table — tile max " + f(frow(fstep(0, 0), 1).tile_max, 5) +
+    " becomes m, l goes from 0 to " + f(frow(fstep(0, 0), 1).l_new, 5) +
+    ", and the accumulator takes its first contribution. Nothing has been " +
+    "stored except " + (2 * FBR) + " scalars, the accumulator and one tile.",
+  build: function (ctx) {
+    const st = fstep(0, 0);
+    ctx.st = st;
+    ctx.gm = ghostMat({ n: FSEQ, cell: 44, br: FBR, bc: FBC });
+    ctx.cap = h("phaselabel", "");
+    const rows = FFL.trace[0].rows.map(function (i) {
+      const r = frow(st, i);
+      return el("tr", {}, [
+        el("td", { style: { textAlign: "left" } }, "q" + i),
+        el("td", { class: "n" }, r.all_masked ? "—" : f(r.tile_max, 4)),
+        el("td", { class: "n" }, r.m_old === null ? "−∞" : f(r.m_old, 4)),
+        el("td", { class: "n v-activation" }, f(r.m_new, 4)),
+        el("td", { class: "n" }, f(r.correction, 4)),
+        el("td", { class: "n v-activation" }, f(r.l_new, 5))
+      ]);
+    });
+    return [
+      kicker("FlashAttention · query block <b>0</b> · key block <b>0</b>"),
+      title("Load one tile. Update " + FBR + " rows. Throw the tile away.", true),
+      d("cols wide-r", [
+        d("stack", [
+          frag(d("panel a tight", [ph("the recurrence on this tile · m_old is " +
+            "−∞ on every row, so nothing needs rescaling"),
+            el("table", { class: "data" }, [
+              el("thead", {}, el("tr", {}, [
+                el("th", { style: { textAlign: "left" } }, "row"),
+                el("th", {}, "tile max"), el("th", {}, "m_old"),
+                el("th", {}, "m_new"), el("th", {}, "correction"),
+                el("th", {}, "l_new")])),
+              el("tbody", {}, rows)
+            ])]), "f-left"),
+          frag(NN.formula({ rule: "the tile itself",
+            sub: FBR + " × " + FBC + " scores, from Q rows " +
+                 FFL.trace[0].rows.join(",") + " and K rows " + st.cols.join(","),
+            result: FFL.peak_tile_elements + " numbers, in registers",
+            cls: "activation" }), "f-left"),
+          frag(NN.callout("warn", "“The max moved” is trivially true here",
+            "The generator flags <span class='mono'>max_moved</span> on all " +
+            FBR + " rows and it means nothing: m started at −∞, so the " +
+            "first finite score always beats it. Every row is therefore also " +
+            "flagged <span class='mono'>first_tile</span>, and the correction " +
+            "is " + f(frow(st, 0).correction, 0) + ", multiplying an " +
+            "accumulator that is already zero. A real rescale needs a maximum " +
+            "that moves <em>after</em> something has been accumulated — the " +
+            "next tile has one. And the masked cell costs nothing to carry: " +
+            "exp(−∞) is exactly zero, so it adds nothing to l and nothing " +
+            "to the accumulator."), "f-left")
+        ]),
+        d("panel a", [ctx.cap, ctx.gm])
+      ])
+    ];
+  },
+  render: function (n, ctx) {
+    ctx.gm.set({ solid: [0, 0], skipped: fskips(),
+      values: function (i, j) { return fmask(i, j) ? null : FSTD.S[i][j]; },
+      digits: 2, max: FSMAX });
+    ctx.cap.textContent = "live: rows " + FFL.trace[0].rows[0] + "–" +
+      FFL.trace[0].rows[FBR - 1] + " × keys " + ctx.st.cols.join(",") +
+      "  ·  " + FFL.peak_tile_elements + " score elements resident";
+  }
+});
+
+/* ------------------------------------------------ F11. q-block 0 × k-block 1 */
+S({
+  chapter: "FlashAttention · the walk",
+  plain: "Tile (q0–q" + (FBR - 1) + ", k" + fstep(0, 1).cols[0] + "–k" +
+         fstep(0, 1).cols[FBC - 1] + "): the first genuine rescale in the whole head",
+  notes: "The inner loop advances to key block 1, columns " +
+    fstep(0, 1).cols.join(" and ") + ", and this one tile shows all three " +
+    "cases at once. Rows 0 and 1 are recorded as all_masked: neither may read " +
+    "key " + fstep(0, 1).cols[0] + " or " + fstep(0, 1).cols[1] +
+    ", so there is nothing to fold in and their m and l are untouched. Row 2's " +
+    "tile maximum does not beat its running maximum, so its correction is " +
+    "exactly " + f(frow(fstep(0, 1), 2).correction, 0) + " — the multiply-by-" +
+    "one case from the one-dimensional walk. Row 3's does beat it: m moves " +
+    "from " + f(frow(fstep(0, 1), 3).m_old, 5) + " to " +
+    f(frow(fstep(0, 1), 3).m_new, 5) + ", the correction is " +
+    f(frow(fstep(0, 1), 3).correction, 6) + ", and l is rescaled from " +
+    f(frow(fstep(0, 1), 3).l_old, 5) + " to " +
+    f(frow(fstep(0, 1), 3).l_rescaled, 5) + " before the new contribution " +
+    "lands it at " + f(frow(fstep(0, 1), 3).l_new, 5) + ". The accumulator for " +
+    "that row was multiplied by the same number in the same instruction. " +
+    "Different rows of one tile taking different branches is the normal state " +
+    "of affairs, and it is why the correction is applied unconditionally.",
+  build: function (ctx) {
+    const st = fstep(0, 1);
+    ctx.st = st;
+    ctx.gm = ghostMat({ n: FSEQ, cell: 44, br: FBR, bc: FBC });
+    ctx.cap = h("phaselabel", "");
+    const rows = FFL.trace[0].rows.map(function (i) {
+      const r = frow(st, i);
+      return el("tr", {}, [
+        el("td", { style: { textAlign: "left" } }, "q" + i),
+        fkindCell(r),
+        el("td", { class: "n" }, r.all_masked ? "—" : f(r.correction, 6)),
+        el("td", { class: "n v-activation" }, r.all_masked ? "—" : f(r.l_new, 4))
+      ]);
+    });
+    const rl = frow(st, FFL.trace[0].rows[FBR - 1]);
+    return [
+      kicker("FlashAttention · query block <b>0</b> · key block <b>1</b>"),
+      title(FBR + " rows, three different outcomes, one tile", true),
+      d("cols wide-r", [
+        d("stack", [
+          frag(d("panel a tight", [ph("per-row outcome on this tile"),
+            el("table", { class: "data" }, [
+              el("thead", {}, el("tr", {}, [
+                el("th", { style: { textAlign: "left" } }, "row"),
+                el("th", { style: { textAlign: "left" } }, "what happened"),
+                el("th", {}, "correction"), el("th", {}, "l_new")])),
+              el("tbody", {}, rows)
+            ])]), "f-left"),
+          frag(NN.formula({ rule: "q" + rl.row + " · the rescale in full",
+            sub: f(rl.l_old, 6) + " × exp(" + f(rl.m_old, 5) + " − " +
+                 f(rl.m_new, 5) + ")  +  " + f(rl.l_new - rl.l_rescaled, 6),
+            result: f(rl.l_new, 6), cls: "activation" }), "f-left"),
+          frag(NN.callout("mem", "Still " + FFL.peak_tile_elements +
+            " score elements resident",
+            "The dashed border round tile (0,0) means computed, consumed, " +
+            "released — this tile overwrote it. Only m, l and the accumulator " +
+            "persist: " + (2 * FBR) + " scalars and " + (FBR * FDH) +
+            " accumulator elements, neither of which depends on seq."), "f-left")
+        ]),
+        d("stack", [
+          d("panel a", [ctx.cap, ctx.gm]),
+          frag(d("panel a tight", [ph("the output accumulator for q" + rl.row +
+            " takes the same factor, in the same instruction · rows: before, " +
+            "× " + f(rl.correction, 4) + ", then + this tile"),
+            am("O_acc · q" + rl.row, [
+              FACC.at(0, 1, rl.row).before,
+              FACC.at(0, 1, rl.row).rescaled,
+              FACC.at(0, 1, rl.row).after
+            ], "3 × " + FDH + " — one row per stage", 4)]), "f-right")
+        ])
+      ])
+    ];
+  },
+  render: function (n, ctx) {
+    ctx.gm.set({ solid: [0, 1], done: fdone(0, 1), skipped: fskips(),
+      values: function (i, j) { return fmask(i, j) ? null : FSTD.S[i][j]; },
+      digits: 2, max: FSMAX });
+    ctx.cap.textContent = "live: rows " + FFL.trace[0].rows[0] + "–" +
+      FFL.trace[0].rows[FBR - 1] + " × keys " + ctx.st.cols.join(",") +
+      "  ·  tile (0,0) released";
+  }
+});
+
+/* --------------------------------------------------- F12. the skipped tiles */
+S({
+  chapter: "FlashAttention · the walk",
+  plain: FSKIP + " of " + FTILES + " tiles are never computed at all",
+  notes: "Key blocks " + fstep(0, 2).kblock + " and " + fstep(0, 3).kblock +
+    " are not masked cell by cell — they are skipped whole, and the generator " +
+    "records the reason verbatim: “" + fstep(0, 2).why + "”. Query block 0 " +
+    "covers rows " + FFL.trace[0].rows[0] + " to " +
+    FFL.trace[0].rows[FBR - 1] + " and key block " + fstep(0, 2).kblock +
+    " covers columns " + fstep(0, 2).cols.join(" and ") + ", so the smallest " +
+    "column index in the tile already exceeds the largest row index. Every " +
+    "entry would be minus infinity, every exponential zero, and the tile would " +
+    "contribute nothing to l or to the accumulator — so no matmul is issued. " +
+    "This is where causal masking actually saves work: not in writing −∞ over " +
+    "scores a naive kernel has already computed, but in tiles that are never " +
+    "scheduled. At this toy size it is " + f(FSKIP / FTILES * 100, 0) +
+    "% of the tiles; on a long sequence with a fine tile grid it approaches " +
+    "half the attention FLOPs.",
+  build: function (ctx) {
+    ctx.gm = ghostMat({ n: FSEQ, cell: 44, br: FBR, bc: FBC });
+    ctx.cap = h("phaselabel", "");
+    const rows = fskips().map(function (t) {
+      const st = fstep(t[0], t[1]);
+      return el("tr", {}, [
+        el("td", { style: { textAlign: "left" } }, "q-block " + t[0] +
+          " · rows " + FFL.trace[t[0]].rows[0] + "–" +
+          FFL.trace[t[0]].rows[FBR - 1]),
+        el("td", { style: { textAlign: "left" } }, "k-block " + t[1] +
+          " · cols " + st.cols.join(",")),
+        el("td", { class: "n" }, String(FBR * FBC)),
+        el("td", { style: { textAlign: "left" }, class: "muted" }, st.why)
+      ]);
+    });
+    return [
+      kicker("FlashAttention · what the causal mask really saves"),
+      title("A tile entirely in the future is never scheduled", true),
+      d("cols wide-r", [
+        d("stack", [
+          frag(d("panel a tight", [ph("the tiles the kernel refuses to issue"),
+            el("table", { class: "data" }, [
+              el("thead", {}, el("tr", {}, [
+                el("th", { style: { textAlign: "left" } }, "query block"),
+                el("th", { style: { textAlign: "left" } }, "key block"),
+                el("th", {}, "elements"),
+                el("th", { style: { textAlign: "left" } }, "why")])),
+              el("tbody", {}, rows)
+            ])]), "f-left"),
+          frag(NN.formula({ rule: "the test, evaluated once per tile",
+            sub: "first key index of the tile  >  last query index of the tile",
+            result: "skip", cls: "activation" }), "f-left"),
+          frag(NN.callout("warn", "Contrast the naive kernel",
+            "It computes all " + FSTD.stored_elements + " scores, writes " +
+            "−∞ over the upper triangle, exponentiates the lot and " +
+            "discards the result — the masked half at full price in FLOPs and " +
+            "in bandwidth. Here the saving is structural rather than " +
+            "statistical: one integer comparison per tile, on the host side of " +
+            "the loop, and the work is simply not launched."), "f-fade")
+        ]),
+        d("panel a", [ctx.cap, ctx.gm])
+      ])
+    ];
+  },
+  render: function (n, ctx) {
+    ctx.gm.set({ done: fdone(0, 2), skipped: fskips() });
+    ctx.cap.textContent = FSKIP + " of " + FTILES + " tiles hatched · " +
+      f(FSKIP / FTILES * 100, 0) + "% of the grid never computed";
+  }
+});
+
+/* ------------------------------------------- F13. query block 0 finishes */
+S({
+  chapter: "FlashAttention · the walk",
+  plain: "Query block 0 finishes: divide once, keep two numbers per row",
+  notes: "The inner loop is finished for query block 0, so normalise. The " +
+    "final running maxima are " + FFL.trace[0].final_m.map(function (v) {
+      return f(v, 4); }).join(", ") + " and the final sums are " +
+    FFL.trace[0].final_l.map(function (v) { return f(v, 4); }).join(", ") +
+    ". The output is the accumulator divided by l — once, at the end, not per " +
+    "tile. Then the only thing that survives into the backward pass is the " +
+    "log-sum-exp per row: " + FFL.trace[0].rows.map(function (i) {
+      return f(FFL.lse[i], 4); }).join(", ") + ", which is m + ln(l) and folds " +
+    "both saved scalars into one number. Compare the output rows against the " +
+    "standard implementation's on the right — the same rows, and the slide " +
+    "after next puts a number on how same. Say the accounting out loud: this " +
+    "query block computed " + (FNK - FSKIP) + " tiles of " +
+    FFL.peak_tile_elements + " elements and kept " + FBR + " numbers.",
+  build: function (ctx) {
+    ctx.gm = ghostMat({ n: FSEQ, cell: 44, br: FBR, bc: FBC });
+    ctx.cap = h("phaselabel", "");
+    const rows = FFL.trace[0].rows.map(function (i, a) {
+      return el("tr", {}, [
+        el("td", { style: { textAlign: "left" } }, "q" + i),
+        el("td", { class: "n" }, f(FFL.trace[0].final_m[a], 5)),
+        el("td", { class: "n" }, f(FFL.trace[0].final_l[a], 5)),
+        el("td", { class: "n v-activation" }, f(FFL.lse[i], 6))
+      ]);
+    });
+    return [
+      kicker("FlashAttention · query block <b>0</b> · done"),
+      title("Normalise once, then keep <span class='v-activation'>two numbers " +
+            "per row</span>, folded into one", true),
+      d("cols wide-r", [
+        d("stack", [
+          frag(d("panel a tight", [ph("what query block 0 ends up holding"),
+            el("table", { class: "data" }, [
+              el("thead", {}, el("tr", {}, [
+                el("th", { style: { textAlign: "left" } }, "row"),
+                el("th", {}, "final m"), el("th", {}, "final l"),
+                el("th", {}, "lse = m + ln l")])),
+              el("tbody", {}, rows)
+            ])]), "f-left"),
+          frag(NN.formula({ rule: "O = O_acc / l",
+            sub: "one divide per row, at the end of the inner loop",
+            result: FBR + " × " + FDH + " finished output rows",
+            cls: "activation" }), "f-left"),
+          frag(NN.formula({ rule: "what is written to HBM for backward",
+            sub: FMEM.formula_flash,
+            result: FFL.saved_elements + " elements for the whole head",
+            cls: "activation" }), "f-left"),
+          frag(NN.callout("key", "Two numbers per row, folded into one",
+            "<span class='mono'>2·seq</span> instead of " +
+            "<span class='mono'>seq²</span>: " + FFL.saved_elements +
+            " elements against " + FSTD.stored_elements + "."), "f-left")
+        ]),
+        d("stack", [
+          d("panel a", [ctx.cap, ctx.gm]),
+          frag(d("rowflex top", [
+            am("O · flash", FFL.O.slice(0, FBR),
+               "rows " + FFL.trace[0].rows[0] + "–" +
+               FFL.trace[0].rows[FBR - 1], 3),
+            am("O · standard", FSTD.O.slice(0, FBR), "same rows", 3)
+          ]), "f-right")
+        ])
+      ])
+    ];
+  },
+  render: function (n, ctx) {
+    ctx.gm.set({ done: fdone(0, FNK), skipped: fskips() });
+    ctx.cap.textContent = "query block 0 complete · every tile released · " +
+      FBR + " log-sum-exps kept";
+  }
+});
+
+/* -------------------------------------------- F14. query block 1, stepped */
+S({
+  chapter: "FlashAttention · the walk",
+  plain: "Query block 1: all " + FNK + " key blocks, stepped",
+  notes: "The outer loop advances. Query block 1 holds rows " +
+    FFL.trace[1].rows.join(", ") + " and — because those rows sit lower in the " +
+    "matrix — it has to visit all " + FNK + " key blocks; none of them is " +
+    "entirely in the future. Step the build one key block at a time and watch " +
+    "the correction column. Key block 0 is the first-tile case again, every " +
+    "m_old at minus infinity. Key block 1 rescales " + fmoved(1, 1) +
+    " and leaves the others alone. Key block 2 rescales only " + fmoved(1, 2) +
+    ". Key block 3 has two fully-masked rows and two whose maximum holds. The " +
+    "pattern to point at is that the maximum settles: by the third tile most " +
+    "rows are multiplying by one. Point also at what the picture does not " +
+    "show — query block 0's tiles are gone, and their memory is what query " +
+    "block 1 is now using.",
+  build: function (ctx) {
+    ctx.gm = ghostMat({ n: FSEQ, cell: 44, br: FBR, bc: FBC });
+    ctx.cap = h("phaselabel", "");
+    ctx.tbl = el("div", {});
+    ctx.beats = [];
+    const beats = [];
+    for (let k = 0; k < FNK; k++) {
+      const p = d("pill", "k-block " + k + " · cols " + fstep(1, k).cols.join(","));
+      ctx.beats.push(p);
+      beats.push(frag(p, "f-pop"));
+    }
+    return [
+      kicker("FlashAttention · query block <b>1</b> · rows " +
+             FFL.trace[1].rows.join(", ")),
+      title("Same recurrence, " + FNK + " tiles, and the maximum settles", true),
+      d("cols wide-r", [
+        d("stack", [
+          d("rowflex", beats),
+          d("panel a tight", [ph("per-row outcome on the live tile"), ctx.tbl]),
+          frag(NN.callout("key", "The maximum stops moving",
+            "Once the running maximum has met a genuinely large score, later " +
+            "tiles mostly multiply by one. That is why the rescale is cheap in " +
+            "practice: an unconditional fused multiply-add that is usually the " +
+            "identity, never a recomputation."), "f-fade")
+        ]),
+        d("panel a", [ctx.cap, ctx.gm])
+      ])
+    ];
+  },
+  render: function (n, ctx) {
+    const k = NN.clamp(n - 1, 0, FNK - 1);
+    const st = fstep(1, k);
+    ctx.beats.forEach(function (p, i) { p.classList.toggle("hot", i === k); });
+    ctx.gm.set({ solid: st.skipped ? null : [1, k], done: fdone(1, k),
+      skipped: fskips(),
+      values: function (i, j) { return fmask(i, j) ? null : FSTD.S[i][j]; },
+      digits: 2, max: FSMAX });
+    ctx.cap.textContent = "live: rows " + FFL.trace[1].rows[0] + "–" +
+      FFL.trace[1].rows[FBR - 1] + " × keys " + st.cols.join(",") +
+      "  ·  " + FFL.peak_tile_elements + " score elements resident";
+    ctx.tbl.innerHTML = "";
+    ctx.tbl.appendChild(el("table", { class: "data" }, [
+      el("thead", {}, el("tr", {}, [
+        el("th", { style: { textAlign: "left" } }, "row"),
+        el("th", { style: { textAlign: "left" } }, "outcome"),
+        el("th", {}, "correction"), el("th", {}, "l_new")])),
+      el("tbody", {}, FFL.trace[1].rows.map(function (i) {
+        const r = frow(st, i);
+        return el("tr", {}, [
+          el("td", { style: { textAlign: "left" } }, "q" + i),
+          fkindCell(r),
+          el("td", { class: "n" }, !r || r.all_masked ? "—" : f(r.correction, 6)),
+          el("td", { class: "n v-activation" },
+             !r || r.all_masked ? "—" : f(r.l_new, 5))
+        ]);
+      }))
+    ]));
+  }
+});
+
+/* --------------------------------- F14b. which rescales are actually real */
+S({
+  chapter: "FlashAttention · the rescale, counted",
+  plain: "Of " + FROWSTATS.rows + " tile-rows, only " + FROWSTATS.real +
+         " are genuine rescales",
+  notes: "One honest accounting before we leave the walk, because the naive " +
+    "reading of the trace overstates the case. Across the whole head there " +
+    "are " + FROWSTATS.rows + " tile-rows that do any work — " +
+    FROWSTATS.masked + " more are fully masked and do none. The generator " +
+    "flags max_moved on " + FROWSTATS.moved + " of them, which sounds like " +
+    "the correction fires most of the time. It does not. " + FROWSTATS.first +
+    " of those " + FROWSTATS.moved + " are the first tile a row ever sees, " +
+    "where m starts at minus infinity and there is nothing accumulated to " +
+    "rescale: max_moved is trivially true and the correction is recorded as " +
+    "zero, multiplying an accumulator that is already zero. That is " +
+    "initialisation, not a rescale. Subtract them and " + FROWSTATS.real +
+    " genuine mid-stream rescales are left, listed on the slide, with " +
+    "corrections between " + f(Math.min.apply(null, FREAL.map(function (x) {
+      return x.r.correction; })), 4) + " and " +
+    f(Math.max.apply(null, FREAL.map(function (x) { return x.r.correction; })), 4) +
+    ". Two things follow. The rescale is rare, because a running maximum " +
+    "settles fast. And it is applied unconditionally anyway, because a " +
+    "data-dependent branch inside a warp costs more than a multiply by one.",
+  build: function () {
+    const rows = FREAL.map(function (x) {
+      return el("tr", {}, [
+        el("td", { style: { textAlign: "left" } }, "q" + x.r.row),
+        el("td", { style: { textAlign: "left" } }, "q-block " + x.q +
+          " · k-block " + x.k + " · cols " + x.cols.join(",")),
+        el("td", { class: "n" }, f(x.r.m_old, 5)),
+        el("td", { class: "n v-activation" }, f(x.r.m_new, 5)),
+        el("td", { class: "n v-activation" }, f(x.r.correction, 6)),
+        el("td", { class: "n" }, f(x.r.l_old, 5) + " → " + f(x.r.l_rescaled, 5))
+      ]);
+    });
+    return [
+      kicker("FlashAttention · how often the correction actually does anything"),
+      title("<span class='v-activation'>" + FROWSTATS.real + "</span> of " +
+            FROWSTATS.rows + " tile-rows. The rest is initialisation or a " +
+            "multiply by one.", true),
+      frag(NN.tiles([
+        { k: "tile-rows that do work", v: String(FROWSTATS.rows),
+          s: "+ " + FROWSTATS.masked + " fully masked" },
+        { k: "flagged max_moved", v: String(FROWSTATS.moved),
+          s: "the naive count" },
+        { k: "of those, first tile", v: String(FROWSTATS.first),
+          s: "m was −∞ — initialisation" },
+        { k: "genuine mid-stream rescales", v: String(FROWSTATS.real),
+          s: f(FROWSTATS.real / FROWSTATS.rows * 100, 0) + "% of tile-rows",
+          cls: "activation" }
+      ]), "f-pop"),
+      frag(d("panel a", [ph("every genuine rescale in this head, in traversal order"),
+        el("table", { class: "data" }, [
+          el("thead", {}, el("tr", {}, [
+            el("th", { style: { textAlign: "left" } }, "row"),
+            el("th", { style: { textAlign: "left" } }, "where"),
+            el("th", {}, "m_old"), el("th", {}, "m_new"),
+            el("th", {}, "correction"), el("th", {}, "l rescaled")])),
+          el("tbody", {}, rows)
+        ])]), "f-fade"),
+      frag(d("cols", [
+        NN.callout("warn", "Why the naive count is misleading",
+          "On the first tile a row meets, <span class='mono'>m_old</span> is " +
+          "−∞, so any finite score beats it and " +
+          "<span class='mono'>max_moved</span> is true by construction. The " +
+          "correction is recorded as " + f(frow(fstep(0, 0), 0).correction, 0) +
+          " and multiplies an accumulator that is already zero. Counting " +
+          "those as rescales would put the figure at " + FROWSTATS.moved +
+          " instead of " + FROWSTATS.real + "."),
+        NN.callout("key", "And it is still applied every time",
+          "None of this makes the correction conditional. The kernel " +
+          "multiplies by <span class='mono'>exp(m_old − m_new)</span> on " +
+          "every tile-row, usually by one, because branching inside a warp " +
+          "costs more than the arithmetic. The rescale is cheap precisely " +
+          "because it is unconditional and predictable.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------------ F15. the whole trace at once */
+S({
+  chapter: "FlashAttention · the walk",
+  plain: "The whole head: " + (FTILES - FSKIP) + " tiles computed, " +
+         FSKIP + " skipped, " + FFL.peak_tile_elements + " elements resident",
+  notes: "Stand back and look at the whole traversal. " + FTILES + " tiles, " +
+    FSKIP + " skipped outright, " + (FTILES - FSKIP) + " actually computed — " +
+    "and at no point were more than " + FFL.peak_tile_elements +
+    " score elements resident, because each tile reused the last one's " +
+    "registers. The standard implementation's peak is " +
+    FSTD.stored_elements + " elements, the entire matrix, held from the " +
+    "forward pass all the way through to the backward pass. The ratio at this " +
+    "toy size is " + f(FSTD.stored_elements / FFL.peak_tile_elements, 0) +
+    "×, and that is not the interesting number. The interesting number is " +
+    "that the flash figure does not depend on seq at all, while the standard " +
+    "one is seq². What does depend on seq is the " + FFL.saved_elements +
+    " elements of log-sum-exp written out for backward — and that is linear.",
+  build: function (ctx) {
+    ctx.gm = ghostMat({ n: FSEQ, cell: 44, br: FBR, bc: FBC });
+    return [
+      kicker("FlashAttention · the traversal, whole"),
+      title("Nothing on this picture was ever filled in at the same time", true),
+      d("cols wide-r", [
+        d("stack", [
+          frag(NN.tiles([
+            { k: "tiles computed", v: String(FTILES - FSKIP),
+              s: "of " + FTILES, cls: "activation" },
+            { k: "tiles skipped", v: String(FSKIP), s: "causally impossible" },
+            { k: "peak score elements", v: String(FFL.peak_tile_elements),
+              s: "one " + FBR + "×" + FBC + " tile", cls: "activation" },
+            { k: "kept for backward", v: String(FFL.saved_elements),
+              s: "2 × seq", cls: "activation" }
+          ]), "f-left"),
+          frag(d("panel a tight", [ph("score elements, one head at seq " + FSEQ),
+            NN.chart.bars({ items: [
+              { label: "flash · peak live tile",
+                value: FFL.peak_tile_elements, color: "var(--activation)",
+                sub: "· " + FBR + " × " + FBC },
+              { label: "flash · kept for backward",
+                value: FFL.saved_elements, color: "var(--activation)",
+                sub: "· 2 × seq" },
+              { label: "standard · materialised and held",
+                value: FSTD.stored_elements, color: "var(--critical)",
+                sub: "· seq × seq" }
+            ], unit: "elements" }),
+            chartKey([
+              { name: "what FlashAttention holds", color: "var(--activation)" },
+              { name: "what the standard version holds", color: "var(--critical)" }
+            ])]), "f-left"),
+          frag(NN.callout("mem", "The number that matters is the exponent",
+            "One tile is <span class='mono'>Br × Bc</span> — a constant chosen " +
+            "to fit SRAM, not a function of the sequence. The saved statistics " +
+            "are <span class='mono'>2 × seq</span>. Neither term has a square " +
+            "in it, and that is the entire result."), "f-left")
+        ]),
+        d("panel a", [ph("all " + FTILES + " tiles, after the traversal"),
+          ctx.gm, ghostKey()])
+      ])
+    ];
+  },
+  render: function (n, ctx) {
+    ctx.gm.set({ done: fdone(FNQ - 1, FNK), skipped: fskips() });
+  }
+});
+
+/* ------------------------------------------------------------ F16. the proof */
+S({
+  chapter: "FlashAttention · the proof",
+  plain: "FlashAttention is EXACT: output max|Δ| = " +
+         f(FEQ.output_max_abs_err, 1),
+  notes: "This slide is on its own because the claim on it is the one people " +
+    "get wrong. The tiled implementation, which never held more than " +
+    FFL.peak_tile_elements + " score elements, and the standard " +
+    "implementation, which materialised all " + FSTD.stored_elements +
+    ", produce the same output. The largest disagreement over every element of " +
+    "the " + FSEQ + "×" + FDH + " output is " + f(FEQ.output_max_abs_err, 1) +
+    " — the last bit of a double, which is the noise floor of adding the same " +
+    "numbers in a different order, not an error. " + FEQ.claim + " The deck " +
+    "also runs a third, independent implementation of attention in JavaScript " +
+    "straight from Q, K and V, and it agrees with both to " + f(FCHK.err, 1) +
+    ". Three programs landing on the same numbers is the strongest form of " +
+    "this statement that fits on a slide.",
+  build: function () {
+    return [
+      kicker("FlashAttention · verified, not asserted"),
+      el("h2", { class: "stitle", html:
+        "FlashAttention is <span class='v-activation'>exact</span>, " +
+        "not an approximation." }),
+      frag(d("rowflex top", [
+        am("O · standard", FSTD.O,
+           "materialises " + FSTD.stored_elements + " scores", 5),
+        h("ar", "vs"),
+        am("O · flash", FFL.O,
+           "peak " + FFL.peak_tile_elements + " scores", 5)
+      ]), "f-pop"),
+      frag(NN.tiles([
+        { k: "max |Δ| over all " + (FSEQ * FDH) + " output elements",
+          v: f(FEQ.output_max_abs_err, 1),
+          s: FEQ.passed ? "PASS" : "FAIL", cls: "activation" },
+        { k: "the deck's own independent re-run", v: f(FCHK.err, 1),
+          s: "a third implementation, same answer", cls: "activation" },
+        { k: "score elements materialised", v: String(FFL.peak_tile_elements),
+          s: "instead of " + FSTD.stored_elements, cls: "activation" },
+        { k: "what changed about the maths", v: "nothing",
+          s: "only the order of the sums" }
+      ])),
+      frag(d("cols", [
+        NN.callout("key", "Say it in one sentence", FEQ.claim),
+        NN.callout("why", "Why the last bits differ at all",
+          "Floating-point addition is not associative: " +
+          "<span class='mono'>(a+b)+c</span> and " +
+          "<span class='mono'>a+(b+c)</span> can differ in the final bit. The " +
+          "tiled version sums each row in a different order, so " +
+          f(FEQ.output_max_abs_err, 1) + " is exactly what a correct " +
+          "implementation should produce. A genuinely approximate method " +
+          "misses by many orders of magnitude more than that.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* -------------------------------------------- F17. backward by recomputation */
+S({
+  chapter: "FlashAttention · backward",
+  plain: "Backward rebuilds every tile from two numbers: p = exp(s − lse)",
+  notes: "So the forward pass got away without the matrix. The backward pass " +
+    "still needs it — dV is Pᵀ·dO, and the softmax Jacobian needs P — and " +
+    "there is nothing stored. The recovery is one line: " + FBW.note +
+    " Because lse is m + ln(l), subtracting it from a score performs the " +
+    "max-subtraction and the division by the denominator in a single " +
+    "operation. Take row " + (FBR - 1) + ": its saved lse is " +
+    f(FBW.detail[FBR - 1].lse, 6) + ", and exponentiating each recomputed " +
+    "score minus that number gives probabilities summing to " +
+    f(FBW.detail[FBR - 1].sum, 12) + ". Across the entire matrix the " +
+    "recomputed P differs from the one the standard implementation stored by " +
+    f(FBW.recompute_max_err, 1) + ". So the backward pass does not approximate " +
+    "the forward pass's probabilities — it reconstructs them exactly, from " +
+    FFL.saved_elements + " numbers instead of " + FSTD.stored_elements + ".",
+  build: function (ctx) {
+    const i = FBR - 1, det = FBW.detail[i];
+    ctx.hm = heatGrid({ rows: FSEQ, cols: FSEQ, cell: 50,
+      rowLab: FQLAB, colLab: FKLAB,
+      caption: "P, rebuilt from " + FFL.saved_elements + " saved numbers" });
+    const rows = det.entries.map(function (e) {
+      return el("tr", {}, [
+        el("td", { style: { textAlign: "left" } }, "k" + e.j),
+        el("td", { class: "n" }, f(e.s, 6)),
+        el("td", { class: "n" }, f(e.s - det.lse, 6)),
+        el("td", { class: "n v-activation" }, f(e.p, 6)),
+        el("td", { class: "n" }, f(FSTD.P[i][e.j], 6))
+      ]);
+    });
+    return [
+      kicker("FlashAttention · backward · recomputation"),
+      title("<span class='mono'>pᵢⱼ = exp(sᵢⱼ − lseᵢ)</span> — that is the " +
+            "whole recovery", true),
+      d("cols wide-r", [
+        d("stack", [
+          frag(NN.formula({ rule: "lseᵢ, saved by the forward pass",
+            sub: "mᵢ + ln(lᵢ) — one number per query row",
+            result: f(det.lse, 6) + " for row " + i,
+            cls: "activation" }), "f-left"),
+          frag(d("panel a tight", [ph("row " + i + " rebuilt entry by entry, " +
+            "against the matrix the standard version stored"),
+            el("table", { class: "data" }, [
+              el("thead", {}, el("tr", {}, [
+                el("th", { style: { textAlign: "left" } }, "key"),
+                el("th", {}, "s recomputed"), el("th", {}, "s − lse"),
+                el("th", {}, "p rebuilt"), el("th", {}, "p stored")])),
+              el("tbody", {}, rows)
+            ]),
+            h("small muted", "row sum " + f(det.sum, 12) +
+              " — the normalisation came out of one saved number, not out of " +
+              "a second pass over the row")]), "f-left"),
+          frag(NN.tiles([
+            { k: "max |Δ| · rebuilt P vs stored P",
+              v: f(FBW.recompute_max_err, 1),
+              s: FBW.recompute_passed ? "PASS" : "FAIL", cls: "activation" },
+            { k: "numbers it was rebuilt from", v: String(FFL.saved_elements),
+              s: "2 per query row", cls: "activation" }
+          ]), "f-left")
+        ]),
+        d("panel a", [ctx.hm,
+          h("small muted", "Rebuilt tile by tile during backward and released " +
+            "tile by tile — this picture never exists either.")])
+      ])
+    ];
+  },
+  render: function (n, ctx) {
+    ctx.hm.paint(grid2(FSEQ, FSEQ, function (i, j) {
+      return fmask(i, j) ? null : FBW.P_recomputed[i][j];
+    }), { color: "var(--activation)", digits: 2, max: FPMAX, maskText: "0" });
+  }
+});
+
+/* ---------------------------------------------------------- F18. the trade */
+S({
+  chapter: "FlashAttention · the trade",
+  plain: "The trade: roughly " + FPCTS + " attention FLOPs against dropping seq² from memory",
+  notes: "Be honest about the price. " + FMEM.compute_cost + " In exchange the " +
+    "seq² term leaves the memory bill entirely: " + FSTD.stored_elements +
+    " elements per head become " + FFL.saved_elements + " here, and " +
+    fgrp(FMROW.standard_elements_per_head) + " become " +
+    fgrp(FMROW.flash_elements_per_head) + " at " + fgrp(CFG.seq) +
+    " tokens — a factor of " + fgrp(FMROW.ratio) + ". Compare the shape of " +
+    "that trade with activation checkpointing, which this deck prices at " +
+    "roughly one extra forward pass for a whole block. Both buy memory with " +
+    "compute; this one is far cheaper per byte saved, and — as the next slide " +
+    "argues — on long sequences it is not a trade at all, because the extra " +
+    "arithmetic is hidden behind memory traffic that no longer happens.",
+  build: function () {
+    return [
+      kicker("FlashAttention · what it costs"),
+      title("Recompute the tile instead of remembering it", true),
+      frag(d("cols", [
+        d("panel crit", [ph("what you pay, in the backward pass"),
+          el("div", { class: "bignum", style: { color: "var(--critical)" } },
+             "≈ " + FPCTS),
+          h("small muted", FMEM.compute_cost)]),
+        d("panel a", [ph("what you stop paying, at " + fgrp(CFG.seq) + " tokens"),
+          h("bignum v-activation", fgrp(FMROW.ratio) + "×"),
+          h("small muted", "score elements per head: " +
+            fgrp(FMROW.standard_elements_per_head) + " → " +
+            fgrp(FMROW.flash_elements_per_head))])
+      ]), "f-pop"),
+      frag(d("cols", [
+        NN.formula({ rule: "standard backward",
+          sub: "read the stored P back from HBM",
+          result: "no extra FLOPs, " +
+                  BY(faStackBytes(FMROW.standard_elements_per_head)) +
+                  " held", cls: "activation" }),
+        NN.formula({ rule: "flash backward",
+          sub: "recompute each tile from Q, K and the saved lse",
+          result: "≈ " + FPCTS + " FLOPs, " +
+                  BY(faStackBytes(FMROW.flash_elements_per_head)) + " held",
+          cls: "activation" })
+      ]), "f-fade"),
+      frag(d("cols", [
+        NN.callout("key", "Compare with the other recomputation lever",
+          "Activation checkpointing re-runs a whole block's forward pass during " +
+          "backward — roughly 30% more compute across the <em>entire</em> " +
+          "model, to keep only block inputs. FlashAttention re-runs one matmul " +
+          "inside attention and removes the single largest activation tensor " +
+          "there is. Same currency, very different exchange rate."),
+        NN.callout("warn", "And the FLOPs were never the binding constraint",
+          "Half the matrix was already being computed and thrown away by naive " +
+          "kernels; tile skipping hands some of that back. What actually " +
+          "decides the wall clock on long sequences is bandwidth — which is " +
+          "the next slide.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* -------------------------------------------------- F19. why it is also faster */
+S({
+  chapter: "FlashAttention · why it is also faster",
+  plain: "Not only a memory trick: the matrix never leaves SRAM",
+  notes: "The last conceptual slide, and it explains why this is not a " +
+    "trade-off anybody agonises over. " + FMEM.why_it_is_also_faster +
+    " Put the mechanism plainly. A naive attention kernel writes the seq² " +
+    "matrix to HBM, reads it back to apply the softmax, writes it again, reads " +
+    "it a third time for the value average — and a fourth time in the backward " +
+    "pass. Every one of those trips is off-chip. Attention's arithmetic " +
+    "intensity is low enough that the kernel spends most of its time waiting " +
+    "for memory rather than multiplying, so it is bandwidth-bound, not " +
+    "compute-bound. FlashAttention fuses the whole sequence into one kernel " +
+    "whose working set is a tile small enough to live in SRAM, and the matrix " +
+    "is written to HBM zero times. On long sequences it is simultaneously " +
+    "smaller and faster, which is why it became the default implementation " +
+    "rather than something you switch on when you run out of memory.",
+  build: function () {
+    return [
+      kicker("FlashAttention · the part that is not about memory"),
+      title("Fused into one kernel, the matrix never touches HBM", true),
+      frag(d("panel crit", [ph("naive · the matrix crosses the memory bus, " +
+        "four times"),
+        d("arrowline", [
+          d("pill", "QKᵀ"), h("ar", "→"), d("pill hot", "write HBM"),
+          h("ar", "→"), d("pill hot", "read HBM"), h("ar", "→"),
+          d("pill", "softmax"), h("ar", "→"), d("pill hot", "write HBM"),
+          h("ar", "→"), d("pill hot", "read HBM"), h("ar", "→"), d("pill", "P·V")
+        ]),
+        h("small muted", "and once more in backward, to read P again")]), "f-pop"),
+      frag(d("panel a", [ph("flash · one fused kernel, working set = one tile"),
+        d("arrowline", [
+          d("pill", "load Q, K, V tiles"), h("ar", "→"),
+          d("pill", "score · rescale · accumulate — all in SRAM"),
+          h("ar", "→"), d("pill", "write O and lse")
+        ]),
+        h("small muted", "the " + FBR + "×" + FBC + " tile — " +
+          FFL.peak_tile_elements + " elements — never leaves the chip")]), "f-pop"),
+      frag(NN.callout("key", "The claim, from the generator, verbatim",
+        FMEM.why_it_is_also_faster), "f-fade"),
+      frag(d("cols", [
+        NN.callout("why", "Why bandwidth and not FLOPs decides it",
+          "For every score computed there is a handful of multiply-accumulates " +
+          "and then a trip to memory. A kernel in that regime is limited by how " +
+          "fast bytes move, not by how fast the tensor cores run — so removing " +
+          "four HBM round trips buys more than " + FPCTS + " FLOPs costs."),
+        NN.callout("mem", "Which is why the tile shape is chosen for SRAM",
+          "<span class='mono'>Br</span> and <span class='mono'>Bc</span> are " +
+          "not pedagogical parameters. They are picked so that the tile, the Q " +
+          "rows, the K and V blocks and the accumulator all fit in one " +
+          "streaming multiprocessor's shared memory at once. Here they are " +
+          FBR + " and " + FBC + " only because the numbers have to fit on a " +
+          "slide.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* -------------------------------------------------------- F20. at real scale */
+S({
+  chapter: "FlashAttention · at scale",
+  plain: "Per head, per layer: seq² elements against 2·seq",
+  notes: "Finish on the table the generator produces, which is the two " +
+    "formulas evaluated and nothing else. Standard is " +
+    FMEM.formula_standard + "; flash is " + FMEM.formula_flash + ". At " +
+    fgrp(CFG.seq) + " tokens — " + MODEL.name + "'s context — one head's " +
+    "matrix is " + fgrp(FMROW.standard_elements_per_head) +
+    " elements against " + fgrp(FMROW.flash_elements_per_head) +
+    ", a factor of " + fgrp(FMROW.ratio) + ". Read down the ratio column: it " +
+    "is exactly seq over 2, so it doubles every time the context doubles. At " +
+    fgrp(FMLAST.seq) + " tokens the materialised matrix would be " +
+    BY(faStackBytes(FMLAST.standard_elements_per_head)) + " for a single " +
+    "sequence — " + fgrp(Math.ceil(faStackBytes(FMLAST.standard_elements_per_head) / GPU_B)) +
+    " " + GPUD.name + " cards' worth of memory for a tensor nobody wants to " +
+    "keep. The reason long-context models exist at all is on this slide, and " +
+    "the memory-wall accounting that follows this run has been quoting the " +
+    "flash figure throughout.",
+  build: function () {
+    const rows = FMEM.table.map(function (r) {
+      const hot = r.seq === CFG.seq;
+      return el("tr", {}, [
+        el("td", { class: "n", html: hot
+          ? "<b class='v-activation'>" + fgrp(r.seq) + "</b>" : fgrp(r.seq) }),
+        el("td", { class: "n", html: "<span style='color:var(--critical)'>" +
+          fgrp(r.standard_elements_per_head) + "</span>" }),
+        el("td", { class: "n v-activation" }, fgrp(r.flash_elements_per_head)),
+        el("td", { class: "n" }, fgrp(r.ratio) + "×"),
+        el("td", { class: "n" }, BY(faStackBytes(r.standard_elements_per_head)))
+      ]);
+    });
+    const stdPts = FMEM.table.map(function (r) {
+      return [Math.log2(r.seq), faStackBytes(r.standard_elements_per_head) / GBD];
+    });
+    const flPts = FMEM.table.map(function (r) {
+      return [Math.log2(r.seq), faStackBytes(r.flash_elements_per_head) / GBD];
+    });
+    return [
+      kicker("FlashAttention · the scaling"),
+      title("<span class='mono'>seq²</span> against " +
+            "<span class='mono'>2·seq</span>, per head, per layer", true),
+      d("cols wide-l", [
+        d("panel a", [ph("attention score storage · the last column is the " +
+          "whole stack: " + CFG.layers + " layers × " + CFG.heads +
+          " heads, bf16, one sequence"),
+          el("table", { class: "data" }, [
+            el("thead", {}, el("tr", {}, [
+              el("th", {}, "seq"), el("th", {}, "standard"),
+              el("th", {}, "flash"), el("th", {}, "ratio"),
+              el("th", {}, "standard, whole stack")])),
+            el("tbody", {}, rows)
+          ]),
+          h("small muted", "standard = " + FMEM.formula_standard +
+            "  ·  flash = " + FMEM.formula_flash)]),
+        d("stack", [
+          frag(d("panel a", [ph("GB for one sequence, whole stack, bf16"),
+            NN.chart.line({
+              series: [
+                { name: "materialised", color: "var(--critical)", points: stdPts },
+                { name: "FlashAttention", color: "var(--activation)", points: flPts }
+              ],
+              width: 500, height: 210, xlabel: "log₂(sequence length)",
+              ylabel: "GB", logY: true,
+              margin: { t: 14, r: 16, b: 34, l: 64 }
+            }),
+            chartKey([
+              { name: "materialised seq² scores", color: "var(--critical)" },
+              { name: "what FlashAttention keeps · 2·seq", color: "var(--activation)" }
+            ])]), "f-right"),
+          frag(NN.callout("key", "Which is why the cost run's chart looked as " +
+            "it did",
+            "The seq² curve on the activation-memory slide is this same term. " +
+            "The deck quotes <span class='mono'>" + BY(CFG.actPerSeq) +
+            "</span> a sequence for " + MODEL.name + " with FlashAttention " +
+            "assumed, against <span class='mono'>" + BY(CFG.actFullSeq) +
+            "</span> if the scores were materialised — " +
+            f(CFG.actFullSeq / CFG.actPerSeq, 1) + "× more. Everything in the " +
+            "rest of this deck is priced on the smaller number, because " +
+            "everybody runs the smaller number."), "f-right")
+        ])
+      ])
+    ];
+  }
+});
+
+}  /* end if (FA) — the FlashAttention run */
+
 /* Scenario choices — not facts about the model or the hardware, so they are
    not in the trace, and every slide that uses one says so. */
 const NGPU  = 8;
@@ -9967,6 +11910,1051 @@ S({
     ];
   }
 });
+
+
+/* ======================================================================== */
+/*  PART F2 · SEQUENCE PARALLELISM                                          */
+/*  window.SEQPAR (assets/data/seqpar.js, generated by                       */
+/*  code/sequence_parallel.py) is one pre-LN MLP region -- LayerNorm,        */
+/*  column/row-parallel MLP, residual -- run on one GPU, then under tensor   */
+/*  parallelism alone, then under TP + SP, with the per-rank resident set,   */
+/*  the collective schedule, the ring costs of both schemes and a numerical  */
+/*  proof that all three produce the same output. It sits here because it    */
+/*  removes exactly the activations the tensor-parallel run just left        */
+/*  replicated.                                                              */
+/* ======================================================================== */
+
+SEP("seqpar");
+
+const SPD = window.SEQPAR || null;
+if (!SPD) {
+  console.error("nn-internals slides: seqpar.js did not load. " +
+                "Run `python3 code/sequence_parallel.py` to regenerate it.");
+}
+
+if (SPD) {
+
+const SPM    = SPD.meta;
+const SPT    = SPM.tp;                    /* tensor-parallel degree, 2      */
+const SPSEQ  = SPM.seq, SPDM = SPM.d_model, SPFF = SPM.d_ff;
+const SPTOK  = SPM.tokens;
+const SPBASE = SPD.baseline;
+const SPTPO  = SPD.tp_only;
+const SPSP   = SPD.tp_plus_sp;
+const SPEQV  = SPD.equivalence;
+const SPMEM  = SPD.memory;
+const SPCOMM = SPD.communication;
+const SPSCL  = SPD.at_scale;
+const SPPER  = SPSEQ / SPT;               /* sequence rows per rank         */
+const SPFPR  = SPFF / SPT;                /* MLP neurons per rank           */
+
+function spTokRow(i) { return "t" + i + " “" + SPTOK[i] + "”"; }
+function spStream() {
+  return SPTOK.map(function (t) { return "“" + t + "”"; }).join(" · ");
+}
+function spOwner(i)  { return Math.floor(i / SPPER); }
+
+/* Which slide established all_reduce = reduce_scatter + all_gather. Looked
+   up rather than typed, so the link survives slides being inserted. */
+function slideNumberByPlain(needle) {
+  for (let i = 0; i < SLIDES.length; i++) {
+    if (SLIDES[i].plain && SLIDES[i].plain.indexOf(needle) >= 0) return i + 1;
+  }
+  return null;
+}
+const SEC_COLL = SECTIONS.filter(function (x) { return x.id === "collectives"; })[0];
+
+/* ---- LayerNorm statistics, derived from what SEQPAR ships --------------
+   The payload carries X, the gain, the bias and the LayerNorm output, but
+   not epsilon and not the per-row statistics. The mean and the variance
+   follow from X alone; 1/sqrt(var+eps) is recovered from the shipped output
+   by inverting y = g*(x-mu)*inv + b on the channel furthest from the mean.
+   The whole LayerNorm is then recomputed from those three numbers and
+   checked against the shipped tensor, so nothing here is asserted. */
+const SPLN = (function () {
+  const X = SPD.input.X, g = SPD.input.gain, b = SPD.input.bias;
+  const rows = [];
+  for (let t = 0; t < SPSEQ; t++) {
+    const mu = sum(X[t]) / SPDM;
+    const va = sum(X[t].map(function (v) { return (v - mu) * (v - mu); })) / SPDM;
+    let best = 0;
+    for (let j = 1; j < SPDM; j++) {
+      if (Math.abs(X[t][j] - mu) > Math.abs(X[t][best] - mu)) best = j;
+    }
+    const inv = (SPBASE.ln[t][best] - b[best]) / (g[best] * (X[t][best] - mu));
+    rows.push({ mu: mu, var: va, inv: inv,
+      xhat: X[t].map(function (v) { return (v - mu) * inv; }) });
+  }
+  const rebuilt = rows.map(function (r) {
+    return r.xhat.map(function (v, j) { return g[j] * v + b[j]; });
+  });
+  const err = maxdiff2(rebuilt, SPBASE.ln);
+  if (err > 1e-9) {
+    console.warn("nn-internals slides: the deck's LayerNorm re-derivation " +
+                 "disagrees with SEQPAR.baseline.ln by " + err);
+  }
+  return { rows: rows, err: err };
+})();
+
+/* ---- Korthikanti coefficients, as SEQPAR ships them ---------------------
+   A is the flat replicated floor, B the part TP divides, C the TP+SP term,
+   and C = A + B is the structural fact that makes the two schemes agree at
+   t = 1. They are quoted from the paper, not derived here -- so the deck
+   checks that they reproduce every row of the shipped table, checks the
+   identity, and surfaces the source on the slide. */
+const SPCF = SPSCL.coefficients;
+const SPA  = SPCF.tp_only_floor_A;
+const SPB  = SPCF.tp_only_divisible_B;
+const SPC  = SPCF.tp_sp_C;
+const SPCERR = (function () {
+  let e = 0;
+  SPSCL.table.forEach(function (r) {
+    e = Math.max(e,
+      Math.abs(SPA + SPB / r.tp - r.bytes_per_token_per_layer_tp_only),
+      Math.abs(SPC / r.tp - r.bytes_per_token_per_layer_tp_sp));
+  });
+  if (e > 1e-3) {
+    console.warn("nn-internals slides: SEQPAR.at_scale.coefficients do not " +
+                 "reproduce SEQPAR.at_scale.table, by " + e);
+  }
+  if (SPC !== SPA + SPB) {
+    console.warn("nn-internals slides: SEQPAR.at_scale.coefficients break " +
+                 "C = A + B, which is what makes the two schemes agree at t=1");
+  }
+  return e;
+})();
+const SP_T1 = SPSCL.table.filter(function (r) { return r.tp === 1; })[0];
+const SP_T8 = SPSCL.table.filter(function (r) { return r.tp === 8; })[0] ||
+              SPSCL.table[SPSCL.table.length - 1];
+
+/* the per-rank inventory of the toy region, as a function of TP degree —
+   the same algebra the traced TP=2 case exhibits, extended */
+function spReplicated() { return 2 * SPSEQ * SPDM; }
+function spSharded(t)   { return SPSEQ * SPFF / t; }
+const SPTVALS = (function () {
+  const out = [];
+  for (let t = 1; t <= SPFF; t *= 2) if (SPFF % t === 0) out.push(t);
+  return out;
+})();
+/* self-check: the algebra must reproduce the traced numbers exactly */
+(function () {
+  if (spReplicated() !== SPTPO.replicated_elements ||
+      spSharded(SPT) !== SPTPO.sharded_elements ||
+      spReplicated() + spSharded(SPT) !== SPTPO.activation_elements_per_rank) {
+    console.warn("nn-internals slides: the deck's per-rank SP algebra " +
+                 "disagrees with SEQPAR.tp_only");
+  }
+})();
+
+/* one rank's resident inventory, drawn with the shard grammar the rest of
+   Part III uses: filled = held here, hollow = held elsewhere. Every bar also
+   carries the word REPLICATED or the axis it is sharded on. */
+function spInventory(list, rank) {
+  return list.map(function (t) {
+    const repl = t.status.indexOf("REPLIC") >= 0;
+    const bySeq = t.status.indexOf("SEQ") >= 0;
+    return d("stack", [
+      shardBar({ name: t.name + " · " + t.shape.join("×"),
+                 parts: SPT, own: repl ? "all" : [rank],
+                 color: "var(--activation)" }),
+      h("small muted", (repl ? "REPLICATED — " : t.status + " — ") + t.why +
+        "  ·  " + t.elements + " elements")
+    ]);
+  });
+}
+
+/* --------------------------------------------- SP1. what TP leaves behind */
+S({
+  chapter: "Sequence parallel · the replicated half",
+  plain: "TP=" + SPT + " leaves " + SPTPO.replicated_elements + " of " +
+         SPTPO.activation_elements_per_rank + " activation elements REPLICATED",
+  notes: "Tensor parallelism cut the weight matrices, and the run that just " +
+    "finished showed the activations inside the MLP being cut with them. This " +
+    "slide is about the activations that were not. Take one pre-LN region — " +
+    SPM.region + " — on " + SPT + " ranks and count what each rank holds. The " +
+    "MLP hidden state is genuinely sharded: " + SPTPO.sharded_elements +
+    " elements, because column-parallel W_in gave each rank whole neurons. But " +
+    "the LayerNorm output and the residual stream are " +
+    SPTPO.replicated_elements + " elements that every rank computes " +
+    "identically, from the identical input, to the identical bits. Look at the " +
+    "two cards: those are not similar tensors, they are the same tensor twice. " +
+    SPTPO.note + " That is " + f(SPTPO.replicated_elements /
+      SPTPO.activation_elements_per_rank * 100, 0) + "% of each rank's " +
+    "activation memory doing no work.",
+  build: function () {
+    const cards = NN.gpu.grid({ count: SPT,
+      label: function (g) { return "rank " + g + " of " + SPT; },
+      render: function (g) {
+        return [
+          am("LN output", SPBASE.ln, "byte-for-byte identical on both ranks", 4),
+          el("div", { class: "gpu-line", style: { color: "var(--critical)" } },
+             "REPLICATED · " + (SPSEQ * SPDM) + " elements")
+        ];
+      } });
+    return [
+      kicker("Distributed · sequence parallel · the observation"),
+      title("Two GPUs, one tensor, computed twice"),
+      frag(cards, "f-pop"),
+      frag(d("cols wide-l", [
+        d("panel a", [ph("what rank 0 actually holds under TP alone"),
+          d("stack", spInventory(SPTPO.ranks[0].resident, 0))]),
+        NN.tiles([
+          { k: "activation elements per rank",
+            v: String(SPTPO.activation_elements_per_rank),
+            s: "TP = " + SPT + " only", cls: "activation" },
+          { k: "of which replicated", v: String(SPTPO.replicated_elements),
+            s: f(SPTPO.replicated_elements /
+                 SPTPO.activation_elements_per_rank * 100, 0) + "% — pure waste" },
+          { k: "genuinely sharded", v: String(SPTPO.sharded_elements),
+            s: "the MLP hidden state", cls: "activation" }
+        ])
+      ]), "f-fade"),
+      frag(NN.callout("warn", "This is not a rounding error",
+        SPTPO.note), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------ SP2. raising TP does not shrink them */
+S({
+  chapter: "Sequence parallel · the floor",
+  plain: "Raising the TP degree does not shrink those " +
+         SPTPO.replicated_elements + " elements at all",
+  notes: "And it gets worse, not better, as you add GPUs. The sharded part of " +
+    "the region is seq × d_ff ÷ t, so it halves every time the tensor-parallel " +
+    "degree doubles. The replicated part is 2 × seq × d_model, which has no t " +
+    "in it. At TP=1 the region costs " + (spReplicated() + spSharded(1)) +
+    " elements per rank and half of it is replicated; at the traced TP=" +
+    SPT + " it is " + (spReplicated() + spSharded(SPT)) + " and " +
+    f(spReplicated() / (spReplicated() + spSharded(SPT)) * 100, 0) +
+    "% is replicated; at TP=" + SPTVALS[SPTVALS.length - 1] + " it is " +
+    (spReplicated() + spSharded(SPTVALS[SPTVALS.length - 1])) + " and " +
+    f(spReplicated() / (spReplicated() +
+      spSharded(SPTVALS[SPTVALS.length - 1])) * 100, 0) + "% is replicated. " +
+    "The replicated fraction goes UP with the world size, because the only " +
+    "term you are shrinking is the other one. Every extra GPU you spend on " +
+    "tensor parallelism buys you less than the one before. That asymptote is " +
+    "the thing sequence parallelism exists to remove, and we price it at real " +
+    "scale at the end of this run.",
+  build: function () {
+    const rows = SPTVALS.map(function (t) {
+      const tot = spReplicated() + spSharded(t);
+      const hot = t === SPT;
+      return el("tr", {}, [
+        el("td", { class: "n", html: hot
+          ? "<b class='v-activation'>" + t + "</b>" : String(t) }),
+        el("td", { class: "n", html: "<span style='color:var(--critical)'>" +
+          spReplicated() + "</span>" }),
+        el("td", { class: "n v-activation" }, String(spSharded(t))),
+        el("td", { class: "n" }, String(tot)),
+        el("td", { class: "n" }, f(spReplicated() / tot * 100, 0) + "%")
+      ]);
+    });
+    return [
+      kicker("Distributed · sequence parallel · the asymptote"),
+      title("The sharded half divides. The replicated half does not.", true),
+      d("cols wide-l", [
+        d("panel a", [ph("activation elements per rank in this region · " +
+          "seq " + SPSEQ + ", d_model " + SPDM + ", d_ff " + SPFF +
+          " · row TP=" + SPT + " is the traced one"),
+          el("table", { class: "data" }, [
+            el("thead", {}, el("tr", {}, [
+              el("th", {}, "TP degree t"),
+              el("th", {}, "replicated"), el("th", {}, "sharded"),
+              el("th", {}, "total"), el("th", {}, "replicated share")])),
+            el("tbody", {}, rows)
+          ]),
+          h("small muted", "The TP=" + SPT + " row is exactly " +
+            SPTPO.replicated_elements + " + " + SPTPO.sharded_elements + " = " +
+            SPTPO.activation_elements_per_rank +
+            ", which is what the generator recorded. " + SPSCL.toy_caveat)]),
+        d("stack", [
+          frag(NN.formula({ rule: "replicated · LayerNorm output + residual",
+            sub: "2 × seq × d_model",
+            result: spReplicated() + " elements, for any t",
+            cls: "activation" }), "f-right"),
+          frag(NN.formula({ rule: "sharded · the MLP hidden state",
+            sub: "seq × d_ff ÷ t",
+            result: spSharded(SPT) + " elements at t = " + SPT,
+            cls: "activation" }), "f-right"),
+          frag(NN.callout("key", "Why the fraction gets worse",
+            "You are dividing one term and leaving the other alone, so the " +
+            "untouched term becomes a larger and larger share of what is left. " +
+            "Doubling the TP degree from " + SPT + " to " + (SPT * 2) +
+            " here removes " + (spSharded(SPT) - spSharded(SPT * 2)) +
+            " elements per rank out of " +
+            (spReplicated() + spSharded(SPT)) + ". That is the definition of a " +
+            "strategy running out of road."), "f-right"),
+          frag(NN.callout("mem", "And the payload is the residual stream",
+            "In a real block those replicated tensors are the LayerNorm " +
+            "outputs, the dropout masks and the residual stream itself — " +
+            "<span class='mono'>seq × d</span> each, several per block. For " +
+            MODEL.name + " at " + CFG.seq + " tokens one such tensor is " +
+            NN.count(CFG.seq * CFG.d) + " elements, " +
+            BY(CFG.seq * CFG.d * BF16B) + " in bf16, per layer, replicated on " +
+            "every tensor-parallel rank."), "f-right")
+        ])
+      ])
+    ];
+  }
+});
+
+/* ------------------------------------ SP3. why LayerNorm resists hidden-sharding */
+S({
+  chapter: "Sequence parallel · why LayerNorm resists",
+  plain: "A mean needs the whole vector — so LayerNorm cannot be hidden-sharded",
+  notes: "First half of the asymmetry, and it is the reason tensor parallelism " +
+    "left these tensors alone in the first place. LayerNorm normalises across " +
+    "channels: for token 0 the mean is the sum of all " + SPDM +
+    " channels divided by " + SPDM + ", which is " +
+    f(SPLN.rows[0].mu, 6) + ", and the variance needs the same " + SPDM +
+    " numbers again. Now suppose you shard the hidden dimension the way " +
+    "tensor parallelism shards everything else: rank 0 holds channels 0 to " +
+    (SPDM / SPT - 1) + " and rank 1 holds the rest. Rank 0 can compute a " +
+    "partial sum, " + f(sum(SPD.input.X[0].slice(0, SPDM / SPT)), 6) +
+    ", and that is not a mean of anything. To finish it you would need an " +
+    "all-reduce across the hidden dimension, for every token, at every " +
+    "LayerNorm — two per block, plus the final norm. That is far more " +
+    "communication than tensor parallelism spends on the entire MLP, which is " +
+    "why Megatron simply replicates the norm and moves on. Note the deck " +
+    "derives these statistics from the shipped input and checks them against " +
+    "the shipped LayerNorm output to " + f(SPLN.err, 1) + ".",
+  build: function (ctx) {
+    const X = SPD.input.X;
+    ctx.x = am("X · the region's input", X, spStream(), 4);
+    const half = SPDM / SPT;
+    return [
+      kicker("Distributed · sequence parallel · the obstacle"),
+      title("The statistics are <em>along the row</em>. Every channel is needed.", true),
+      d("cols wide-l", [
+        d("stack", [
+          d("panel a", [ph("token 0's " + SPDM + " channels — all of them go " +
+            "into one mean"), ctx.x]),
+          frag(d("cols", [
+            NN.formula({ rule: "μ = (1/d) Σⱼ xⱼ",
+              sub: "(" + X[0].map(function (v) { return f(v, 3); }).join(" + ") +
+                   ") ÷ " + SPDM,
+              result: f(SPLN.rows[0].mu, 6), cls: "activation" }),
+            NN.formula({ rule: "var = (1/d) Σⱼ (xⱼ − μ)²",
+              sub: "needs μ first, so needs every channel twice",
+              result: f(SPLN.rows[0].var, 6), cls: "activation" })
+          ]), "f-fade")
+        ]),
+        d("stack", [
+          frag(d("panel crit", [ph("the thought experiment: shard the hidden " +
+            "dimension across " + SPT + " ranks"),
+            h("small", "rank 0 would hold channels 0–" + (half - 1) +
+              ", rank 1 channels " + half + "–" + (SPDM - 1) + "."),
+            h("gap8", ""),
+            NN.formula({ rule: "rank 0's partial sum",
+              sub: X[0].slice(0, half).map(function (v) {
+                return f(v, 3); }).join(" + "),
+              result: f(sum(X[0].slice(0, half)), 6) + "  — not a mean",
+              cls: "activation" })]), "f-right"),
+          frag(NN.callout("warn", "The price of doing it anyway",
+            "One all-reduce over the hidden dimension per token, per " +
+            "LayerNorm. A block has two norms, so that is two collectives " +
+            "before either matmul has started — on top of the two " +
+            "tensor parallelism already pays at the end of each sub-layer. " +
+            "Nobody does this."), "f-right"),
+          frag(NN.callout("why", "Which is why TP replicates it",
+            "Megatron's answer is the pragmatic one: leave the norm " +
+            "replicated, pay the memory, keep the communication to one " +
+            "all-reduce per sub-layer. The previous run's inventory is the " +
+            "consequence — " + SPTPO.replicated_elements + " of " +
+            SPTPO.activation_elements_per_rank + " elements duplicated."), "f-right")
+        ])
+      ])
+    ];
+  }
+});
+
+/* --------------------------------- SP4. but it needs no OTHER token — the door */
+S({
+  chapter: "Sequence parallel · the asymmetry",
+  plain: "But LayerNorm needs no OTHER token — and that is the opening",
+  notes: "Second half of the asymmetry, and this is the whole idea. LayerNorm " +
+    "needs every channel of a token. It needs nothing at all from any other " +
+    "token. Read the four means off the table: " +
+    SPLN.rows.map(function (r) { return f(r.mu, 4); }).join(", ") +
+    " — four numbers computed from four disjoint sets of inputs. Delete token " +
+    "“" + SPTOK[SPSEQ - 1] + "” and the other three are bit-identical. The " +
+    "same is true of the residual add, which is elementwise, and of dropout, " +
+    "which is per element. So there are two axes here and tensor parallelism " +
+    "only used one of them. It shards the hidden dimension, which these " +
+    "operations cannot tolerate. The sequence dimension is sitting completely " +
+    "untouched, and these operations do not care about it at all. Shard along " +
+    "THAT, and rank r normalises only its own tokens, needing nothing from " +
+    "anyone. That sentence is sequence parallelism.",
+  build: function (ctx) {
+    const rows = SPLN.rows.map(function (r, t) {
+      return el("tr", {}, [
+        el("td", { style: { textAlign: "left" } }, spTokRow(t)),
+        el("td", { class: "n v-activation" }, f(r.mu, 6)),
+        el("td", { class: "n v-activation" }, f(r.var, 6)),
+        el("td", { class: "n" }, "rank " + spOwner(t))
+      ]);
+    });
+    return [
+      kicker("Distributed · sequence parallel · the opening"),
+      title("Two axes. Tensor parallelism only ever used one of them.", true),
+      d("cols wide-l", [
+        d("panel a", [ph(SPSEQ + " tokens, " + SPSEQ +
+          " completely independent normalisations"),
+          el("table", { class: "data" }, [
+            el("thead", {}, el("tr", {}, [
+              el("th", { style: { textAlign: "left" } }, "token"),
+              el("th", {}, "mean μ"), el("th", {}, "variance"),
+              el("th", {}, "could live on")])),
+            el("tbody", {}, rows)
+          ]),
+          h("small muted", "Nothing in this table was shared between rows. " +
+            "Derived from SEQPAR.input.X and checked against " +
+            "SEQPAR.baseline.ln to " + f(SPLN.err, 1) + ".")]),
+        d("stack", [
+          frag(d("cols", [
+            d("panel crit", [ph("across channels"),
+              h("small", "LayerNorm <b>cannot</b> be split here — a mean needs " +
+                "the whole vector.")]),
+            d("panel a", [ph("across tokens"),
+              h("small", "LayerNorm <b>does not care</b> — every token is its " +
+                "own problem.")])
+          ]), "f-right"),
+          frag(NN.callout("key", "The whole idea, in one sentence",
+            "The regions tensor parallelism leaves replicated are exactly the " +
+            "regions that are elementwise or per-token. They resist being cut " +
+            "along the hidden dimension and are completely indifferent to " +
+            "being cut along the sequence — which is the one axis tensor " +
+            "parallelism never touched."), "f-right"),
+          frag(NN.callout("why", "And the same is true of its neighbours",
+            "The residual add is elementwise. Dropout is per element. The " +
+            "second LayerNorm is per token. Every operation in the region " +
+            "between two tensor-parallel matmuls has this shape — which is " +
+            "why the region can be sharded whole, not operation by " +
+            "operation."), "f-right")
+        ])
+      ])
+    ];
+  }
+});
+
+/* --------------------------------------------- SP5. the two cuts, side by side */
+S({
+  chapter: "Sequence parallel · the two cuts",
+  plain: "Shard the SP regions by SEQUENCE, the TP region by HIDDEN",
+  notes: "Here are the two cuts on the actual tensors. On the left the " +
+    "LayerNorm output, " + SPSEQ + " × " + SPDM +
+    ", cut horizontally: rank 0 owns tokens “" + SPTOK[0] + "” and “" +
+    SPTOK[1] + "”, rank 1 owns “" + SPTOK[2] + "” and “" + SPTOK[3] +
+    "”. Every rank holds " + (SPPER * SPDM) + " elements instead of " +
+    (SPSEQ * SPDM) + ". On the right the MLP hidden state, " + SPSEQ + " × " +
+    SPFF + ", cut vertically exactly as tensor parallelism already cut it: " +
+    "rank 0 owns neurons 0 to " + (SPFPR - 1) + " for every token. Same " +
+    "tensor family, two different axes, and between them the whole region is " +
+    "sharded with nothing left over. The cost of having two axes is that " +
+    "something has to convert between them, twice per region — and the next " +
+    "slide is that conversion. Say the punchline early so people are looking " +
+    "for it: the conversion turns out to be free, because tensor parallelism " +
+    "was already paying for it.",
+  build: function (ctx) {
+    ctx.ln = am("LN output · " + SPSEQ + " × " + SPDM, SPBASE.ln,
+                "rank 0 owns rows 0–" + (SPPER - 1), 3);
+    ctx.act = am("MLP hidden · " + SPSEQ + " × " + SPFF, SPBASE.act,
+                 "rank 0 owns cols 0–" + (SPFPR - 1), 2);
+    return [
+      kicker("Distributed · sequence parallel · the two axes"),
+      title("Cut one tensor by row and the next by column", true),
+      d("cols", [
+        d("panel a", [ph("SP region · sharded by SEQUENCE · rank 0's rows lit"),
+          ctx.ln,
+          h("small muted", SPPER + " tokens × " + SPDM + " channels = " +
+            (SPPER * SPDM) + " elements per rank")]),
+        d("panel a", [ph("TP region · sharded by HIDDEN · rank 0's columns lit"),
+          ctx.act,
+          h("small muted", SPSEQ + " tokens × " + SPFPR + " neurons = " +
+            (SPSEQ * SPFPR) + " elements per rank")])
+      ]),
+      frag(d("cols", [
+        NN.callout("key", "Nothing is replicated any more",
+          "Every activation in the region now belongs to exactly one rank " +
+          "along exactly one axis. " + SPSP.note),
+        NN.callout("warn", "But the axes have to meet",
+          "The matmul contracts over the hidden dimension, so every rank " +
+          "entering the TP region needs every token. Something must convert " +
+          "a sequence-sharded tensor into a full one on the way in, and back " +
+          "on the way out. That conversion is the next slide.")
+      ]), "f-fade")
+    ];
+  },
+  render: function (n, ctx) {
+    ctx.ln.highlight(grid2(SPPER, SPDM, function (i, j) { return [i, j]; }), true);
+    ctx.act.highlight(grid2(SPSEQ, SPFPR, function (i, j) { return [i, j]; }), true);
+  }
+});
+
+/* ----------------------------------------------- SP6. the zipper, animated */
+S({
+  chapter: "Sequence parallel · the zipper",
+  plain: "The zipper: shard by seq → all-gather → shard by hidden → " +
+         "reduce-scatter → shard by seq",
+  notes: "Step through it. Stage one, the SP region: rank r normalises only " +
+    "its own tokens. The generator records the op as “" +
+    SPSP.schedule[0].op + "” — no communication at all — and the reason: " +
+    SPSP.schedule[0].why + " Stage two, entering the TP region: an all-gather " +
+    "along the sequence, " + SPSP.schedule[1].elements + " elements, because " +
+    SPSP.schedule[1].why + " Stage three, the TP region itself, which is " +
+    "unchanged from before — column-parallel W_in, GELU on the shard, " +
+    "row-parallel W_out, and each rank ends holding a partial sum over its " +
+    "slice of the contraction. Stage four, leaving: a reduce-scatter, " +
+    SPSP.schedule[2].elements + " elements, because " + SPSP.schedule[2].why +
+    " And that is the zipper: the sequence axis opens on the way in and closes " +
+    "on the way out, and in between the hidden axis is the one that is split. " +
+    "Only rank 0's sends are drawn; every rank does the same thing at the same " +
+    "time.",
+  build: function (ctx) {
+    const N = SPT, SL = SPSEQ;
+    const empty = function () {
+      const g = [];
+      for (let i = 0; i < N; i++) { g.push([]); for (let j = 0; j < SL; j++) g[i].push(null); }
+      return g;
+    };
+    const shardState = function () {
+      const g = empty();
+      for (let i = 0; i < N; i++) {
+        for (let j = 0; j < SL; j++) if (spOwner(j) === i) g[i][j] = SPTOK[j];
+      }
+      return g;
+    };
+    /* in the TP region every rank has every token, but only its own slice of
+       the hidden dimension — so the slot says which neurons it holds */
+    const fullState = function (hidden) {
+      const g = empty();
+      for (let i = 0; i < N; i++) {
+        for (let j = 0; j < SL; j++) {
+          g[i][j] = SPTOK[j] + (hidden
+            ? " ⟨" + (i * SPFPR) + "–" + (i * SPFPR + SPFPR - 1) + "⟩" : "");
+        }
+      }
+      return g;
+    };
+    const a = shardState();
+    const b = fullState(false);
+    const c = fullState(true);
+    const z = shardState();
+    const ag = [[0, 1, "all_gather · " + SPSP.schedule[1].elements + " elems"]];
+    const rs = [[1, 0, "reduce_scatter · " + SPSP.schedule[2].elements + " elems"]];
+    ctx.viz = collSVG({ world: N, slots: SL, color: "var(--activation)",
+      states: [a, b, c, c, z],
+      moves: [ag, [], [], rs, []] });
+    ctx.caps = [
+      "① <b>SP region · " + SPPER + " tokens per rank.</b> " +
+        SPSP.schedule[0].why + " The arrow is the all-gather about to run.",
+      "② <b>all_gather along the sequence</b> — " + SPSP.schedule[1].why,
+      "③ <b>TP region</b> — every rank now has the full sequence and " +
+        SPFPR + " of " + SPFF + " neurons: column-parallel W_in, GELU on the " +
+        "shard, row-parallel W_out. Each rank ends holding a partial sum.",
+      "④ <b>reduce_scatter along the sequence</b> — " + SPSP.schedule[2].why,
+      "⑤ back to <b>" + SPPER + " tokens per rank</b>. " + SPSP.note
+    ];
+    ctx.cap = el("div", { class: "small",
+      style: { minHeight: "56px", lineHeight: "1.5", marginTop: "8px" } });
+    const chips = SPSP.schedule.map(function (s) {
+      return frag(d("pill" + (s.op === "none" ? "" : " hot"),
+        "step " + s.step + " · " + s.region + " · " + s.op +
+        (s.elements ? " · " + s.elements + " elems" : "")), "f-pop");
+    });
+    return [
+      kicker("Distributed · sequence parallel · the schedule"),
+      title("The sequence axis opens on the way in and closes on the way out", true),
+      d("panel a", [ctx.viz, ctx.cap]),
+      d("rowflex", chips),
+      frag(NN.callout("key", "Two collectives where TP had one — " +
+        "and the same bytes",
+        "That is the claim the next slide proves. The all-gather and the " +
+        "reduce-scatter are not additional traffic: they are the two halves of " +
+        "the all-reduce tensor parallelism was already running at the end of " +
+        "the region, with useful sharding done in the gap between them."), "f-fade")
+    ];
+  },
+  render: function (n, ctx) {
+    const k = NN.clamp(n, 0, ctx.caps.length - 1);
+    ctx.viz.step(k);
+    ctx.cap.innerHTML = "<span>" + ctx.caps[k] + "</span>";
+  }
+});
+
+/* ----------------------------------------- SP7. what each rank holds now */
+S({
+  chapter: "Sequence parallel · the inventory",
+  plain: SPMEM.tp_only_per_rank + " → " + SPMEM.tp_sp_per_rank +
+         " elements per rank, " + f(SPMEM.saved_pct, 1) + "% less",
+  notes: "Count it again with the same accounting. Under tensor parallelism " +
+    "alone each rank held " + SPMEM.tp_only_per_rank + " activation elements, " +
+    SPTPO.replicated_elements + " of them replicated. Under TP plus SP each " +
+    "rank holds " + SPMEM.tp_sp_per_rank + ", and none of them are " +
+    "replicated: the LayerNorm output is " + SPPER + " × " + SPDM +
+    " because it only covers this rank's tokens, the MLP hidden state is " +
+    "unchanged at " + SPSEQ + " × " + SPFPR + " because that was already " +
+    "sharded, and the residual stream is " + SPPER + " × " + SPDM +
+    " for the same reason as the LayerNorm. " + SPSP.note + " That is " +
+    SPMEM.saved + " elements saved, " + f(SPMEM.saved_pct, 1) +
+    "% of the region's activation memory, on a toy where the replicated part " +
+    "was two thirds of the total. At real shapes and real TP degrees the " +
+    "saving is larger, and the end of this run puts the published " +
+    "coefficients on it.",
+  build: function () {
+    const cards = NN.gpu.grid({ count: SPT,
+      label: function (g) { return "rank " + g + " · tokens " +
+        SPSP.ranks[g].seq_rows.map(function (t) {
+          return "“" + SPTOK[t] + "”"; }).join(" "); },
+      render: function (g) { return spInventory(SPSP.ranks[g].resident, g); } });
+    return [
+      kicker("Distributed · sequence parallel · the inventory"),
+      title("Every activation sharded along one axis or the other"),
+      frag(cards, "f-pop"),
+      frag(d("cols wide-l", [
+        d("panel a", [ph("activation elements per rank, this region"),
+          NN.chart.bars({ items: [
+            { label: "TP only · " + SPTPO.replicated_elements + " replicated",
+              value: SPMEM.tp_only_per_rank, color: "var(--critical)",
+              sub: "· " + SPTPO.replicated_elements + " + " +
+                   SPTPO.sharded_elements },
+            { label: "TP + SP · nothing replicated",
+              value: SPMEM.tp_sp_per_rank, color: "var(--activation)",
+              sub: "· " + f(SPMEM.saved_pct, 1) + "% less" }
+          ], unit: "elements" }),
+          chartKey([
+            { name: "what TP alone needs", color: "var(--critical)" },
+            { name: "what TP + SP needs", color: "var(--activation)" }
+          ])]),
+        NN.tiles([
+          { k: "TP only", v: String(SPMEM.tp_only_per_rank), s: "per rank" },
+          { k: "TP + SP", v: String(SPMEM.tp_sp_per_rank), s: "per rank",
+            cls: "activation" },
+          { k: "saved", v: String(SPMEM.saved),
+            s: f(SPMEM.saved_pct, 1) + "% of the region", cls: "activation" }
+        ])
+      ]), "f-fade"),
+      frag(NN.callout("mem", "Nothing left over", SPSP.note +
+        " The shard bars above say it directly: under TP alone two of the " +
+        "three tensors were filled on every rank, which is what REPLICATED " +
+        "looks like in this grammar. Now every bar has exactly one filled " +
+        "segment per rank."), "f-fade")
+    ];
+  }
+});
+
+/* --------------------------------------------------------- SP8. THE PUNCHLINE */
+S({
+  chapter: "Sequence parallel · the punchline",
+  plain: "Same bytes on the wire: " + f(SPCOMM.tp_total_sent, 1) + " vs " +
+         SPCOMM.tp_plus_sp.map(function (c) {
+           return f(c.sent_per_rank, 1); }).join(" + ") + " = " +
+         f(SPCOMM.sp_total_sent, 1),
+  notes: "This is the slide the whole run is built towards, and it takes " +
+    "thirty seconds. Tensor parallelism alone runs one all-reduce over a " +
+    SPCOMM.payload_elements + "-element payload, and a ring all-reduce makes " +
+    "every rank send " + f(SPCOMM.tp_total_sent, 1) + " elements. Tensor plus " +
+    "sequence parallelism runs an all-gather and a reduce-scatter over the " +
+    "same payload: " + SPCOMM.tp_plus_sp[0].sent_per_rank + " plus " +
+    SPCOMM.tp_plus_sp[1].sent_per_rank + " equals " +
+    f(SPCOMM.sp_total_sent, 1) + ". The generator records identical as " +
+    String(SPCOMM.identical) + ", and it is not a coincidence: " +
+    SPCOMM.why + " The collectives run established exactly this identity, and " +
+    "this is where it pays. Same wire, less memory. Then be honest about what " +
+    "is not free, which is the next slide.",
+  build: function () {
+    const linked = slideNumberByPlain("all_reduce IS reduce_scatter");
+    return [
+      kicker("Distributed · sequence parallel · <b>the punchline</b>"),
+      el("h2", { class: "stitle", html:
+        "Sequence parallelism does not add a collective. It " +
+        "<span class='v-activation'>splits</span> the one that was there." }),
+      frag(d("cols", [
+        d("panel crit", [ph("TP only · one collective"),
+          d("stack", SPCOMM.tp_only.map(function (c) {
+            return NN.formula({ rule: c.op,
+              sub: "ring, payload " + SPCOMM.payload_elements + " elements",
+              result: f(c.sent_per_rank, 1) + " sent per rank",
+              cls: "activation" });
+          })),
+          h("gap8", ""),
+          h("midnum", "total " + f(SPCOMM.tp_total_sent, 1))]),
+        d("panel a", [ph("TP + SP · two collectives, same payload"),
+          d("stack", SPCOMM.tp_plus_sp.map(function (c) {
+            return NN.formula({ rule: c.op,
+              sub: "ring, payload " + SPCOMM.payload_elements + " elements",
+              result: f(c.sent_per_rank, 1) + " sent per rank",
+              cls: "activation" });
+          })),
+          h("gap8", ""),
+          h("midnum v-activation", "total " + f(SPCOMM.sp_total_sent, 1))])
+      ]), "f-pop"),
+      frag(d("vbox" + (SPCOMM.identical ? "" : " bad"), [
+        el("span", { class: "mark" }, SPCOMM.identical ? "✓" : "✕"),
+        el("span", { html: "<b>identical = " + String(SPCOMM.identical) +
+          "</b> &nbsp;·&nbsp; " + f(SPCOMM.tp_total_sent, 1) + " elements per " +
+          "rank either way, because <span class='mono'>all_reduce = " +
+          "reduce_scatter + all_gather</span>" +
+          (linked ? " — established on slide <b>" + linked + "</b>" :
+           SEC_COLL ? " — established in the collectives run, slides <b>" +
+             SEC_COLL.first + "–" + SEC_COLL.last + "</b>" : "") })
+      ]), "f-pop"),
+      frag(NN.callout("key", "Why it is free, in the generator's words",
+        SPCOMM.why), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------------------- SP9. the honest caveat */
+S({
+  chapter: "Sequence parallel · the caveat",
+  plain: "Not quite free: two collectives have two launch and sync costs",
+  notes: "The bytes are identical; the latency is not. " + SPCOMM.caveat +
+    " Say the mechanism: a collective costs a fixed launch and synchronisation " +
+    "overhead plus a term proportional to the payload. Splitting one " +
+    "all-reduce into an all-gather and a reduce-scatter keeps the payload term " +
+    "exactly the same and doubles the fixed term. On a long sequence the " +
+    "payload term dominates and the extra launch disappears into the noise; on " +
+    "a short one it does not. The collectives run made the same point about " +
+    "rings: the bandwidth term is 2(N−1)/N and flat, but the latency term is " +
+    "2(N−1) hops and grows. This is that distinction showing up again, one " +
+    "level higher. In practice Megatron turns sequence parallelism on by " +
+    "default alongside tensor parallelism, because training sequences are long " +
+    "and the memory is worth more than the launch.",
+  build: function () {
+    return [
+      kicker("Distributed · sequence parallel · what is not free"),
+      title("Same bandwidth term. Twice the latency term.", true),
+      frag(d("cols", [
+        d("panel crit", [ph("what got worse"),
+          h("midnum", "2 launches"),
+          h("small muted", "one all-reduce became an all-gather and a " +
+            "reduce-scatter — two kernel launches, two synchronisations")]),
+        d("panel a", [ph("what stayed the same"),
+          h("midnum v-activation", f(SPCOMM.sp_total_sent, 1) + " elements"),
+          h("small muted", "sent per rank, identical to TP alone")]),
+        d("panel a", [ph("what got better"),
+          h("midnum v-activation", f(SPMEM.saved_pct, 1) + "%"),
+          h("small muted", "of this region's activation memory, per rank")])
+      ]), "f-pop"),
+      frag(NN.callout("warn", "The caveat, verbatim", SPCOMM.caveat), "f-fade"),
+      frag(d("cols", [
+        NN.callout("why", "Same distinction as the ring slide",
+          "A collective costs a fixed term plus a term proportional to the " +
+          "payload. The collectives run showed the bandwidth term of a ring " +
+          "all-reduce converging to 2S and staying there while the latency " +
+          "term, 2(N−1) hops, keeps growing. Splitting a collective in two " +
+          "leaves the first term alone and doubles the second."),
+        NN.callout("key", "Why it is on by default anyway",
+          "Training sequences are thousands of tokens, so the payload term " +
+          "dominates by orders of magnitude, and the memory freed is what lets " +
+          "you raise the sequence length or drop activation recomputation. " +
+          "The trade only goes the other way on very short sequences.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* ----------------------------------------------------- SP10. the equivalence */
+S({
+  chapter: "Sequence parallel · the proof",
+  plain: "Both reproduce the single-GPU output: max|Δ| = " + f(SPEQV.sp_err, 1),
+  notes: "The same discipline as every other strategy in this part. Run the " +
+    "region on one GPU. Run it under tensor parallelism alone. Run it under " +
+    "tensor plus sequence parallelism. All three produce the same output: TP " +
+    "alone differs from the single-GPU answer by " + f(SPEQV.tp_err, 1) +
+    " and TP plus SP by " + f(SPEQV.sp_err, 1) + ", which is the last bit of a " +
+    "double. " + SPEQV.claim + " Say the general form of the claim once more, " +
+    "because this is the fourth time the deck has proved it: data parallelism " +
+    "reproduced the full-batch gradient, tensor parallelism reproduced the " +
+    "forward pass, and now sequence parallelism reproduces both. Parallelism " +
+    "is a statement about where bytes live and when they move. It is never a " +
+    "statement about the model.",
+  build: function () {
+    return [
+      kicker("Distributed · sequence parallel · verified"),
+      title("Three placements of the same arithmetic", true),
+      frag(d("rowflex top", [
+        am("out · one GPU", SPBASE.out, "the reference", 5),
+        h("ar", "="),
+        am("out · TP only", SPTPO.out, "replicated norms", 5),
+        h("ar", "="),
+        am("out · TP + SP", SPSP.out, "nothing replicated", 5)
+      ]), "f-pop"),
+      frag(NN.tiles([
+        { k: "TP only vs one GPU", v: f(SPEQV.tp_err, 1),
+          s: "max |Δ|", cls: "activation" },
+        { k: "TP + SP vs one GPU", v: f(SPEQV.sp_err, 1),
+          s: SPEQV.passed ? "PASS" : "FAIL", cls: "activation" },
+        { k: "activation elements per rank",
+          v: SPMEM.tp_only_per_rank + " → " + SPMEM.tp_sp_per_rank,
+          s: f(SPMEM.saved_pct, 1) + "% less", cls: "activation" },
+        { k: "elements sent per rank",
+          v: f(SPCOMM.tp_total_sent, 1) + " → " + f(SPCOMM.sp_total_sent, 1),
+          s: "unchanged" }
+      ])),
+      frag(d("cols", [
+        NN.callout("key", "The claim, in the generator's words", SPEQV.claim),
+        NN.callout("why", "The fourth time this deck has proved it",
+          "Data parallelism reproduced the full-batch gradient. Tensor " +
+          "parallelism reproduced the forward pass. ZeRO reproduced the " +
+          "optimizer step. Sequence parallelism reproduces all of it. Every " +
+          "strategy in this part changes the address space and none of them " +
+          "changes the function being computed.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* ---------------------------------------------------- SP11. at scale, the curves */
+S({
+  chapter: "Sequence parallel · at scale",
+  plain: "TP-only asymptotes at " + f(SPA, 0) +
+         " bytes/token/layer and stops. TP+SP keeps dividing.",
+  notes: "Now the real-scale version, and the coefficients are quoted rather " +
+    "than derived — the source is on the slide. Korthikanti and colleagues " +
+    "count activation bytes per token per layer for a transformer block at " +
+    "tensor-parallel degree t. Tensor parallelism alone gives " +
+    SPSCL.formula_tp_only + "; with sequence parallelism it is " +
+    SPSCL.formula_tp_sp + ". Start with the sanity check, because it is the " +
+    "reason to trust the rest: C = A + B, " + f(SPC, 0) + " = " + f(SPA, 0) +
+    " + " + f(SPB, 0) + ", so at t = 1 the two expressions are the same " +
+    "expression — as they must be, because on one GPU nothing is sharded " +
+    "either way. And they do agree: " +
+    f(SP_T1.bytes_per_token_per_layer_tp_only, 0) + " equals " +
+    f(SP_T1.bytes_per_token_per_layer_tp_sp, 0) +
+    ". Then watch them separate. At t = " + SP_T8.tp + " it is " +
+    f(SP_T8.bytes_per_token_per_layer_tp_only, 2) + " against " +
+    f(SP_T8.bytes_per_token_per_layer_tp_sp, 2) + ", a " +
+    f(SP_T8.saving_pct, 1) + "% saving. The " + f(SPA, 0) +
+    " is exactly the replicated part — the LayerNorms, the dropout masks and " +
+    "the residual — and it does not have a t in it, so the TP-only curve " +
+    "flattens onto it and stops no matter how many GPUs you add. " +
+    SPSCL.reading + " The deck solves the two coefficients out of the shipped " +
+    "table rather than typing them, and they reproduce every row to " +
+    f(SPCERR, 1) + ".",
+  build: function () {
+    const tpPts = SPSCL.table.map(function (r) {
+      return [Math.log2(r.tp), r.bytes_per_token_per_layer_tp_only]; });
+    const spPts = SPSCL.table.map(function (r) {
+      return [Math.log2(r.tp), r.bytes_per_token_per_layer_tp_sp]; });
+    const flPts = SPSCL.table.map(function (r) {
+      return [Math.log2(r.tp), SPA]; });
+    return [
+      kicker("Distributed · sequence parallel · at scale"),
+      title("<span class='mono'>" + f(SPA, 0) + " + " +
+            f(SPB, 0) + "/t</span> against <span class='mono'>" +
+            f(SPC, 0) + "/t</span>", true),
+      d("cols wide-l", [
+        d("panel a", [ph("activation bytes per token per layer · " +
+          "Korthikanti Table 2 coefficients, quoted"),
+          NN.chart.line({
+            series: [
+              { name: "TP only", color: "var(--critical)", points: tpPts },
+              { name: "TP + SP", color: "var(--activation)", points: spPts },
+              { name: "the replicated floor", color: "var(--accent)",
+                points: flPts, dash: "6 5", dots: false }
+            ],
+            width: 560, height: 250, xlabel: "log₂(tensor-parallel degree t)",
+            ylabel: "bytes / token / layer", yMin: 0, yMax: 36,
+            margin: { t: 14, r: 16, b: 34, l: 72 }
+          }),
+          chartKey([
+            { name: "TP only · " + f(SPA, 0) + " + " + f(SPB, 0) +
+                    "/t — flattens onto the floor", color: "var(--critical)" },
+            { name: "TP + SP · " + f(SPC, 0) + "/t — keeps dividing",
+              color: "var(--activation)" },
+            { name: "the replicated floor · " + f(SPA, 0) +
+                    " bytes, no t in it", color: "var(--accent)" }
+          ]),
+          h("small muted", "Coefficients quoted, not derived here: <b>" +
+            SPSCL._source + "</b> The deck checks them against the shipped " +
+            "table and reproduces every row to " + f(SPCERR, 1) + ". " +
+            SPSCL.toy_caveat)]),
+        d("stack", [
+          frag(d("vbox", [
+            el("span", { class: "mark" }, "✓"),
+            el("span", { html: "<b>the sanity check</b> — at t = " +
+              SP_T1.tp + " nothing is sharded either way, so the two " +
+              "expressions must agree: " +
+              f(SP_T1.bytes_per_token_per_layer_tp_only, 0) + " = " +
+              f(SP_T1.bytes_per_token_per_layer_tp_sp, 0) })
+          ]), "f-right"),
+          frag(NN.formula({ rule: "TP only", sub: SPSCL.formula_tp_only,
+            result: f(SP_T8.bytes_per_token_per_layer_tp_only, 2) +
+                    " at t = " + SP_T8.tp, cls: "activation" }), "f-right"),
+          frag(NN.formula({ rule: "TP + SP", sub: SPSCL.formula_tp_sp,
+            result: f(SP_T8.bytes_per_token_per_layer_tp_sp, 2) +
+                    " at t = " + SP_T8.tp, cls: "activation" }), "f-right"),
+          frag(NN.callout("key", "A = " + f(SPA, 0) +
+            " has no t in it, and that is the whole story",
+            "A is " + SPCF.floor_includes + " — the tensors the first slide of " +
+            "this run showed being computed twice. Add GPUs and the " +
+            f(SPB, 0) + "/t term shrinks towards nothing while that " +
+            f(SPA, 0) + " sits unchanged. Note the identity " +
+            "<span class='mono'>C = A + B</span>, " + f(SPC, 0) + " = " +
+            f(SPA, 0) + " + " + f(SPB, 0) + " — which is <em>why</em> the two " +
+            "must agree at t = 1."), "f-right")
+        ])
+      ])
+    ];
+  }
+});
+
+/* ----------------------------------------------------- SP12. at scale, the table */
+S({
+  chapter: "Sequence parallel · at scale",
+  plain: "At t = " + SP_T8.tp + ": " +
+         f(SP_T8.bytes_per_token_per_layer_tp_only, 2) + " against " +
+         f(SP_T8.bytes_per_token_per_layer_tp_sp, 2) + " bytes/token/layer",
+  notes: "The same numbers as a table, and then what they mean for a real run. " +
+    "Read the saving column: it starts at zero at t = 1, because there is " +
+    "nothing to save on one GPU, and climbs past two thirds by t = " +
+    SP_T8.tp + ". Then put the model on it. " + MODEL.name + " has " +
+    CFG.layers + " layers and runs at " + CFG.seq + " tokens, so at t = " +
+    SP_T8.tp + " one sequence's activations in this accounting are " +
+    BY(SP_T8.bytes_per_token_per_layer_tp_only * CFG.seq * CFG.layers) +
+    " under tensor parallelism alone and " +
+    BY(SP_T8.bytes_per_token_per_layer_tp_sp * CFG.seq * CFG.layers) +
+    " with sequence parallelism, per rank. That difference is bigger than the " +
+    "whole gradient buffer of a 70B model in bf16, which the cost run put at " +
+    BY(CFG.gradB) + ". It is also, in practice, the difference between " +
+    "needing full activation recomputation and not — which is exactly the " +
+    "argument the Korthikanti paper is making, since its title is about " +
+    "reducing activation recomputation rather than about parallelism at all.",
+  build: function () {
+    const rows = SPSCL.table.map(function (r) {
+      const hot = r.tp === SP_T8.tp;
+      return el("tr", {}, [
+        el("td", { class: "n", html: hot
+          ? "<b class='v-activation'>" + r.tp + "</b>" : String(r.tp) }),
+        el("td", { class: "n", html: "<span style='color:var(--critical)'>" +
+          f(r.bytes_per_token_per_layer_tp_only, 3) + "</span>" }),
+        el("td", { class: "n v-activation" },
+           f(r.bytes_per_token_per_layer_tp_sp, 3)),
+        el("td", { class: "n" }, f(r.saving_pct, 1) + "%"),
+        el("td", { class: "n" },
+           BY(r.bytes_per_token_per_layer_tp_only * CFG.seq * CFG.layers)),
+        el("td", { class: "n v-activation" },
+           BY(r.bytes_per_token_per_layer_tp_sp * CFG.seq * CFG.layers))
+      ]);
+    });
+    return [
+      kicker("Distributed · sequence parallel · the table"),
+      title("What it is worth on a real model", true),
+      d("cols wide-l", [
+        d("panel a", [ph("bytes per token per layer, and then × " + CFG.seq +
+          " tokens × " + CFG.layers + " layers for " + MODEL.name +
+          " — one sequence, per rank"),
+          el("table", { class: "data" }, [
+            el("thead", {}, el("tr", {}, [
+              el("th", {}, "t"), el("th", {}, "TP only"),
+              el("th", {}, "TP + SP"), el("th", {}, "saving"),
+              el("th", {}, "TP only, one seq"), el("th", {}, "TP + SP, one seq")])),
+            el("tbody", {}, rows)
+          ]),
+          h("small muted", SPSCL._source)]),
+        d("stack", [
+          frag(NN.tiles([
+            { k: "at t = " + SP_T8.tp + ", TP only",
+              v: BY(SP_T8.bytes_per_token_per_layer_tp_only * CFG.seq * CFG.layers),
+              s: "per rank, one sequence" },
+            { k: "at t = " + SP_T8.tp + ", TP + SP",
+              v: BY(SP_T8.bytes_per_token_per_layer_tp_sp * CFG.seq * CFG.layers),
+              s: f(SP_T8.saving_pct, 1) + "% less", cls: "activation" },
+            { k: "difference", v: BY((SP_T8.bytes_per_token_per_layer_tp_only -
+                 SP_T8.bytes_per_token_per_layer_tp_sp) * CFG.seq * CFG.layers),
+              s: "against " + BY(CFG.gradB) + " of bf16 gradients",
+              cls: "activation" }
+          ]), "f-right"),
+          frag(NN.callout("mem", "What that buys, concretely",
+            "Activation memory is the term you trade for throughput: it is what " +
+            "sets the micro-batch size and it is what activation recomputation " +
+            "is spending 30% of your compute to avoid. Cutting it by " +
+            f(SP_T8.saving_pct, 0) + "% at no communication cost is why the " +
+            "paper this table comes from is titled after recomputation rather " +
+            "than after parallelism."), "f-right"),
+          frag(NN.callout("warn", "Read the units carefully",
+            "These are bytes per token per layer for one rank, in the paper's " +
+            "accounting, which assumes bf16 and counts the tensors a block " +
+            "must keep. They are not comparable with the " +
+            "<span class='mono'>bytes per parameter</span> figures from the " +
+            "cost run — that is persistent state, this is per-sequence."), "f-right")
+        ])
+      ])
+    ];
+  }
+});
+
+/* --------------------------------------------------- SP13. what SP is NOT */
+S({
+  chapter: "Sequence parallel · what it is not",
+  plain: "Not context parallelism, not weight sharding, not a replacement for TP",
+  notes: "Close the run by ruling out the three things people assume. First, " +
+    "this is not context or ring parallelism. Those also shard the sequence, " +
+    "but they shard it for ATTENTION itself, where tokens genuinely do read " +
+    "each other, so they need a ring exchange of keys and values between ranks " +
+    "and the attention computation has to be restructured around it. Sequence " +
+    "parallelism deliberately shards only the regions where no token reads " +
+    "another — the norms, the dropout, the residual — which is why it needs no " +
+    "new collective at all. Second, it does not shard weights. Look back at " +
+    "the inventory: every tensor it moved was an activation. The weights were " +
+    "already sharded by tensor parallelism and it does not touch them, which " +
+    "is also why it composes with ZeRO without interacting. Third, it does not " +
+    "replace tensor parallelism — it has no meaning without it, because the " +
+    "collectives it uses are the two halves of the all-reduce TP was already " +
+    "running. It is TP's other half, not an alternative to it.",
+  build: function () {
+    return [
+      kicker("Distributed · sequence parallel · the boundaries"),
+      title("Three things it is repeatedly mistaken for"),
+      frag(d("cols3", [
+        d("panel crit", [ph("not · context / ring parallelism"),
+          h("small", "Context parallelism shards the sequence for " +
+            "<b>attention itself</b>, where tokens do read each other. That " +
+            "needs a ring exchange of K and V between ranks and a restructured " +
+            "attention kernel."),
+          h("gap8", ""),
+          h("small muted", "Sequence parallelism shards only the regions where " +
+            "no token reads another, which is why it costs no new collective.")]),
+        d("panel crit", [ph("not · weight sharding"),
+          h("small", "Every tensor it moved is an <b>activation</b>. The " +
+            "inventory two slides back lists three, all activations; the " +
+            "weights were already cut by tensor parallelism."),
+          h("gap8", ""),
+          h("small muted", "So it is orthogonal to ZeRO, which shards " +
+            "parameters, gradients and optimizer state and never touches " +
+            "activations.")]),
+        d("panel crit", [ph("not · an alternative to TP"),
+          h("small", "It has no meaning on its own. Its two collectives are " +
+            "the two halves of the all-reduce tensor parallelism was already " +
+            "running — with no TP there is no all-reduce to split."),
+          h("gap8", ""),
+          h("small muted", "Megatron turns it on <b>alongside</b> TP, at the " +
+            "same degree, which is why the two are usually named together.")])
+      ]), "f-pop"),
+      frag(d("cols", [
+        NN.callout("key", "The one-line summary",
+          "Tensor parallelism shards the regions that contract over the hidden " +
+          "dimension. Sequence parallelism shards the regions in between, " +
+          "along the axis TP never used. Together they leave nothing " +
+          "replicated, for " + f(SPCOMM.sp_total_sent, 1) +
+          " elements per rank — the same " + f(SPCOMM.tp_total_sent, 1) +
+          " tensor parallelism was already sending."),
+        NN.callout("mem", "Where it sits in the four classes",
+          "This is an <b>activation</b> optimisation, start to finish. ZeRO " +
+          "attacks weights, gradients and optimizer state; tensor parallelism " +
+          "attacks weights and the activations inside a matmul; sequence " +
+          "parallelism attacks the activations between them. Four classes, and " +
+          "every strategy in this part is a decision about which one to stop " +
+          "replicating.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+}  /* end if (SPD) — the sequence-parallel run */
 
 SEP("pp");
 

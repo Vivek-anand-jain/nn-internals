@@ -225,10 +225,22 @@ def flash_attention():
                 m_new = max(m_old, tile_max)
                 corr = math.exp(m_old - m_new) if m_old != float("-inf") else 0.0
 
+                # snapshot BEFORE touching anything
+                acc_before = list(acc[a])
+
                 # rescale everything accumulated so far
                 l_res = l_old * corr
                 for d in range(D_HEAD):
                     acc[a][d] *= corr
+
+                # snapshot AFTER the rescale, BEFORE this tile is added.
+                # These three states are the whole story of the step and
+                # must be captured at the moment each is true -- an earlier
+                # version recorded them at the end, so acc_rescaled came out
+                # byte-identical to acc_after. Page 10 caught it by replaying
+                # the recurrence.
+
+                acc_rescaled = list(acc[a])
 
                 p = [(math.exp(v - m_new) if v != float("-inf") else 0.0)
                      for v in tile[a]]
@@ -253,10 +265,8 @@ def flash_attention():
                     # the accumulator before this tile, and after the
                     # rescale but before this tile's contribution -- so a
                     # page can show all three states without replaying
-                    "acc_before": [acc[a][d] / corr if corr else 0.0
-                                   for d in range(D_HEAD)]
-                                  if corr else [0.0] * D_HEAD,
-                    "acc_rescaled": list(acc[a]),
+                    "acc_before": acc_before,
+                    "acc_rescaled": acc_rescaled,
                     "l_old": l_old, "l_rescaled": l_res,
                     "p_tile": p, "l_new": l_new,
                     "acc_after": list(acc[a]),
