@@ -1,0 +1,1513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 11 Position</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+  /* Page-local layout only. No new tensor hues, no raw hex.
+     weight  = parameters (W_q, W_k, W_v, the learned position table)
+     activation = anything computed from them (Q, K, scores, probabilities,
+                  rotated vectors, outputs)
+     --accent / --warning / --critical carry status, never a tensor class. */
+
+  section.block { scroll-margin-top: 74px; }
+
+  /* ------------------------------------------------------------ matrices */
+  .matwrap { display: inline-block; vertical-align: top; margin: 0 16px 14px 0; }
+  .matname {
+    font-family: var(--mono); font-size: .78rem; margin-bottom: 5px;
+    display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  }
+  .matname b { font-weight: 700; }
+  .matname .sh { color: var(--ink-muted); font-size: .72rem; font-weight: 400; }
+  .matgrid { display: grid; gap: 2px; }
+  .mc {
+    font-family: var(--mono); font-size: .72rem; text-align: right;
+    font-variant-numeric: tabular-nums; padding: 4px 6px; border-radius: 3px;
+    background: var(--surface-3); color: var(--ink);
+    border: 1px solid transparent; white-space: nowrap;
+    transition: background .3s, color .3s, outline-color .15s;
+    outline: 2px solid transparent;
+  }
+  .mc.hdr {
+    background: transparent; color: var(--ink-muted); font-size: .64rem;
+    text-align: center; padding: 2px 4px;
+  }
+  .mc.rowhdr { text-align: left; }
+  .mc.is-activation { background: var(--activation-w); color: var(--activation); }
+  .mc.is-weight     { background: var(--weight-w);     color: var(--weight); }
+  .mc.lit { outline-color: var(--ink); }
+  .mc.zero { opacity: .4; }
+  .mc.missing {
+    background-image: repeating-linear-gradient(45deg,
+      var(--surface-3), var(--surface-3) 3px,
+      var(--surface-1) 3px, var(--surface-1) 7px);
+    background-color: var(--surface-2);
+    color: var(--ink-muted); text-align: center;
+  }
+
+  /* ------------------------------------------------------------- panels */
+  .panel {
+    background: var(--surface-2); border: 1px solid var(--hairline);
+    border-radius: 8px; padding: 12px 14px; margin: 12px 0;
+  }
+  .panel .ph {
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    font-family: var(--mono); font-size: .8rem; font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .kvlist {
+    display: grid; grid-template-columns: 190px 1fr; gap: 3px 12px;
+    font-family: var(--mono); font-size: .76rem;
+  }
+  .kvlist .k { color: var(--ink-muted); }
+  .kvlist .v { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  .verdict {
+    display: flex; align-items: flex-start; gap: 9px; margin: 10px 0;
+    font-family: var(--mono); font-size: .82rem; color: var(--good);
+    line-height: 1.5;
+  }
+  .verdict.bad { color: var(--critical); }
+  .verdict .tick { font-size: 1rem; line-height: 1.2; }
+
+  .badge {
+    font-family: var(--mono); font-size: .62rem; font-weight: 700;
+    letter-spacing: .08em; text-transform: uppercase;
+    padding: 2px 7px; border-radius: 20px;
+    border: 1px solid var(--hairline); color: var(--ink-muted);
+    white-space: nowrap;
+  }
+  .badge.lit { border-color: var(--warning); color: var(--warning); }
+  .badge.derived { border-color: var(--activation); color: var(--activation); }
+
+  /* -------------------------------------------------------- token strip */
+  .tokrow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 10px 0; }
+  .tok {
+    font-family: var(--mono); font-size: .82rem; padding: 7px 13px;
+    border-radius: 7px; background: var(--surface-3);
+    border: 1px solid var(--hairline); cursor: grab; user-select: none;
+    transition: transform .35s cubic-bezier(.4,0,.2,1), border-color .2s, background .2s;
+  }
+  .tok:hover { border-color: var(--ink-muted); }
+  .tok .slot {
+    display: block; font-size: .6rem; color: var(--ink-muted);
+    letter-spacing: .06em; text-transform: uppercase;
+  }
+  .tok.picked { border-color: var(--activation); background: var(--activation-w); }
+
+  /* ---------------------------------------------------------- rope dials */
+  .dials { display: flex; gap: 14px; flex-wrap: wrap; margin: 14px 0; }
+  .dial {
+    background: var(--surface-2); border: 1px solid var(--hairline);
+    border-radius: 8px; padding: 10px 10px 8px; text-align: center;
+    min-width: 152px; flex: 1 1 152px;
+  }
+  .dial .dh {
+    font-family: var(--mono); font-size: .7rem; color: var(--ink-2);
+    margin-bottom: 4px; font-weight: 700;
+  }
+  .dial .dsub {
+    font-family: var(--mono); font-size: .64rem; color: var(--ink-muted);
+    line-height: 1.5; margin-top: 5px;
+  }
+  .dial svg { display: block; margin: 0 auto; }
+
+  /* ------------------------------------------------------------- slider */
+  .sliderrow {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    margin: 10px 0; font-family: var(--mono); font-size: .78rem;
+  }
+  .sliderrow label { color: var(--ink-muted); min-width: 96px; }
+  .sliderrow input[type=range] { flex: 1; min-width: 160px; accent-color: var(--activation); }
+  .sliderrow .out {
+    min-width: 92px; text-align: right; font-variant-numeric: tabular-nums;
+    color: var(--ink); font-weight: 700;
+  }
+  .switchrow { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; margin: 10px 0; }
+  .switch {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: var(--mono); font-size: .76rem; color: var(--ink-2);
+    cursor: pointer; user-select: none;
+  }
+  .switch input { accent-color: var(--activation); }
+
+  /* ---------------------------------------------------------- heat grid */
+  .heat { display: grid; gap: 2px; }
+  .hcell {
+    min-width: 30px; height: 26px; border-radius: 3px;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-size: .58rem; color: var(--ink);
+    border: 1px solid var(--hairline-2); cursor: default;
+    outline: 2px solid transparent; transition: outline-color .12s, transform .12s;
+  }
+  .hcell:hover { outline-color: var(--ink); transform: scale(1.12); z-index: 3; }
+  .hcell.hdr {
+    height: 16px; border: none; background: transparent;
+    color: var(--ink-muted); font-size: .58rem;
+  }
+  .hcell.lit { outline-color: var(--ink); }
+  .hcell.diag { outline-color: var(--warning); }
+
+  /* --------------------------------------------------------------- misc */
+  .twocol { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+  @media (max-width: 900px) { .twocol { grid-template-columns: 1fr; } }
+  .scrollx { overflow-x: auto; padding-bottom: 4px; }
+  table.data td.lit, table.data tr.lit td { background: var(--surface-2); }
+  .keyrow { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 0; }
+  .keyrow span {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: var(--mono); font-size: .72rem; color: var(--ink-2);
+  }
+  .keyrow i {
+    width: 20px; height: 13px; border-radius: 3px; display: inline-block;
+    border: 1px solid var(--hairline-2);
+  }
+  .eq { font-family: var(--mono); font-size: .86rem; }
+</style>
+</head>
+<body>
+
+<noscript>
+  <div class="wrap" style="padding-top:24px">
+    <div class="callout warn"><div class="t">JavaScript required</div>
+    Every number on this page is rendered from the generated traces
+    <code>assets/data/rope.js</code> and <code>assets/data/trace.js</code>.
+    With JS disabled there is nothing to read.</div>
+  </div>
+</noscript>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 11</div>
+    <h1>Position</h1>
+    <p class="lede" id="lede"></p>
+  </div>
+
+  <section class="block" id="hole"></section>
+  <section class="block" id="learned"></section>
+  <section class="block" id="sinus"></section>
+  <section class="block" id="rope"></section>
+  <section class="block" id="proof"></section>
+  <section class="block" id="qknotv"></section>
+  <section class="block" id="spectrum"></section>
+  <section class="block" id="extrap"></section>
+  <section class="block" id="next"></section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/rope.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T = NN.T;               /* the 13-parameter MLP trace + ref configs */
+  const R = window.ROPE;        /* code/positional.py                        */
+
+  if (!R) {
+    document.body.insertBefore(
+      NN.el("div", { class: "wrap" }, [
+        NN.callout("warn", "rope.js did not load",
+          "Run <code>python3 code/positional.py</code> to regenerate " +
+          "<code>assets/data/rope.js</code>.")
+      ]), document.body.firstChild);
+    return;
+  }
+
+  /* ===================================================================== */
+  /*  helpers                                                              */
+  /* ===================================================================== */
+  const el = NN.el, f = NN.fmt;
+  const M = R.meta;
+
+  function h2(t) { return el("h2", {}, t); }
+  function h3(t) { return el("h3", {}, t); }
+  function p(html) { return el("p", { html: html }); }
+  function small(html) { return el("p", { class: "small muted", html: html }); }
+  function code(x) { return "<code>" + x + "</code>"; }
+  function num(x, d, cls) {
+    return '<span class="num' + (cls ? " v-" + cls : "") + '">' + f(x, d) + "</span>";
+  }
+  /* An exact zero really is exact here — every one of these residuals is a
+     floating-point difference, not a rounded display — so say so rather than
+     printing a bare "0" that reads like a missing value. */
+  function sci(x) { return x === 0 ? "0 (exact)" : Number(x).toExponential(3); }
+  function verdict(pass, text, detail) {
+    return el("div", { class: "verdict" + (pass ? "" : " bad") }, [
+      el("span", { class: "tick" }, pass ? "✓" : "✗"),
+      el("span", { html: text + (detail ? ' <span class="muted">' + detail + "</span>" : "") })
+    ]);
+  }
+  function badge(kind, txt) { return el("span", { class: "badge " + kind }, txt); }
+
+  /* Linear algebra, mirroring code/positional.py exactly. The page
+     recomputes attention live so the reader can permute the tokens
+     themselves; every recomputation is checked against the generated
+     tensors before it is trusted. */
+  function mm(A, B) {
+    const m = A.length, k = B.length, n = B[0].length, O = [];
+    for (let i = 0; i < m; i++) {
+      const r = new Array(n).fill(0);
+      for (let t = 0; t < k; t++) { const a = A[i][t]; if (!a) continue;
+        for (let j = 0; j < n; j++) r[j] += a * B[t][j]; }
+      O.push(r);
+    }
+    return O;
+  }
+  function dotv(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; }
+  function softmax(s) {
+    const mx = Math.max.apply(null, s);
+    const e = s.map(function (v) { return Math.exp(v - mx); });
+    const z = e.reduce(function (a, b) { return a + b; }, 0);
+    return e.map(function (v) { return v / z; });
+  }
+  function maxDiff(A, B) {
+    let w = 0;
+    for (let i = 0; i < A.length; i++)
+      for (let j = 0; j < A[i].length; j++) w = Math.max(w, Math.abs(A[i][j] - B[i][j]));
+    return w;
+  }
+  /* Bidirectional attention, no positions anywhere in it. */
+  function attention(X, Wq, Wk, Wv) {
+    const Q = mm(X, Wq), K = mm(X, Wk), V = mm(X, Wv);
+    const n = X.length, scale = 1 / Math.sqrt(Q[0].length);
+    const scores = [], probs = [];
+    for (let i = 0; i < n; i++) {
+      const row = [];
+      for (let j = 0; j < n; j++) row.push(dotv(Q[i], K[j]) * scale);
+      scores.push(row); probs.push(softmax(row));
+    }
+    return { Q: Q, K: K, V: V, scores: scores, probs: probs, O: mm(probs, V) };
+  }
+
+  /* A labelled matrix with row/column headers. `values` may hold null,
+     which renders hatched with a glyph — never colour alone. */
+  function mat(o) {
+    const vals = o.values, nr = vals.length, nc = vals[0].length;
+    const rl = o.rowLabels, cl = o.colLabels;
+    const g = el("div", {
+      class: "matgrid",
+      style: { gridTemplateColumns: (rl ? "auto " : "") + "repeat(" + nc + ", auto)" }
+    });
+    if (cl) {
+      if (rl) g.appendChild(el("div", { class: "mc hdr" }, ""));
+      cl.forEach(function (c) { g.appendChild(el("div", { class: "mc hdr" }, c)); });
+    }
+    const cells = [];
+    const rowHdrs = [];
+    for (let i = 0; i < nr; i++) {
+      if (rl) { const rh = el("div", { class: "mc hdr rowhdr" }, rl[i]); g.appendChild(rh); rowHdrs.push(rh); }
+      cells.push([]);
+      for (let j = 0; j < nc; j++) {
+        const v = vals[i][j];
+        let c;
+        if (v === null || v === undefined) {
+          c = el("div", { class: "mc missing", title: o.missingTitle || "no value" },
+                 o.missingText || "✕ none");
+        } else {
+          c = el("div", {
+            class: "mc" + (o.cls ? " is-" + o.cls : "") + (v === 0 ? " zero" : ""),
+            title: (o.name || "") + "[" + i + "][" + j + "] = " + v
+          }, o.signed ? NN.fmtSigned(v, o.digits) : f(v, o.digits));
+        }
+        g.appendChild(c); cells[i].push(c);
+      }
+    }
+    const root = el("div", { class: "matwrap" }, [
+      el("div", { class: "matname" }, [
+        el("b", { class: o.cls ? "v-" + o.cls : "", html: o.name || "" }),
+        el("span", { class: "sh" }, "(" + nr + "×" + nc + ")" + (o.note ? " · " + o.note : ""))
+      ]),
+      g
+    ]);
+    root.cells = cells;
+    root.rowHdrs = rowHdrs;
+    root.update = function (nv, digits) {
+      for (let i = 0; i < nr; i++) for (let j = 0; j < nc; j++) {
+        const v = nv[i][j];
+        cells[i][j].textContent = o.signed ? NN.fmtSigned(v, digits || o.digits)
+                                           : f(v, digits || o.digits);
+        cells[i][j].classList.toggle("zero", v === 0);
+        cells[i][j].title = (o.name || "") + "[" + i + "][" + j + "] = " + v;
+      }
+    };
+    return root;
+  }
+
+  /* A value -> background colour ramp inside ONE tensor hue. Magnitude is
+     redundant with the printed number, which is the accessibility fallback. */
+  function ramp(t, hue) {
+    const a = 0.10 + 0.62 * NN.clamp(t, 0, 1);
+    return "color-mix(in srgb, var(--" + hue + ") " + (a * 100).toFixed(1) +
+           "%, var(--surface-1))";
+  }
+
+  const SVGNS = "http://www.w3.org/2000/svg";
+  function sv(tag, attrs) {
+    const e = document.createElementNS(SVGNS, tag);
+    for (const k in attrs) if (attrs[k] !== null && attrs[k] !== undefined) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  /* ===================================================================== */
+  /*  lede                                                                 */
+  /* ===================================================================== */
+  NN.$("#lede").innerHTML =
+    "Attention is built out of dot products, and a dot product does not know " +
+    "where its operands came from. Shuffle the tokens and the outputs shuffle " +
+    "with them — proven below to " + sci(R.equivariance.max_abs_err) +
+    " absolute error. Everything on this page exists to fix that, and the fix " +
+    "that won is RoPE: rotate each 2D pair of <b>q</b> and <b>k</b> by an angle " +
+    "proportional to position, and the score between them depends only on how " +
+    "far apart they are.";
+
+  /* ===================================================================== */
+  /*  1 — THE HOLE                                                         */
+  /* ===================================================================== */
+  (function () {
+    const S = NN.$("#hole");
+    const E = R.equivariance;
+    const n = M.seq;
+
+    S.appendChild(h2("Attention cannot tell what order anything is in"));
+    S.appendChild(p(
+      "Write out the mechanism and look for an index. " +
+      '<span class="eq">O = softmax(QK<sup>T</sup>/√d)·V</span>, with ' +
+      "<span class=\"eq\">Q = XW<sub>q</sub></span>, " +
+      "<span class=\"eq\">K = XW<sub>k</sub></span>, " +
+      "<span class=\"eq\">V = XW<sub>v</sub></span>. Every operation is either " +
+      "row-wise (the projections, the softmax) or a dot product between two " +
+      "rows. Nothing reads <em>i</em> or <em>j</em> as a number. So if you " +
+      "permute the rows of X, every score S[i][j] moves to S[π(i)][π(j)], the " +
+      "softmax normalises over the same set, and the output rows come out in " +
+      "the permuted order and are otherwise untouched:"));
+    S.appendChild(NN.formula({
+      rule: "O(PX) = P·O(X) &nbsp; for every permutation matrix P",
+      sub: "attention is permutation-<b>equivariant</b>",
+      cls: "activation"
+    }));
+    S.appendChild(p(
+      "That is a statement about the mechanism, not about a particular input, " +
+      "so it can be checked exactly. " + code(M.seq) + " tokens, " +
+      code("d_model = " + M.d_model) + ", one head, and the permutation " +
+      code("[" + M.perm.join(", ") + "]") + ". The attention here is " +
+      "<b>bidirectional</b> on purpose: a causal mask is itself a positional " +
+      "signal — <em>j ≤ i</em> is a comparison of indices — and masking would " +
+      "hide the very hole we are exposing."));
+
+    S.appendChild(NN.legend(["weight", "activation"]));
+
+    /* --- live recompute, checked against the generated tensors --------- */
+    const X = E.X, Wq = R.weights.Wq, Wk = R.weights.Wk, Wv = R.weights.Wv;
+    const baseRes = attention(X, Wq, Wk, Wv);
+    const reErr = Math.max(maxDiff(baseRes.O, E.O), maxDiff(baseRes.scores, E.scores));
+
+    /* --- the interactive: drag the token order ------------------------- */
+    let order = M.perm.slice();
+    let usePos = false;
+    let picked = null;
+
+    const tokrow = el("div", { class: "tokrow" });
+    const ctl = el("div", { class: "switchrow" });
+    const outWrap = el("div", { class: "scrollx" });
+    const scoreBox = el("div");
+    const verdictBox = el("div");
+
+    function permOf(order) { return order.slice(); }
+
+    function currentX() {
+      const perm = permOf(order);
+      const Xp = perm.map(function (t) { return X[t].slice(); });
+      if (!usePos) return Xp;
+      /* position embeddings attach to the SLOT, not to the token: row i of
+         the table is added to whatever token now sits at slot i. */
+      return Xp.map(function (row, i) {
+        return row.map(function (v, j) { return v + E.with_positions.pos_embed[i][j]; });
+      });
+    }
+    function referenceX() {
+      const Xr = X.map(function (r) { return r.slice(); });
+      if (!usePos) return Xr;
+      return Xr.map(function (row, i) {
+        return row.map(function (v, j) { return v + E.with_positions.pos_embed[i][j]; });
+      });
+    }
+
+    const oRef = mat({ name: "O(X) — original order", values: E.O, cls: "activation",
+                       digits: 3, signed: true, colLabels: cols(M.d_model),
+                       rowLabels: M.tokens.map(function (t, i) { return i + " " + t; }) });
+    const oPerm = mat({ name: "O(PX) — shuffled order", values: E.O_permuted, cls: "activation",
+                        digits: 3, signed: true, colLabels: cols(M.d_model),
+                        rowLabels: M.perm.map(function (t, i) { return i + " " + M.tokens[t]; }) });
+    const oExp = mat({ name: "P·O(X) — the same rows, reordered", values: E.O_expected,
+                       cls: "activation", digits: 3, signed: true, colLabels: cols(M.d_model),
+                       rowLabels: M.perm.map(function (t, i) { return i + " ← row " + t; }) });
+
+    function cols(k) { const a = []; for (let j = 0; j < k; j++) a.push("d" + j); return a; }
+
+    function redraw() {
+      /* tokens */
+      tokrow.innerHTML = "";
+      order.forEach(function (t, slot) {
+        const b = el("div", {
+          class: "tok" + (picked === slot ? " picked" : ""),
+          title: "slot " + slot + " holds token " + t + " (" + M.tokens[t] + "). " +
+                 "Click two tokens to swap them."
+        }, [
+          el("span", { class: "slot" }, "slot " + slot),
+          document.createTextNode(M.tokens[t])
+        ]);
+        b.addEventListener("click", function () {
+          if (picked === null) { picked = slot; }
+          else if (picked === slot) { picked = null; }
+          else {
+            const tmp = order[picked]; order[picked] = order[slot]; order[slot] = tmp;
+            picked = null;
+          }
+          redraw();
+        });
+        tokrow.appendChild(b);
+      });
+
+      const ref = attention(referenceX(), Wq, Wk, Wv);
+      const cur = attention(currentX(), Wq, Wk, Wv);
+      const expect = order.map(function (t) { return ref.O[t].slice(); });
+      const err = maxDiff(cur.O, expect);
+
+      oRef.update(ref.O, 3);
+      oPerm.update(cur.O, 3);
+      oExp.update(expect, 3);
+      oPerm.rowHdrs.forEach(function (h, i) { h.textContent = i + " " + M.tokens[order[i]]; });
+      oExp.rowHdrs.forEach(function (h, i) { h.textContent = i + " ← row " + order[i]; });
+
+      scoreBox.innerHTML = "";
+      const sExp = order.map(function (a) {
+        return order.map(function (b) { return ref.scores[a][b]; });
+      });
+      scoreBox.appendChild(mat({
+        name: "S(X)", values: ref.scores, cls: "activation", digits: 3, signed: true,
+        colLabels: M.tokens, rowLabels: M.tokens
+      }));
+      scoreBox.appendChild(mat({
+        name: "S(PX)", values: cur.scores, cls: "activation", digits: 3, signed: true,
+        colLabels: order.map(function (t) { return M.tokens[t]; }),
+        rowLabels: order.map(function (t) { return M.tokens[t]; })
+      }));
+      scoreBox.appendChild(mat({
+        name: "P·S(X)·Pᵀ", values: sExp, cls: "activation", digits: 3, signed: true,
+        colLabels: order.map(function (t) { return M.tokens[t]; }),
+        rowLabels: order.map(function (t) { return M.tokens[t]; })
+      }));
+
+      verdictBox.innerHTML = "";
+      const isIdentity = order.every(function (t, i) { return t === i; });
+      if (!usePos) {
+        verdictBox.appendChild(verdict(err < 1e-12,
+          "max |O(PX) − P·O(X)| = <b>" + sci(err) + "</b>" +
+          (isIdentity ? " — identity permutation, trivially" : ""),
+          "the two right-hand matrices are the same numbers in the same order"));
+        verdictBox.appendChild(small(
+          "No positional signal exists, so the model has no way to " +
+          "distinguish <code>" + M.tokens.join(" ") + "</code> from <code>" +
+          order.map(function (t) { return M.tokens[t]; }).join(" ") +
+          "</code>. Both are the same bag of vectors."));
+      } else {
+        verdictBox.appendChild(verdict(isIdentity || err > 1e-3,
+          "max |O(PX) − P·O(X)| = <b>" + sci(err) + "</b>" +
+          (isIdentity ? " — identity permutation, so still zero" : ""),
+          isIdentity ? "swap two tokens to see the symmetry break"
+                     : "the equality is gone, which is the entire point"));
+        verdictBox.appendChild(small(
+          "With a " + code(M.seq + "×" + M.d_model) + " learned position table added " +
+          "to the slots, the outputs no longer follow the permutation. Order now " +
+          "changes the answer. Everything below is about <em>which</em> signal to add."));
+      }
+    }
+
+    ctl.appendChild(el("label", { class: "switch" }, [
+      el("input", { type: "checkbox", onchange: function (e) { usePos = e.target.checked; redraw(); } }),
+      document.createTextNode("add learned position embeddings to the slots")
+    ]));
+    ctl.appendChild(el("button", {
+      class: "btn", onclick: function () { order = [0, 1, 2, 3].slice(0, M.seq); picked = null; redraw(); }
+    }, "Reset order"));
+    ctl.appendChild(el("button", {
+      class: "btn", onclick: function () { order = M.perm.slice(); picked = null; redraw(); }
+    }, "Use the generator's permutation"));
+
+    S.appendChild(el("div", { class: "panel" }, [
+      el("div", { class: "ph" }, [
+        el("span", {}, "Interactive · click two tokens to swap them"),
+        badge("derived", "recomputed live")
+      ]),
+      tokrow, ctl,
+      el("div", { class: "scrollx" }, scoreBox),
+      verdictBox
+    ]));
+
+    outWrap.appendChild(oRef);
+    outWrap.appendChild(oPerm);
+    outWrap.appendChild(oExp);
+    S.appendChild(outWrap);
+    redraw();
+
+    S.appendChild(verdict(reErr < 1e-8,
+      "The live recomputation above agrees with the generated tensors to <b>" +
+      sci(reErr) + "</b>",
+      "— which is the payload's own 9-decimal rounding, not a difference in " +
+      "the arithmetic. The interactive is running what " +
+      code("code/positional.py") + " ran."));
+
+    S.appendChild(NN.tiles([
+      { k: "|O(PX) − P O(X)|", v: sci(R.equivariance.max_abs_err), cls: "activation",
+        s: "generated, unpermuted comparison" },
+      { k: "|S(PX) − P S(X) Pᵀ|", v: sci(R.equivariance.scores_max_abs_err), cls: "activation",
+        s: "the score matrix moves too" },
+      { k: "same, with positions", v: sci(R.equivariance.with_positions.max_abs_err),
+        s: "symmetry broken — that is the fix" }
+    ]));
+
+    S.appendChild(NN.callout("key", "WHY THIS IS THE WHOLE PROBLEM",
+      "A convolution knows about position because its kernel slides. An RNN " +
+      "knows because it processes tokens one after another. Attention gave up " +
+      "both of those to get O(1) path length between any two tokens, and the " +
+      "price is exact: the mechanism became order-blind. " +
+      "Every positional scheme is a way of paying that price back."));
+  })();
+
+  /* ===================================================================== */
+  /*  2 — LEARNED ABSOLUTE                                                 */
+  /* ===================================================================== */
+  (function () {
+    const S = NN.$("#learned");
+    const L = R.learned;
+
+    S.appendChild(h2("Learned absolute embeddings: a table with an edge"));
+    S.appendChild(p(
+      "The simplest fix. Keep a trainable matrix of shape " +
+      code("(L_max, d_model)") + ", look up row <em>i</em> for slot <em>i</em>, add it " +
+      "to the token embedding. GPT-2 and BERT both do exactly this. It costs " +
+      code("L_max × d_model") + " parameters and needs no maths at all."));
+    S.appendChild(p("Here that is " + code(L.n_pos + " × " + L.d_model + " = " +
+      L.params + " parameters") + ":"));
+
+    /* the table, with the missing rows shown as missing */
+    const rows = [];
+    const rl = [];
+    for (let pp = 0; pp < L.lookup.length; pp++) {
+      const e = L.lookup[pp];
+      rl.push("pos " + pp);
+      rows.push(e.ok ? e.vec : new Array(L.d_model).fill(null));
+    }
+    const cl = []; for (let j = 0; j < L.d_model; j++) cl.push("d" + j);
+    S.appendChild(el("div", { class: "scrollx" }, [
+      mat({ name: "position table", values: rows, cls: "weight", digits: 3, signed: true,
+            colLabels: cl, rowLabels: rl, missingText: "✕ no row",
+            missingTitle: "this position has no row in the table",
+            note: "trained to length " + L.n_pos })
+    ]));
+
+    S.appendChild(verdict(false,
+      "<b>" + L.lookup[L.n_pos].error + "</b>",
+      "— the generator performed the lookup and caught this"));
+    S.appendChild(p(
+      "This is worth being precise about. Position " + L.n_pos + " is not " +
+      "<em>badly approximated</em>; there is no parameter to read. A model with " +
+      "learned absolute embeddings has a hard architectural ceiling at the " +
+      "length its table was allocated for, and going past it means adding " +
+      "randomly-initialised rows and retraining."));
+
+    S.appendChild(h3("And it encodes no relative structure either"));
+    S.appendChild(p(
+      "Nothing in the training objective ties " +
+      "<span class=\"eq\">e<sub>m+1</sub> − e<sub>m</sub></span> to " +
+      "<span class=\"eq\">e<sub>n+1</sub> − e<sub>n</sub></span>. If the table " +
+      "carried a notion of “d apart”, then " +
+      "<span class=\"eq\">⟨e<sub>m</sub>, e<sub>m+d</sub>⟩</span> would be the " +
+      "same for every m at fixed d. Measure it:"));
+
+    const tb = el("table", { class: "data" });
+    tb.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "offset d"), el("th", {}, "pairs"),
+      el("th", {}, "⟨e_m, e_m+d⟩ across all m"), el("th", {}, "spread")
+    ])));
+    const tbody = el("tbody");
+    L.offset_dots.forEach(function (o) {
+      tbody.appendChild(el("tr", {}, [
+        el("td", {}, String(o.offset)),
+        el("td", { class: "n" }, String(o.n_pairs)),
+        el("td", { class: "n" }, o.dots.map(function (v) { return f(v, 3); }).join("  ")),
+        el("td", { class: "n" }, f(o.spread, 4))
+      ]));
+    });
+    tb.appendChild(tbody);
+    S.appendChild(el("div", { class: "scrollx" }, tb));
+
+    S.appendChild(verdict(false,
+      "worst spread at fixed offset = <b>" + f(L.max_spread, 4) + "</b>",
+      "— if there were relative structure this would be ≈ 0"));
+
+    /* real cost */
+    const rm = R.real.models;
+    const tb2 = el("table", { class: "data" });
+    tb2.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "model"), el("th", {}, "context"), el("th", {}, "d_model"),
+      el("th", {}, "table params"), el("th", {}, "share of model"),
+      el("th", {}, "RoPE params")
+    ])));
+    const tb2b = el("tbody");
+    rm.forEach(function (m) {
+      tb2b.appendChild(el("tr", {}, [
+        el("td", {}, m.name),
+        el("td", { class: "n" }, NN.count(m.seq)),
+        el("td", { class: "n" }, String(m.d_model)),
+        el("td", { class: "n v-weight" }, NN.count(m.learned_abs_params)),
+        el("td", { class: "n" }, f(100 * m.learned_abs_share_of_model, 3) + " %"),
+        el("td", { class: "n" }, String(m.rope_params))
+      ]));
+    });
+    tb2.appendChild(tb2b);
+    S.appendChild(h3("What the table would cost at real scale"));
+    S.appendChild(small("Geometry from " + code("NN.T.reference_configs") +
+      " — " + T.reference_configs._source + ". <code>d_head</code> and every " +
+      "derived column are computed here, not quoted."));
+    S.appendChild(el("div", { class: "scrollx" }, tb2));
+    S.appendChild(small(
+      "The parameter count is not the objection — it is a rounding error " +
+      "against the model. The objection is the ceiling and the absence of " +
+      "relative structure. RoPE costs " + code("0") + " parameters and has neither problem."));
+  })();
+
+  /* ===================================================================== */
+  /*  3 — SINUSOIDAL                                                       */
+  /* ===================================================================== */
+  (function () {
+    const S = NN.$("#sinus");
+    const Z = R.sinusoidal;
+
+    S.appendChild(h2("Sinusoidal: the right property, in the wrong place"));
+    S.appendChild(p(
+      "The original transformer used a fixed, parameter-free encoding: a ladder " +
+      "of sine/cosine bands at geometrically spaced frequencies."));
+    S.appendChild(NN.formula({
+      rule: "PE[pos][2i] = sin(pos·θ<sub>i</sub>) &nbsp;&nbsp; " +
+            "PE[pos][2i+1] = cos(pos·θ<sub>i</sub>)",
+      sub: "θ<sub>i</sub> = base<sup>−2i/d</sup>, base = " + f(Z.base, 0),
+      cls: "activation"
+    }));
+
+    const tb = el("table", { class: "data" });
+    tb.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "band i"), el("th", {}, "θ_i"), el("th", {}, "deg / token"),
+      el("th", {}, "wavelength (tokens)")
+    ])));
+    const tbb = el("tbody");
+    Z.bands.forEach(function (b) {
+      tbb.appendChild(el("tr", {}, [
+        el("td", {}, String(b.pair)),
+        el("td", { class: "n" }, f(b.theta, 6)),
+        el("td", { class: "n" }, f(b.deg_per_token, 3)),
+        el("td", { class: "n" }, f(b.wavelength_tokens, 2))
+      ]));
+    });
+    tb.appendChild(tbb);
+    S.appendChild(el("div", { class: "scrollx" }, tb));
+    S.appendChild(small(
+      "Band 0 turns a full circle every " + f(Z.bands[0].wavelength_tokens, 2) +
+      " tokens; band " + (Z.bands.length - 1) + " takes " +
+      f(Z.bands[Z.bands.length - 1].wavelength_tokens, 0) + ". Together they are " +
+      "a positional fingerprint that does not repeat inside any realistic context — " +
+      "the same ladder RoPE uses, with the same θ."));
+
+    S.appendChild(h3("The encodings really do have a relative property"));
+    S.appendChild(p(
+      "Take the dot product of two of these vectors and apply the cosine " +
+      "difference identity:"));
+    S.appendChild(NN.formula({
+      rule: "⟨PE<sub>m</sub>, PE<sub>n</sub>⟩ = Σ<sub>i</sub> " +
+            "[ sin(mθ<sub>i</sub>)sin(nθ<sub>i</sub>) + cos(mθ<sub>i</sub>)cos(nθ<sub>i</sub>) ]",
+      sub: "= Σ<sub>i</sub> cos((m − n)·θ<sub>i</sub>)",
+      result: "a function of m − n alone",
+      cls: "activation"
+    }));
+    S.appendChild(verdict(Z.raw_relative_holds,
+      "brute-force dot product vs the closed form: max |Δ| = <b>" +
+      sci(Z.closed_form_max_abs_err) + "</b>; spread within a fixed offset = <b>" +
+      sci(Z.raw_max_spread) + "</b>",
+      "the identity holds exactly"));
+
+    S.appendChild(h3("…and attention destroys it"));
+    S.appendChild(p(
+      "Attention does not take the dot product of two position encodings. It " +
+      "takes the dot product of two <em>projected</em> vectors, and the " +
+      "encoding was added to the token embedding before the projection:"));
+    S.appendChild(NN.formula({
+      rule: "q<sub>m</sub>·k<sub>n</sub> where q<sub>m</sub> = (x<sub>m</sub>+PE<sub>m</sub>)W<sub>q</sub>, " +
+            "k<sub>n</sub> = (x<sub>n</sub>+PE<sub>n</sub>)W<sub>k</sub>",
+      sub: "= x<sub>m</sub>W<sub>q</sub>(x<sub>n</sub>W<sub>k</sub>)ᵀ " +
+           "+ x<sub>m</sub>W<sub>q</sub>(PE<sub>n</sub>W<sub>k</sub>)ᵀ " +
+           "+ PE<sub>m</sub>W<sub>q</sub>(x<sub>n</sub>W<sub>k</sub>)ᵀ " +
+           "+ PE<sub>m</sub>W<sub>q</sub>(PE<sub>n</sub>W<sub>k</sub>)ᵀ",
+      cls: "activation"
+    }));
+    S.appendChild(p(
+      "Three of the four terms mix content with position. Only the last is " +
+      "purely positional — and even that one is not a function of " +
+      "<span class=\"eq\">m − n</span>, because the clean identity above " +
+      "silently assumed the matrix between the two encodings was the identity, " +
+      "and " + code("W_q W_kᵀ") + " is an arbitrary learned matrix. Measure the " +
+      "same offsets, through the same projections:"));
+
+    /* side-by-side spread comparison, one chart per scale (no dual axis) */
+    const raw = Z.relative_raw.filter(function (r) { return r.offset > 0; });
+    const prj = Z.relative_projected.filter(function (r) { return r.offset > 0; });
+    const g = el("div", { class: "twocol" });
+    g.appendChild(el("div", {}, [
+      el("div", { class: "matname" }, [el("b", { class: "v-activation" }, "raw ⟨PE_m, PE_n⟩")]),
+      NN.chart.bars({
+        items: raw.map(function (r) {
+          return { label: "offset " + r.offset, value: r.spread, color: "var(--activation)" };
+        }), unit: "", max: Math.max(1e-9, Z.projected_max_spread)
+      }),
+      small("spread at fixed offset, worst = " + sci(Z.raw_max_spread) +
+            " — flat to machine precision")
+    ]));
+    g.appendChild(el("div", {}, [
+      el("div", { class: "matname" }, [el("b", { class: "v-activation" }, "after W_q / W_k")]),
+      NN.chart.bars({
+        items: prj.map(function (r) {
+          return { label: "offset " + r.offset, value: r.spread, color: "var(--activation)" };
+        }), unit: "", max: Math.max(1e-9, Z.projected_max_spread)
+      }),
+      small("same axis, same units, worst = " + f(Z.projected_max_spread, 4))
+    ]));
+    S.appendChild(g);
+
+    S.appendChild(verdict(false,
+      "the offset structure does not survive the projection: spread goes from <b>" +
+      sci(Z.raw_max_spread) + "</b> to <b>" + f(Z.projected_max_spread, 4) + "</b>",
+      "same offsets, same encodings, one matrix multiply in between"));
+
+    S.appendChild(NN.callout("why", "THIS IS EXACTLY THE GAP RoPE CLOSES",
+      "Sinusoidal has the relative property before the projection. Attention " +
+      "needs it after. RoPE moves the operation to the other side of " +
+      "<code>W_q</code> and <code>W_k</code>: instead of <em>adding</em> a " +
+      "position vector to the input, it <em>rotates</em> q and k once they " +
+      "already exist. Rotation commutes with the dot product in a way that " +
+      "addition does not, and the offset structure survives by construction."));
+  })();
+
+  /* ===================================================================== */
+  /*  4 — RoPE + THE ROTATION ANIMATION                                    */
+  /* ===================================================================== */
+  (function () {
+    const S = NN.$("#rope");
+    const P = R.rope;
+
+    S.appendChild(h2("RoPE: rotate q and k by their position"));
+    S.appendChild(p(
+      "Split the " + code("d_head = " + P.d_head) + " channels of q into " +
+      code(P.n_pairs) + " two-dimensional pairs. Treat each pair as a point in " +
+      "a plane, and rotate it by an angle proportional to the token's position:"));
+    S.appendChild(NN.formula({
+      rule: "[x′, y′] = [x·cos(m θ<sub>i</sub>) − y·sin(m θ<sub>i</sub>), " +
+            "x·sin(m θ<sub>i</sub>) + y·cos(m θ<sub>i</sub>)]",
+      sub: "θ<sub>i</sub> = base<sup>−2i/d</sup> &nbsp;·&nbsp; base = " + f(P.base, 0) +
+           " &nbsp;·&nbsp; " + P.n_pairs + " pairs, each with its own speed",
+      cls: "activation"
+    }));
+    S.appendChild(p(
+      "That is a block-diagonal orthogonal matrix <span class=\"eq\">R<sub>m</sub></span>: " +
+      P.n_pairs + " independent planar rotations glued together. Two things fall " +
+      "straight out of orthogonality and both matter. First, " +
+      "<span class=\"eq\">|R<sub>m</sub>q| = |q|</span> — the rotation cannot " +
+      "rescale a logit, only redirect it (measured residual: " +
+      sci(P.norm_max_abs_err) + "). Second, " +
+      "<span class=\"eq\">R<sub>m</sub>ᵀR<sub>n</sub> = R<sub>n−m</sub></span>, " +
+      "which is the entire relative-position property in one line."));
+    S.appendChild(p(
+      "It costs " + code(P.params + " parameters") + ". It is applied inside " +
+      "<em>every</em> attention layer, to q and k only, after the projection " +
+      "and before the dot product."));
+
+    /* ------------------------------------------------------- the dials */
+    const dials = el("div", { class: "dials" });
+    const dialObjs = [];
+    const SZ = 116, CX = SZ / 2, CY = SZ / 2, RAD = 40;
+
+    P.pairs.forEach(function (pr, i) {
+      const svg = sv("svg", { viewBox: "0 0 " + SZ + " " + SZ, width: SZ, height: SZ });
+      svg.appendChild(sv("circle", {
+        cx: CX, cy: CY, r: RAD, fill: "none",
+        stroke: "var(--hairline)", "stroke-width": 1
+      }));
+      svg.appendChild(sv("line", {
+        x1: CX - RAD - 4, x2: CX + RAD + 4, y1: CY, y2: CY,
+        stroke: "var(--hairline-2)", "stroke-width": 1
+      }));
+      svg.appendChild(sv("line", {
+        x1: CX, x2: CX, y1: CY - RAD - 4, y2: CY + RAD + 4,
+        stroke: "var(--hairline-2)", "stroke-width": 1
+      }));
+      /* swept arc */
+      const arc = sv("path", {
+        d: "", fill: "none", stroke: "var(--accent)", "stroke-width": 2, opacity: .55
+      });
+      svg.appendChild(arc);
+      /* the un-rotated reference vector */
+      const ref = sv("line", {
+        x1: CX, y1: CY, x2: CX, y2: CY,
+        stroke: "var(--ink-muted)", "stroke-width": 1.5, "stroke-dasharray": "3 3"
+      });
+      svg.appendChild(ref);
+      /* the rotating vector */
+      const vec = sv("line", {
+        x1: CX, y1: CY, x2: CX, y2: CY,
+        stroke: "var(--activation)", "stroke-width": 3, "stroke-linecap": "round"
+      });
+      svg.appendChild(vec);
+      const dotEnd = sv("circle", { cx: CX, cy: CY, r: 4, fill: "var(--activation)" });
+      svg.appendChild(dotEnd);
+
+      const sub = el("div", { class: "dsub" });
+      dials.appendChild(el("div", { class: "dial" }, [
+        el("div", { class: "dh" }, "pair " + pr.pair + " · dims " + pr.dims.join(",")),
+        svg, sub
+      ]));
+      dialObjs.push({ pr: pr, arc: arc, vec: vec, ref: ref, dot: dotEnd, sub: sub });
+    });
+
+    const posOut = el("span", { class: "out" });
+    const slider = el("input", {
+      type: "range", min: 0, max: (P.n_frames - 1) * 100, value: 0, step: 1
+    });
+    const playBtn = el("button", { class: "btn primary" }, "▶ Play");
+    const checkBox = el("div");
+    let raf = null, playing = false, pos = 0;
+
+    function drawDials(posf) {
+      dialObjs.forEach(function (d) {
+        const a = posf * d.pr.theta;
+        const x0 = P.q[d.pr.dims[0]], y0 = P.q[d.pr.dims[1]];
+        const len = Math.sqrt(x0 * x0 + y0 * y0);
+        const scale = len > 0 ? RAD / len : 0;
+        const ca = Math.cos(a), sa = Math.sin(a);
+        const x = x0 * ca - y0 * sa, y = x0 * sa + y0 * ca;
+        /* SVG y grows downward; negate so positive angles turn anticlockwise */
+        d.vec.setAttribute("x2", CX + x * scale);
+        d.vec.setAttribute("y2", CY - y * scale);
+        d.dot.setAttribute("cx", CX + x * scale);
+        d.dot.setAttribute("cy", CY - y * scale);
+        d.ref.setAttribute("x2", CX + x0 * scale);
+        d.ref.setAttribute("y2", CY - y0 * scale);
+        /* swept arc from 0 to a, at 0.62 R */
+        const ar = RAD * 0.62;
+        const a0 = Math.atan2(y0, x0);
+        const big = Math.abs(a) > Math.PI ? 1 : 0;
+        const sweepEnd = a0 + a;
+        d.arc.setAttribute("d",
+          Math.abs(a) < 1e-6 ? "" :
+          "M" + (CX + ar * Math.cos(a0)) + " " + (CY - ar * Math.sin(a0)) +
+          " A" + ar + " " + ar + " 0 " + (Math.abs(a) % (2 * Math.PI) > Math.PI ? 1 : big) +
+          " " + (a >= 0 ? 0 : 1) + " " +
+          (CX + ar * Math.cos(sweepEnd)) + " " + (CY - ar * Math.sin(sweepEnd)));
+        const deg = (a * 180 / Math.PI);
+        d.sub.innerHTML =
+          "θ = " + f(d.pr.theta, 5) + "<br>" +
+          '<span class="v-activation">' + f(((deg % 360) + 360) % 360, 1) + "°</span>" +
+          " after " + f(posf, 1) + " tok<br>" +
+          "λ = " + f(d.pr.wavelength_tokens, 1) + " tokens";
+      });
+      posOut.textContent = "pos " + f(posf, 2);
+
+      /* self-check at integer positions against the generated frames */
+      const ip = Math.round(posf);
+      if (Math.abs(posf - ip) < 1e-9 && P.frames[ip]) {
+        const want = P.frames[ip].q_rot;
+        let w = 0;
+        for (let i = 0; i < P.pairs.length; i++) {
+          const a = ip * P.pairs[i].theta;
+          const x0 = P.q[2 * i], y0 = P.q[2 * i + 1];
+          w = Math.max(w,
+            Math.abs((x0 * Math.cos(a) - y0 * Math.sin(a)) - want[2 * i]),
+            Math.abs((x0 * Math.sin(a) + y0 * Math.cos(a)) - want[2 * i + 1]));
+        }
+        checkBox.innerHTML = "";
+        checkBox.appendChild(small(
+          "at integer position " + ip + ", these dials match the generated " +
+          "<code>rope.frames[" + ip + "].q_rot</code> to " + sci(w) +
+          " — and |R<sub>" + ip + "</sub>q| = " + f(P.frames[ip].norm, 6) +
+          ", unchanged from |q| = " + f(P.q_norm, 6) + "."));
+      }
+    }
+
+    slider.addEventListener("input", function () {
+      pos = Number(slider.value) / 100; stop(); drawDials(pos);
+    });
+    function stop() {
+      playing = false; playBtn.textContent = "▶ Play";
+      if (raf) { cancelAnimationFrame(raf); raf = null; }
+    }
+    playBtn.addEventListener("click", function () {
+      if (playing) { stop(); return; }
+      playing = true; playBtn.textContent = "⏸ Pause";
+      let last = performance.now();
+      const tick = function (now) {
+        if (!playing) return;
+        const dt = (now - last) / 1000; last = now;
+        pos += dt * 1.6;                      /* 1.6 tokens per second */
+        if (pos > P.n_frames - 1) pos = 0;
+        slider.value = String(Math.round(pos * 100));
+        drawDials(pos);
+        raf = requestAnimationFrame(tick);
+      };
+      raf = requestAnimationFrame(tick);
+    });
+
+    S.appendChild(el("div", { class: "panel" }, [
+      el("div", { class: "ph" }, [
+        el("span", {}, "Interactive · the rotation, pair by pair"),
+        badge("derived", "q from rope.q, θ from rope.pairs")
+      ]),
+      small("The dashed line is the un-rotated pair; the solid line is where " +
+            "position <em>m</em> has taken it. Every dial holds the same " +
+            "token's q — only the angular speed differs, and it differs by a " +
+            "factor of " + f(P.pairs[0].theta / P.pairs[1].theta, 0) +
+            " between neighbours."),
+      dials,
+      el("div", { class: "sliderrow" }, [
+        el("label", {}, "position m"), slider, posOut, playBtn
+      ]),
+      checkBox
+    ]));
+    drawDials(0);
+
+    const tb = el("table", { class: "data" });
+    tb.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "pair"), el("th", {}, "dims"), el("th", {}, "θ_i"),
+      el("th", {}, "deg / token"), el("th", {}, "wavelength (tokens)"),
+      el("th", {}, "turns in 1000 tokens")
+    ])));
+    const tbb = el("tbody");
+    P.pairs.forEach(function (pr) {
+      tbb.appendChild(el("tr", {}, [
+        el("td", {}, "pair " + pr.pair),
+        el("td", { class: "n" }, pr.dims.join(", ")),
+        el("td", { class: "n" }, f(pr.theta, 6)),
+        el("td", { class: "n" }, f(pr.deg_per_token, 4)),
+        el("td", { class: "n" }, f(pr.wavelength_tokens, 2)),
+        el("td", { class: "n" }, f(pr.turns_in_1000, 4))
+      ]));
+    });
+    tb.appendChild(tbb);
+    S.appendChild(el("div", { class: "scrollx" }, tb));
+    S.appendChild(small(
+      "Pair 0 spins " + f(P.pairs[0].theta / P.pairs[P.pairs.length - 1].theta, 0) +
+      "× faster than pair " + (P.n_pairs - 1) + ". The fast pairs resolve “which " +
+      "of my immediate neighbours”; the slow ones resolve “roughly how far away”. " +
+      "That spread is the design, and it is also where extrapolation breaks — " +
+      "see the last section."));
+  })();
+
+  /* ===================================================================== */
+  /*  5 — THE PROOF                                                        */
+  /* ===================================================================== */
+  (function () {
+    const S = NN.$("#proof");
+    const P = R.rope;
+    const G = P.grid.values, N = P.grid.n;
+
+    S.appendChild(h2("The property that made RoPE win"));
+    S.appendChild(p(
+      "Expand <span class=\"eq\">⟨R<sub>m</sub>q, R<sub>n</sub>k⟩</span> one " +
+      "pair at a time. Write the pair of q as (a,b) and of k as (c,e), and put " +
+      "A = mθ<sub>i</sub>, B = nθ<sub>i</sub>:"));
+    S.appendChild(NN.formula({
+      rule: "(a cosA − b sinA)(c cosB − e sinB) + (a sinA + b cosA)(c sinB + e cosB)",
+      sub: "= (ac + be)·cos(A − B) + (ae − bc)·sin(A − B)",
+      result: "and A − B = (m − n)·θ_i",
+      cls: "activation"
+    }));
+    S.appendChild(p(
+      "Each pair contributes a fixed amplitude — pure content, the symmetric " +
+      "and antisymmetric parts of the 2×2 outer product — times a sinusoid in " +
+      "the <b>relative distance</b> m − n. The absolute positions have " +
+      "cancelled. Sum over pairs and the whole logit is a function of " +
+      "(q, k, m−n) and nothing else."));
+
+    S.appendChild(NN.tiles([
+      { k: "(m,n) pairs tested", v: String(N * N), cls: "activation",
+        s: N + " × " + N + " absolute positions" },
+      { k: "distance groups", v: String(P.offsets.length),
+        s: "each must be internally constant" },
+      { k: "worst spread in a group", v: sci(P.max_spread_over_offsets),
+        s: "machine precision" },
+      { k: "vs the closed form", v: sci(P.closed_form_max_abs_err),
+        s: "brute force = derivation" }
+    ]));
+
+    /* ---- the Toeplitz heatmap + the twin sliders ---------------------- */
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+      lo = Math.min(lo, G[i][j]); hi = Math.max(hi, G[i][j]);
+    }
+    const heat = el("div", {
+      class: "heat",
+      style: { gridTemplateColumns: "auto repeat(" + N + ", minmax(30px, 1fr))" }
+    });
+    heat.appendChild(el("div", { class: "hcell hdr" }, "m\\n"));
+    for (let j = 0; j < N; j++) heat.appendChild(el("div", { class: "hcell hdr" }, String(j)));
+    const hcells = [];
+    for (let i = 0; i < N; i++) {
+      heat.appendChild(el("div", { class: "hcell hdr" }, String(i)));
+      hcells.push([]);
+      for (let j = 0; j < N; j++) {
+        const v = G[i][j];
+        const c = el("div", {
+          class: "hcell",
+          style: { background: ramp((v - lo) / (hi - lo || 1), "activation") },
+          title: "m=" + i + ", n=" + j + "  ·  m−n = " + (i - j) +
+                 "  ·  ⟨R_m q, R_n k⟩ = " + v
+        }, f(v, 2));
+        heat.appendChild(c); hcells[i].push(c);
+      }
+    }
+
+    const mS = el("input", { type: "range", min: 0, max: N - 1, value: 8, step: 1 });
+    const nS = el("input", { type: "range", min: 0, max: N - 1, value: 3, step: 1 });
+    const mOut = el("span", { class: "out" }), nOut = el("span", { class: "out" });
+    const readout = el("div", { class: "kvlist" });
+    let lock = true;
+
+    function paint() {
+      const m = Number(mS.value), n = Number(nS.value), dd = m - n;
+      mOut.textContent = "m = " + m; nOut.textContent = "n = " + n;
+      const grp = P.offsets.filter(function (o) { return o.offset === dd; })[0];
+      for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+        hcells[i][j].classList.toggle("diag", (i - j) === dd);
+        hcells[i][j].classList.toggle("lit", i === m && j === n);
+      }
+      readout.innerHTML = "";
+      const kv = [
+        ["query position m", String(m)],
+        ["key position n", String(n)],
+        ["relative distance m − n", '<b class="v-activation">' + dd + "</b>"],
+        ["⟨R_m q, R_n k⟩", '<b class="v-activation">' + f(G[m][n], 6) + "</b>"],
+        ["cells with this distance", grp ? String(grp.n_pairs) : "—"],
+        ["spread across them", grp ? sci(grp.spread) : "—"]
+      ];
+      kv.forEach(function (r) {
+        readout.appendChild(el("div", { class: "k" }, r[0]));
+        readout.appendChild(el("div", { class: "v", html: r[1] }));
+      });
+    }
+    mS.addEventListener("input", function () {
+      if (lock) {
+        const dd = Number(mS.getAttribute("data-m")) - Number(nS.value);
+        let nv = Number(mS.value) - dd;
+        if (nv < 0) { mS.value = String(Number(mS.value) - nv); nv = 0; }
+        if (nv > N - 1) { mS.value = String(Number(mS.value) - (nv - (N - 1))); nv = N - 1; }
+        nS.value = String(nv);
+      }
+      mS.setAttribute("data-m", mS.value);
+      paint();
+    });
+    nS.addEventListener("input", function () {
+      if (lock) {
+        const dd = Number(mS.value) - Number(nS.getAttribute("data-n"));
+        let mv = Number(nS.value) + dd;
+        if (mv < 0) { nS.value = String(Number(nS.value) - mv); mv = 0; }
+        if (mv > N - 1) { nS.value = String(Number(nS.value) - (mv - (N - 1))); mv = N - 1; }
+        mS.value = String(mv);
+      }
+      nS.setAttribute("data-n", nS.value);
+      mS.setAttribute("data-m", mS.value);
+      paint();
+    });
+    mS.setAttribute("data-m", mS.value);
+    nS.setAttribute("data-n", nS.value);
+
+    S.appendChild(el("div", { class: "panel" }, [
+      el("div", { class: "ph" }, [
+        el("span", {}, "Interactive · slide both absolute positions"),
+        badge("derived", "values read from rope.grid")
+      ]),
+      small("With the lock on, moving either slider moves the other so that " +
+            "<b>m − n</b> stays fixed. The highlighted value does not change: " +
+            "the logit never saw m or n, only their difference. Turn the lock " +
+            "off and change the distance to see it move."),
+      el("div", { class: "switchrow" }, [
+        el("label", { class: "switch" }, [
+          el("input", {
+            type: "checkbox", checked: "checked",
+            onchange: function (e) { lock = e.target.checked; }
+          }),
+          document.createTextNode("lock the relative distance m − n")
+        ])
+      ]),
+      el("div", { class: "sliderrow" }, [el("label", {}, "query pos m"), mS, mOut]),
+      el("div", { class: "sliderrow" }, [el("label", {}, "key pos n"), nS, nOut]),
+      readout,
+      el("div", { class: "scrollx", style: { marginTop: "12px" } }, heat),
+      el("div", { class: "keyrow" }, [
+        el("span", {}, [el("i", { style: { background: ramp(1, "activation") } }),
+                        document.createTextNode("high ⟨R_m q, R_n k⟩")]),
+        el("span", {}, [el("i", { style: { background: ramp(0, "activation") } }),
+                        document.createTextNode("low")]),
+        el("span", {}, [el("i", { style: { borderColor: "var(--warning)", borderWidth: "2px" } }),
+                        document.createTextNode("all cells at the selected distance")])
+      ])
+    ]));
+    paint();
+
+    S.appendChild(verdict(P.relative_holds,
+      "every one of the " + P.offsets.length + " distance groups is constant to <b>" +
+      sci(P.max_spread_over_offsets) + "</b>, and every value matches the derived " +
+      "closed form to <b>" + sci(P.closed_form_max_abs_err) + "</b>",
+      "the matrix is Toeplitz — constant along every diagonal"));
+
+    S.appendChild(NN.callout("key", "WHAT THAT BUYS YOU",
+      "A relative logit means the model learns one function of distance " +
+      "instead of a separate behaviour per absolute slot, which is a far " +
+      "smaller thing to learn and generalises across the whole context. It " +
+      "also means a prompt cached at one offset stays valid if the sequence " +
+      "in front of it does not change length — the KV entries on page 25 are " +
+      "already rotated at their own absolute position, and the score only " +
+      "ever consults differences."));
+  })();
+
+  /* ===================================================================== */
+  /*  6 — Q AND K BUT NOT V                                                */
+  /* ===================================================================== */
+  (function () {
+    const S = NN.$("#qknotv");
+    const SH = R.rope.shift;
+
+    S.appendChild(h2("Why q and k, and never v"));
+    S.appendChild(p(
+      "RoPE is applied to the query and the key. It is not applied to the " +
+      "value, and that is not an implementation shortcut — rotating v breaks " +
+      "something measurable."));
+    S.appendChild(p(
+      "The test: run the same " + M.seq + " tokens at positions " +
+      code("[" + SH.window_a.join(", ") + "]") + " and again at " +
+      code("[" + SH.window_b.join(", ") + "]") + ". Every <em>distance</em> " +
+      "inside the window is identical between the two runs; only the absolute " +
+      "positions moved. If the mechanism really depends on distance alone, " +
+      "nothing should change."));
+
+    const g = el("div", { class: "twocol" });
+
+    g.appendChild(el("div", {}, [
+      h3("RoPE on q and k only"),
+      NN.tiles([
+        { k: "Δ attention probs", v: sci(SH.qk_only.probs_max_abs_err), cls: "activation" },
+        { k: "Δ output", v: sci(SH.qk_only.out_max_abs_err), cls: "activation" }
+      ]),
+      verdict(SH.qk_only.invariant,
+        "identical to machine precision",
+        "sliding the whole window changes nothing"),
+      el("div", { class: "scrollx" }, [
+        mat({ name: "output at " + SH.window_a.join(","), values: SH.qk_only.out_a,
+              cls: "activation", digits: 3, signed: true }),
+        mat({ name: "output at " + SH.window_b.join(","), values: SH.qk_only.out_b,
+              cls: "activation", digits: 3, signed: true })
+      ])
+    ]));
+
+    g.appendChild(el("div", {}, [
+      h3("…and with v rotated too"),
+      NN.tiles([
+        { k: "Δ attention probs", v: sci(SH.v_rotated_too.probs_max_abs_err), cls: "activation" },
+        { k: "Δ output", v: f(SH.v_rotated_too.out_max_abs_err, 4), cls: "activation" }
+      ]),
+      verdict(false,
+        "the output moves by <b>" + f(SH.v_rotated_too.out_max_abs_err, 4) + "</b>",
+        "same tokens, same distances, different answer"),
+      el("div", { class: "scrollx" }, [
+        mat({ name: "output at " + SH.window_a.join(","), values: SH.v_rotated_too.out_a,
+              cls: "activation", digits: 3, signed: true }),
+        mat({ name: "output at " + SH.window_b.join(","), values: SH.v_rotated_too.out_b,
+              cls: "activation", digits: 3, signed: true })
+      ])
+    ]));
+    S.appendChild(g);
+
+    S.appendChild(p(
+      "The asymmetry has a clean reason. The score is a <em>dot product</em> of " +
+      "two rotated vectors, and the two rotations partially cancel — that is " +
+      "the R<sub>m</sub>ᵀR<sub>n</sub> = R<sub>n−m</sub> identity. The output " +
+      "is a <em>weighted average</em> of value rows, and there is no second " +
+      "rotation to cancel against. Rotate v and each row arrives in its own " +
+      "position-dependent frame, gets averaged with rows in different frames, " +
+      "and the result lands in the residual stream with no way to un-spin it. " +
+      "The probabilities are unaffected — they never touch v — but the payload " +
+      "is corrupted."));
+    S.appendChild(small(
+      "Attention probabilities under the shift with v rotated: max |Δ| = " +
+      sci(SH.v_rotated_too.probs_max_abs_err) + ", i.e. unchanged, because the " +
+      "scores are still computed from q and k alone. Only the averaged payload moves."));
+
+    S.appendChild(NN.callout("mem", "AND IT KEEPS THE CACHE HONEST",
+      "K is rotated by its own absolute position before it is stored, so a " +
+      "cached key stays correct forever — the score against any future query " +
+      "still resolves to a difference. V is stored unrotated, exactly as it " +
+      "was projected. Page 12 counts the bytes this costs; the point here is " +
+      "that RoPE adds nothing to them. It is arithmetic on tensors that " +
+      "already exist, with " + code("0") + " parameters and no extra cache."));
+  })();
+
+  /* ===================================================================== */
+  /*  7 — THE SPECTRUM AT REAL SCALE                                       */
+  /* ===================================================================== */
+  (function () {
+    const S = NN.$("#spectrum");
+    const SP = R.real.spectrum;
+    const dm = R.real.models.filter(function (m) { return m.name === R.real.default_model; })[0]
+             || R.real.models[R.real.models.length - 1];
+
+    S.appendChild(h2("The frequency spectrum in a real head"));
+    S.appendChild(p(
+      code(dm.name) + " has " + code("d_model = " + dm.d_model) + " and " +
+      code(dm.n_heads + " heads") + ", so " + code("d_head = " + dm.d_head) +
+      " and RoPE has " + code(dm.n_pairs + " rotation pairs") + " per head. " +
+      "Their wavelengths span " +
+      f(SP.base_10k.rows[0].wavelength_tokens, 2) + " tokens at the fast end to " +
+      NN.count(Math.round(SP.base_10k.rows[SP.base_10k.rows.length - 1].wavelength_tokens)) +
+      " at the slow end."));
+
+    S.appendChild(NN.chart.line({
+      series: [
+        { name: "base " + f(SP.base_10k.base, 0),
+          color: "var(--activation)", dots: false,
+          points: SP.base_10k.rows.map(function (r) { return [r.pair, r.wavelength_tokens]; }) },
+        { name: "base " + f(SP.base_500k.base, 0),
+          color: "var(--accent)", dash: "5 4", dots: false,
+          points: SP.base_500k.rows.map(function (r) { return [r.pair, r.wavelength_tokens]; }) }
+      ],
+      width: 900, height: 260, logY: true,
+      xlabel: "dimension pair i", ylabel: "wavelength (tokens, log)"
+    }));
+    S.appendChild(el("div", { class: "keyrow" }, [
+      el("span", {}, [el("i", { style: { background: "var(--activation)" } }),
+        document.createTextNode("base " + f(SP.base_10k.base, 0) + " — the original RoPE")]),
+      el("span", {}, [el("i", { style: { background: "var(--accent)" } }),
+        document.createTextNode("base " + f(SP.base_500k.base, 0) + " — what Llama 3 ships")]),
+      badge("lit", "both base values quoted")
+    ]));
+    S.appendChild(small(
+      "A straight line on a log axis: the wavelengths are a geometric ladder by " +
+      "construction. Raising the base tilts the whole ladder — the fast end " +
+      "barely moves (pair 0 has wavelength " +
+      f(SP.base_10k.rows[0].wavelength_tokens, 2) + " at either base, since " +
+      "θ<sub>0</sub> = base<sup>0</sup> = 1) while the slow end stretches from " +
+      NN.count(Math.round(SP.base_10k.rows[SP.base_10k.rows.length - 1].wavelength_tokens)) +
+      " to " +
+      NN.count(Math.round(SP.base_500k.rows[SP.base_500k.rows.length - 1].wavelength_tokens)) +
+      " tokens. That is the whole trick of the next section."));
+
+    const tb = el("table", { class: "data" });
+    tb.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "model"), el("th", {}, "d_head"), el("th", {}, "pairs"),
+      el("th", {}, "context"),
+      el("th", {}, "slowest λ @ base " + f(R.meta.base_default, 0)),
+      el("th", {}, "turns of slowest over context"),
+      el("th", {}, "slowest λ @ base " + f(R.meta.base_llama3, 0))
+    ])));
+    const tbb = el("tbody");
+    R.real.models.forEach(function (m) {
+      tbb.appendChild(el("tr", { class: m.name === R.real.default_model ? "lit" : null }, [
+        el("td", {}, m.name),
+        el("td", { class: "n" }, String(m.d_head)),
+        el("td", { class: "n" }, String(m.n_pairs)),
+        el("td", { class: "n" }, NN.count(m.seq)),
+        el("td", { class: "n" }, NN.count(Math.round(m.base_10k.slowest_wavelength_tokens))),
+        el("td", { class: "n" }, f(m.base_10k.turns_of_slowest_over_ctx, 4)),
+        el("td", { class: "n" }, NN.count(Math.round(m.base_500k.slowest_wavelength_tokens)))
+      ]));
+    });
+    tb.appendChild(tbb);
+    S.appendChild(el("div", { class: "scrollx" }, tb));
+    S.appendChild(small("Geometry from " + code("NN.T.reference_configs") +
+      "; d_head, pair count and every wavelength derived here. The two base " +
+      "values are the only quoted numbers in the table."));
+  })();
+
+  /* ===================================================================== */
+  /*  8 — EXTRAPOLATION                                                    */
+  /* ===================================================================== */
+  (function () {
+    const S = NN.$("#extrap");
+    const X = R.extrapolation;
+
+    S.appendChild(h2("What happens past the trained context"));
+    S.appendChild(p(
+      "Nothing in RoPE's arithmetic breaks: R<sub>m</sub> is defined for any m, " +
+      "and the relative property proved above holds at any distance. What breaks " +
+      "is the <em>model</em>, and the frequency ladder shows exactly why."));
+    S.appendChild(p(
+      "Train on length " + NN.count(X.l_train) + " and pair i only ever sees " +
+      "distances in [0, " + NN.count(X.l_train - 1) + "], so its rotation angle " +
+      "only ever spans <span class=\"eq\">θ<sub>i</sub>·" +
+      NN.count(X.l_train - 1) + "</span> radians. For the fast pairs that is " +
+      "thousands of full turns — they have seen every angle many times over and " +
+      "extrapolate for free. For the slow pairs it is a short arc, and beyond " +
+      "the trained length they are evaluated at angles that never occurred " +
+      "during training."));
+
+    S.appendChild(NN.tiles([
+      { k: "d_head", v: String(X.d_head), s: "pairs: " + X.n_pairs },
+      { k: "trained length", v: NN.count(X.l_train), cls: "activation" },
+      { k: "asked for", v: NN.count(X.l_target), s: "scale s = " + f(X.scale, 0) },
+      { k: "pairs never completing a turn", v: X.n_never_completed_a_turn + " / " + X.n_pairs,
+        s: f(100 * X.fraction_fragile, 1) + "% of the ladder" }
+    ]));
+
+    S.appendChild(NN.chart.line({
+      series: [{
+        name: "turns completed within the trained length",
+        color: "var(--activation)", dots: false,
+        points: X.rows.map(function (r) { return [r.pair, Math.max(r.turns_trained, 1e-6)]; })
+      }],
+      width: 900, height: 240, logY: true,
+      xlabel: "dimension pair i", ylabel: "full turns in training (log)"
+    }));
+    S.appendChild(small(
+      "Everything below 1 on this axis is a pair that has never wrapped. There " +
+      "are " + X.n_never_completed_a_turn + " of them, at the slow end, and they " +
+      "are the ones carrying long-range distance."));
+
+    S.appendChild(h3("The purely positional part of the logit"));
+    S.appendChild(p(
+      "Strip the content out — set every pair of q and k to the same unit " +
+      "vector — and the logit collapses to " +
+      "<span class=\"eq\">Σ<sub>i</sub> cos(d·θ<sub>i</sub>) / (d_head/2)</span>, " +
+      "a function of distance alone. This is the shape the model is trained to " +
+      "interpret:"));
+    const kr = R.kernel.real_10k;
+    S.appendChild(NN.chart.line({
+      series: [{ name: "Σ cos(d·θ) / (d_head/2)", color: "var(--activation)", dots: false,
+                 points: kr.map(function (r) { return [r.d, r.f]; }) }],
+      width: 900, height: 230,
+      xlabel: "relative distance d (tokens)", ylabel: "positional logit"
+    }));
+    S.appendChild(small(
+      "It decays fast and then oscillates around a floor. Nothing about the " +
+      "curve stops at " + NN.count(X.l_train) + " — the arithmetic keeps " +
+      "producing values — but the weights have only ever been shown the part " +
+      "of it inside the training length."));
+
+    S.appendChild(h3("The two published fixes"));
+    S.appendChild(el("div", { class: "twocol" }, [
+      el("div", { class: "panel" }, [
+        el("div", { class: "ph" }, [el("span", {}, "Position interpolation"), badge("lit", "literature")]),
+        p("Use <span class=\"eq\">m / s</span> instead of m. Every angle shrinks " +
+          "by s, so no pair leaves the arc it was trained on."),
+        small("But <em>every</em> pair shrinks, including pair 0, which was the " +
+              "one resolving adjacent tokens. Local resolution is the price. " +
+              X.pi_note)
+      ]),
+      el("div", { class: "panel" }, [
+        el("div", { class: "ph" }, [el("span", {}, "NTK-aware base scaling"), badge("lit", "literature")]),
+        p("Raise the base instead: " +
+          "<span class=\"eq\">b′ = b·s<sup>d/(d−2)</sup></span> = " +
+          f(X.base_ntk, 1) + " here."),
+        small("Then θ′<sub>0</sub> = b′<sup>0</sup> = 1 = θ<sub>0</sub> — the " +
+              "fastest pair is untouched — while the slowest is divided by " +
+              "exactly s. " + X.ntk_note)
+      ])
+    ]));
+
+    S.appendChild(verdict(X.ntk_identities_hold,
+      "both NTK identities verified: pair 0 unchanged to <b>" +
+      sci(X.ntk_fastest_unchanged_err) + "</b>, slowest pair equal to θ/s to <b>" +
+      sci(X.ntk_slowest_scaled_err) + "</b>",
+      "derived here; the choice of exponent d/(d−2) is the quoted part"));
+
+    /* PI vs NTK across the ladder */
+    S.appendChild(NN.chart.line({
+      series: [
+        { name: "NTK-aware: θ′/θ", color: "var(--activation)", dots: false,
+          points: X.rows.map(function (r) { return [r.pair, r.ntk_shrink]; }) },
+        { name: "interpolation: 1/s everywhere", color: "var(--accent)", dash: "5 4", dots: false,
+          points: X.rows.map(function (r) { return [r.pair, 1 / X.scale]; }) }
+      ],
+      width: 900, height: 230, yMin: 0, yMax: 1.05,
+      xlabel: "dimension pair i", ylabel: "angle shrink factor"
+    }));
+    S.appendChild(el("div", { class: "keyrow" }, [
+      el("span", {}, [el("i", { style: { background: "var(--activation)" } }),
+        document.createTextNode("NTK-aware — shrinks only where it must")]),
+      el("span", {}, [el("i", { style: { background: "var(--accent)" } }),
+        document.createTextNode("interpolation — flat 1/s = " + f(1 / X.scale, 4))])
+    ]));
+
+    S.appendChild(h3("Stated as literature, not derived"));
+    const ul = el("div");
+    R.literature.items.forEach(function (it) {
+      ul.appendChild(el("div", { class: "panel" }, [
+        el("div", { class: "ph" }, [
+          el("span", {}, it.topic.toUpperCase()), badge("lit", "quoted")
+        ]),
+        el("div", { class: "small", html: it.claim }),
+        el("div", { class: "small muted", style: { marginTop: "5px" } }, it.source)
+      ]));
+    });
+    S.appendChild(ul);
+    S.appendChild(small(R.literature._source + "."));
+  })();
+
+  /* ===================================================================== */
+  /*  9 — WHAT WAS PROVEN                                                  */
+  /* ===================================================================== */
+  (function () {
+    const S = NN.$("#next");
+    S.appendChild(h2("What this page proved"));
+
+    const tb = el("table", { class: "data" });
+    tb.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "check"), el("th", {}, "claim"), el("th", {}, "measured"),
+      el("th", {}, "bound"), el("th", {}, "")
+    ])));
+    const tbb = el("tbody");
+    R.checks.forEach(function (c) {
+      tbb.appendChild(el("tr", {}, [
+        el("td", {}, c.id),
+        el("td", { style: { textAlign: "left" } }, c.what),
+        el("td", { class: "n" }, sci(c.metric)),
+        el("td", { class: "n" }, (c.direction === "greater" ? "> " : "< ") +
+                                 Number(c.tol).toExponential(0)),
+        el("td", {
+          class: "n",
+          style: { color: c.passed ? "var(--good)" : "var(--critical)", fontWeight: 700 }
+        }, c.passed ? "PASS" : "FAIL")
+      ]));
+    });
+    tb.appendChild(tbb);
+    S.appendChild(el("div", { class: "scrollx" }, tb));
+
+    S.appendChild(verdict(R.passed,
+      "<b>" + R.checks.filter(function (c) { return c.passed; }).length + " / " +
+      R.checks.length + "</b> checks pass in " + code("code/positional.py"),
+      "the generator exits non-zero if any of them does not"));
+
+    S.appendChild(NN.callout("why", "NEXT: WHAT A TOKEN LEAVES BEHIND",
+      "RoPE rotates K before it is stored, and that stored K is the thing the " +
+      "next page is about. Multi-head attention keeps one K and one V per head " +
+      "per token, forever, and re-reads all of it on every generated token. " +
+      "Page 12 puts MHA, MQA, GQA and MLA on the same input and counts the bytes."));
+  })();
+
+  NN.page("position");
+})();
+</script>
+</body>
+</html>

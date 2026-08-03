@@ -1,0 +1,1524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 08 What It Predicts</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* page-local layout only; every colour comes from design.css custom properties */
+
+/* ---------------------------------------------------------------- tokens */
+.tokstrip { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0 4px; }
+.tokbox {
+  width: 92px; flex: 0 0 92px; text-align: center; font-family: var(--mono);
+  border: 1px solid var(--hairline); border-radius: 8px;
+  background: var(--surface-2); padding: 7px 4px;
+  transition: opacity .55s ease, transform .35s, border-color .3s, background .3s;
+}
+.tokbox .w  { font-size: .95rem; font-weight: 700; color: var(--ink); }
+.tokbox .i  { font-size: .66rem; color: var(--ink-muted); }
+.tokbox .cap{ font-size: .6rem; color: var(--ink-muted); letter-spacing: .06em;
+              text-transform: uppercase; min-height: 12px; }
+.tokbox.tok-x    { border-color: var(--activation); background: var(--activation-w); }
+.tokbox.tok-x .w { color: var(--activation); }
+.tokbox.tok-y    { border-color: var(--accent); border-style: dashed;
+                   background: color-mix(in srgb, var(--accent) 13%, transparent); }
+.tokbox.tok-y .w { color: var(--ink); }
+.tokbox.faded    { opacity: .13; }
+.tokbox.hot      { transform: translateY(-3px); box-shadow: 0 0 0 2px var(--activation-w); }
+.tokbox.small    { width: 72px; flex: 0 0 72px; padding: 5px 3px; }
+
+/* ------------------------------------------------------------ the shift */
+.shiftstage { overflow-x: auto; padding: 4px 2px 2px; }
+.shiftinner { min-width: 616px; }
+.lanelab { font-family: var(--mono); font-size: .7rem; letter-spacing: .08em;
+           text-transform: uppercase; color: var(--ink-muted); margin: 10px 0 2px; }
+.lanelab b { color: var(--ink); letter-spacing: 0; text-transform: none; font-size: .82rem; }
+.tokrow { display: flex; gap: 8px;
+          transition: transform .8s cubic-bezier(.4,0,.2,1), opacity .5s ease; }
+.arrowband { position: relative; height: 30px; }
+.arrowband .ar {
+  position: absolute; width: 92px; text-align: center; font-family: var(--mono);
+  font-size: .68rem; color: var(--accent); opacity: 0; transition: opacity .5s;
+  line-height: 1.1;
+}
+.arrowband .ar.on { opacity: 1; }
+.arrowband .ar .g { display: block; font-size: 1rem; color: var(--ink-muted); }
+
+/* --------------------------------------------------------- parallel race */
+.race { display: grid; grid-template-columns: 132px 1fr; gap: 10px 12px; align-items: center; margin: 14px 0; }
+.racelab { font-family: var(--mono); font-size: .76rem; color: var(--ink-2); }
+.racelab .s { display: block; font-size: .66rem; color: var(--ink-muted); }
+.racecells { display: flex; gap: 6px; flex-wrap: wrap; }
+.rcell {
+  width: 74px; height: 42px; border-radius: 7px; border: 1px solid var(--hairline);
+  background: var(--surface-2); font-family: var(--mono); font-size: .7rem;
+  color: var(--ink-muted); display: flex; flex-direction: column;
+  align-items: center; justify-content: center; transition: all .3s;
+}
+.rcell.lit { border-color: var(--activation); background: var(--activation-w); color: var(--activation); font-weight: 700; }
+.rcell.done { border-color: var(--hairline); background: var(--surface-3); color: var(--ink-2); }
+.raceclock { font-family: var(--mono); font-size: .78rem; color: var(--ink-2); }
+
+/* ------------------------------------------------------- distribution */
+.dist { display: flex; align-items: flex-end; gap: 6px; margin: 8px 0 2px; }
+.distcol { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
+           align-items: center; cursor: crosshair; }
+.distcol .val { font-family: var(--mono); font-size: .62rem; color: var(--ink-muted);
+                height: 14px; white-space: nowrap; }
+.barwrap { position: relative; width: 100%; height: 132px; display: flex;
+           align-items: flex-end; justify-content: center; }
+.bar { width: 100%; border-radius: 4px 4px 0 0; transition: height .5s cubic-bezier(.4,0,.2,1); }
+.ghost { position: absolute; bottom: 0; left: 0; width: 100%;
+         border: 1px dashed var(--ink-muted); border-bottom: none; border-radius: 4px 4px 0 0;
+         opacity: .55; transition: height .5s cubic-bezier(.4,0,.2,1); }
+.distcol .lab { font-family: var(--mono); font-size: .72rem; color: var(--ink-2);
+                margin-top: 5px; text-align: center; line-height: 1.25; }
+.distcol .lab .id { display: block; font-size: .6rem; color: var(--ink-muted); }
+.distcol.isTarget .lab { color: var(--ink); font-weight: 700; }
+.distcol.isTarget .barwrap::after {
+  content: ""; position: absolute; inset: 0 0 -3px 0;
+  border-bottom: 2px solid var(--ink);
+}
+.distcol.dropped { opacity: .32; }
+.distcol:hover .lab { color: var(--ink); }
+.distflag { font-family: var(--mono); font-size: .6rem; height: 14px;
+            color: var(--ink-muted); letter-spacing: .04em; }
+
+/* signed bars (logits, gradients) */
+.sgn { display: flex; gap: 6px; align-items: stretch; margin: 6px 0 2px; }
+.sgncol { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column;
+          align-items: center; cursor: crosshair; }
+.sgnarea { position: relative; width: 100%; height: 108px; }
+.sgnarea .zero { position: absolute; left: 0; right: 0; top: 50%;
+                 border-top: 1px dashed var(--ink-muted); opacity: .8; }
+.sgnarea .sb { position: absolute; left: 0; width: 100%; border-radius: 3px;
+               transition: height .5s cubic-bezier(.4,0,.2,1), top .5s cubic-bezier(.4,0,.2,1); }
+.sgncol .val { font-family: var(--mono); font-size: .62rem; color: var(--ink-muted);
+               height: 14px; white-space: nowrap; }
+.sgncol .lab { font-family: var(--mono); font-size: .72rem; color: var(--ink-2);
+               margin-top: 5px; text-align: center; line-height: 1.25; }
+.sgncol .lab .id { display: block; font-size: .6rem; color: var(--ink-muted); }
+.sgncol:hover .lab { color: var(--ink); }
+
+/* -------------------------------------------------------------- generic */
+.panel { border: 1px solid var(--hairline); border-radius: 9px;
+         background: var(--surface-2); padding: 14px 16px; }
+.panel > h4 { margin: 0 0 4px; font-size: .82rem; font-family: var(--mono);
+              letter-spacing: .08em; text-transform: uppercase; }
+.panel.train > h4 { color: var(--activation); }
+.panel.infer > h4 { color: var(--optimizer); }
+.panelsub { font-size: .82rem; color: var(--ink-muted); margin-bottom: 10px; }
+.chipbar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 10px 0; }
+.pick {
+  font-family: var(--mono); font-size: .76rem; padding: 5px 11px; border-radius: 7px;
+  border: 1px solid var(--hairline); background: var(--surface-3); color: var(--ink-2);
+  cursor: pointer;
+}
+.pick:hover { border-color: var(--ink-muted); color: var(--ink); }
+.pick.on { border-color: var(--activation); background: var(--activation-w);
+           color: var(--activation); font-weight: 700; }
+.pick.on.alt { border-color: var(--optimizer); background: var(--optimizer-w); color: var(--optimizer); }
+.klabel { font-family: var(--mono); font-size: .72rem; color: var(--ink-muted);
+          text-transform: uppercase; letter-spacing: .08em; margin-right: 4px; }
+.eq { font-family: var(--mono); font-size: .9rem; color: var(--ink-2); }
+.eq b { color: var(--ink); }
+.ok { color: var(--good); font-weight: 700; }
+.bad { color: var(--critical); font-weight: 700; }
+.seqline { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+.grow { font-family: var(--mono); font-size: .78rem; }
+table.data td.hi, table.data tr.hi td { background: var(--surface-3); }
+table.data tr.same td:first-child { color: var(--ink); font-weight: 700; }
+.rowmark { outline: 2px solid var(--optimizer); outline-offset: -2px; }
+.wide { overflow-x: auto; }
+.sliderrow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+             font-family: var(--mono); font-size: .8rem; margin: 10px 0; }
+.sliderrow input[type=range] { flex: 1 1 220px; }
+@media (max-width: 860px) { .race { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 08</div>
+    <h1>What It Predicts</h1>
+    <p class="lede">Everything from here on is a language model, so this page answers the question the
+      rest of the site assumed: what is X, what is Y, what is ŷ, what exactly does the loss compare,
+      and how does the same set of weights that trains on a whole sentence at once produce one word at
+      a time at inference. Nothing here needs any prior idea of what a language model is.</p>
+    <noscript><p class="callout warn">This page builds every table, chart and animation in
+      JavaScript from <code>assets/data/lm.js</code>. With JavaScript disabled you get an empty
+      shell.</p></noscript>
+  </div>
+
+  <section class="block" id="tokens"></section>
+  <section class="block" id="xy"></section>
+  <section class="block" id="yhat"></section>
+  <section class="block" id="xent"></section>
+  <section class="block" id="grad"></section>
+  <section class="block" id="training"></section>
+  <section class="block" id="inference"></section>
+  <section class="block" id="sampling"></section>
+  <section class="block" id="next"></section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/lm.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+  const el = NN.el, T = NN.T, M = window.LM;
+  if (!M) { console.error("lm.js did not load — run python3 code/language_model.py"); return; }
+
+  const VOCAB = M.meta.vocab, V = M.meta.vocab_size;
+  const CORPUS = M.meta.corpus, IDS = M.meta.ids;
+  const OBJ = M.objective, BEF = M.before, AFT = M.after;
+  const GRAD = M.cross_entropy_gradient, HIST = M.training_history, INF = M.inference;
+
+  const A = "var(--activation)", GD = "var(--gradient)", AC = "var(--accent)",
+        OPT = "var(--optimizer)";
+
+  /* the reference model quoted in the real-scale callouts, chosen by the trace
+     itself rather than by an index typed here */
+  const REF = T.reference_configs.models.filter(function (m) {
+    return m.name === T.reference_configs.default_model;
+  })[0] || T.reference_configs.models[0];
+
+  /* ----------------------------------------------------------- helpers */
+  const n = function (v, d) { return '<span class="mono">' + NN.fmt(v, d === undefined ? 4 : d) + "</span>"; };
+  /* the vocabulary contains "<pad>", so anything going into innerHTML is escaped */
+  const esc = function (t) {
+    return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  };
+  const qw = function (v) { return "&ldquo;" + esc(VOCAB[v]) + "&rdquo;"; };
+  const pct = function (p) { return (p * 100).toFixed(p < 0.01 ? 3 : 2) + "%"; };
+  const host = function (id) { return NN.$("#" + id); };
+  function h2(t) { return el("h2", {}, t); }
+  function p(html) { return el("p", { html: html }); }
+  function sub(t) { return el("div", { class: "lanelab", html: t }); }
+
+  /** token box: word on top, id under it, optional caption above. */
+  function tok(id, o) {
+    o = o || {};
+    return el("div", {
+      class: "tokbox" + (o.cls ? " " + o.cls : ""),
+      title: '"' + VOCAB[id] + '" = token id ' + id
+    }, [
+      el("div", { class: "cap" }, o.cap || ""),
+      el("div", { class: "w" }, VOCAB[id]),
+      el("div", { class: "i" }, "id " + id)
+    ]);
+  }
+
+  /** A vertical probability bar chart over the whole vocabulary. */
+  function distChart(o) {
+    const H = 132;
+    const max = o.max || Math.max.apply(null, o.values.concat([1e-9]));
+    const root = el("div", { class: "dist" });
+    const cols = [];
+    for (let v = 0; v < V; v++) {
+      const barwrap = el("div", { class: "barwrap" });
+      const ghost = o.ghost ? el("div", { class: "ghost" }) : null;
+      const bar = el("div", { class: "bar" });
+      if (ghost) barwrap.appendChild(ghost);
+      barwrap.appendChild(bar);
+      const c = el("div", { class: "distcol" }, [
+        el("div", { class: "val" }, ""),
+        barwrap,
+        el("div", { class: "distflag" }, ""),
+        el("div", { class: "lab" }, [VOCAB[v], el("span", { class: "id" }, "id " + v)])
+      ]);
+      root.appendChild(c);
+      cols.push({ c: c, bar: bar, ghost: ghost, val: c.querySelector(".val"),
+                  flag: c.querySelector(".distflag") });
+    }
+    /** values, ghost, colour, flags:{v:'text'}, dropped:[v], target:v */
+    root.set = function (s) {
+      const mx = s.max || Math.max.apply(null, s.values.concat([1e-9]));
+      for (let v = 0; v < V; v++) {
+        const q = s.values[v];
+        cols[v].bar.style.height = Math.max(q <= 0 ? 0 : 2, q / mx * H) + "px";
+        cols[v].bar.style.background = s.color || A;
+        cols[v].val.textContent = s.fmt ? s.fmt(q)
+          : (q > 0 && q < 1e-3 ? q.toExponential(1) : NN.fmt(q, 3));
+        if (cols[v].ghost) {
+          const g = s.ghost ? s.ghost[v] : 0;
+          cols[v].ghost.style.height = Math.max(0, g / mx * H) + "px";
+        }
+        cols[v].flag.textContent = (s.flags && s.flags[v]) || "";
+        cols[v].c.classList.toggle("isTarget", s.target === v);
+        cols[v].c.classList.toggle("dropped", !!(s.dropped && s.dropped.indexOf(v) >= 0));
+        cols[v].c.onmousemove = (function (vv) {
+          return function (e) { NN.tip.show(s.tip ? s.tip(vv) : VOCAB[vv], e.clientX, e.clientY); };
+        })(v);
+        cols[v].c.onmouseleave = function () { NN.tip.hide(); };
+      }
+    };
+    root.set(o);
+    return root;
+  }
+
+  /** Signed bars around a zero line — for logits and for gradients. */
+  function signedChart(o) {
+    const H = 108, half = H / 2;
+    const root = el("div", { class: "sgn" });
+    const cols = [];
+    for (let v = 0; v < V; v++) {
+      const area = el("div", { class: "sgnarea" }, [el("div", { class: "zero" })]);
+      const b = el("div", { class: "sb" });
+      area.appendChild(b);
+      const c = el("div", { class: "sgncol" }, [
+        el("div", { class: "val" }, ""),
+        area,
+        el("div", { class: "lab" }, [VOCAB[v], el("span", { class: "id" }, "id " + v)])
+      ]);
+      root.appendChild(c);
+      cols.push({ c: c, b: b, val: c.querySelector(".val") });
+    }
+    root.set = function (s) {
+      const mx = Math.max.apply(null, s.values.map(Math.abs).concat([1e-9]));
+      for (let v = 0; v < V; v++) {
+        const q = s.values[v];
+        const hgt = Math.max(2, Math.abs(q) / mx * (half - 4));
+        cols[v].b.style.height = hgt + "px";
+        cols[v].b.style.top = (q >= 0 ? half - hgt : half) + "px";
+        cols[v].b.style.background = typeof s.color === "function" ? s.color(v, q) : (s.color || GD);
+        cols[v].val.textContent = NN.fmtSigned(q, 3);
+        cols[v].c.onmousemove = (function (vv) {
+          return function (e) { NN.tip.show(s.tip ? s.tip(vv) : VOCAB[vv], e.clientX, e.clientY); };
+        })(v);
+        cols[v].c.onmouseleave = function () { NN.tip.hide(); };
+      }
+    };
+    root.set(o);
+    return root;
+  }
+
+  /** Small line plot with an optional movable marker and scatter overlays. */
+  function plot(o) {
+    const Wd = o.width || 520, Ht = o.height || 200;
+    const MG = Object.assign({ t: 14, r: 16, b: 30, l: 56 }, o.margin || {});
+    const iw = Wd - MG.l - MG.r, ih = Ht - MG.t - MG.b;
+    const pts = o.series.reduce(function (a, s) { return a.concat(s.points); }, []);
+    const xs = pts.map(function (q) { return q[0]; }), ys = pts.map(function (q) { return q[1]; });
+    const x0 = o.xMin !== undefined ? o.xMin : Math.min.apply(null, xs);
+    const x1 = o.xMax !== undefined ? o.xMax : Math.max.apply(null, xs);
+    let y0 = o.yMin !== undefined ? o.yMin : Math.min.apply(null, ys);
+    let y1 = o.yMax !== undefined ? o.yMax : Math.max.apply(null, ys);
+    if (y1 === y0) { y1 = y0 + 1; }
+    /* an explicit bound is a real bound: perplexity cannot go below 1, so a
+       chart whose axis wanders below its stated minimum is lying about it. */
+    const padY = (y1 - y0) * 0.08;
+    if (o.yMin === undefined) y0 -= padY;
+    if (o.yMax === undefined) y1 += padY;
+    const X = function (v) { return MG.l + (x1 === x0 ? iw / 2 : (v - x0) / (x1 - x0) * iw); };
+    const Y = function (v) { return MG.t + ih - (v - y0) / (y1 - y0) * ih; };
+    const s = NN.svg;
+    const root = s("svg", { class: "chart", viewBox: "0 0 " + Wd + " " + Ht,
+                            width: "100%", height: Ht, role: "img" });
+
+    for (let k = 0; k <= 4; k++) {
+      const tv = y0 + (y1 - y0) * k / 4, yy = Y(tv);
+      root.appendChild(s("line", { class: "gridline", x1: MG.l, x2: MG.l + iw, y1: yy, y2: yy }));
+      const t = s("text", { x: MG.l - 8, y: yy + 3.5, "text-anchor": "end" });
+      t.textContent = NN.fmt(tv, o.ydigits === undefined ? 2 : o.ydigits);
+      root.appendChild(t);
+    }
+    for (let k = 0; k <= 4; k++) {
+      const tv = x0 + (x1 - x0) * k / 4;
+      const t = s("text", { x: X(tv), y: MG.t + ih + 18, "text-anchor": "middle" });
+      t.textContent = NN.fmt(tv, o.xdigits === undefined ? 1 : o.xdigits);
+      root.appendChild(t);
+    }
+    root.appendChild(s("line", { class: "axis", x1: MG.l, x2: MG.l + iw, y1: MG.t + ih, y2: MG.t + ih }));
+    root.appendChild(s("line", { class: "axis", x1: MG.l, x2: MG.l, y1: MG.t, y2: MG.t + ih }));
+    if (o.ylabel) {
+      const t = s("text", { x: -(MG.t + ih / 2), y: 13, transform: "rotate(-90)", "text-anchor": "middle" });
+      t.textContent = o.ylabel; root.appendChild(t);
+    }
+    if (o.xlabel) {
+      const t = s("text", { x: MG.l + iw / 2, y: Ht - 3, "text-anchor": "middle" });
+      t.textContent = o.xlabel; root.appendChild(t);
+    }
+
+    o.series.forEach(function (se) {
+      if (se.kind === "dots") {
+        se.points.forEach(function (q, i) {
+          const c = s("circle", { cx: X(q[0]), cy: Y(q[1]), r: 4.5, fill: se.color,
+                                  stroke: "var(--surface-1)", "stroke-width": 1.5 });
+          if (se.tip) {
+            c.addEventListener("mousemove", function (e) { NN.tip.show(se.tip(i), e.clientX, e.clientY); });
+            c.addEventListener("mouseleave", function () { NN.tip.hide(); });
+          }
+          root.appendChild(c);
+        });
+        return;
+      }
+      const d = se.points.map(function (q, i) {
+        return (i ? "L" : "M") + X(q[0]).toFixed(2) + " " + Y(q[1]).toFixed(2);
+      }).join(" ");
+      root.appendChild(s("path", { class: "series", d: d, stroke: se.color,
+                                   "stroke-dasharray": se.dash || null,
+                                   "stroke-linejoin": "round", "stroke-linecap": "round" }));
+    });
+
+    const mline = s("line", { x1: 0, x2: 0, y1: MG.t, y2: MG.t + ih, stroke: "var(--ink-muted)",
+                              "stroke-dasharray": "3 3", opacity: 0 });
+    const mdot = s("circle", { cx: 0, cy: 0, r: 5, fill: o.markColor || "var(--ink)",
+                               stroke: "var(--surface-1)", "stroke-width": 2, opacity: 0 });
+    root.appendChild(mline); root.appendChild(mdot);
+    root.setMark = function (x, y) {
+      mline.setAttribute("x1", X(x)); mline.setAttribute("x2", X(x));
+      mline.setAttribute("opacity", 1);
+      mdot.setAttribute("cx", X(x)); mdot.setAttribute("cy", Y(y));
+      mdot.setAttribute("opacity", 1);
+    };
+    return root;
+  }
+
+  /* ==================================================================== */
+  /* 1. THE CORPUS AND THE TOKENS                                         */
+  /* ==================================================================== */
+  (function () {
+    const s = host("tokens");
+    s.appendChild(h2("1 · The corpus, and the integers it becomes"));
+    s.appendChild(p(
+      "A language model never sees text. It sees integers. Before anything else happens, the " +
+      "text is cut into <b>tokens</b> — here, whole words, because the point is legibility — and " +
+      "each distinct token is assigned an id. The full list of distinct tokens is the " +
+      "<b>vocabulary</b>. This one has " + n(V, 0) + " entries, which is small enough that every " +
+      "number the model produces can be printed in full on this page."));
+
+    s.appendChild(sub("the corpus — " + CORPUS.length + " tokens"));
+    const strip = el("div", { class: "tokstrip" });
+    const boxes = IDS.map(function (id, i) {
+      const b = tok(id, { cls: "tok-x", cap: "pos " + i });
+      strip.appendChild(b);
+      return b;
+    });
+    s.appendChild(strip);
+    s.appendChild(el("p", { class: "small muted", html:
+      'As the model receives it, that is just <span class="mono">[' + IDS.join(", ") + "]</span>. " +
+      "Six integers. Notice that " + n(IDS[0], 0) + " appears twice — position 0 and position 4 are " +
+      "the same token, <span class=\"mono\">&ldquo;" + CORPUS[0] + "&rdquo;</span>. Hold on to that; " +
+      "it becomes the whole point in section 6." }));
+
+    /* vocabulary table, cross-highlighting with the corpus strip */
+    const counts = VOCAB.map(function (_, v) {
+      return IDS.filter(function (t) { return t === v; }).length;
+    });
+    const tbl = el("table", { class: "data" }, [
+      el("thead", {}, el("tr", {}, [
+        el("th", {}, "id"), el("th", {}, "token"), el("th", {}, "in this corpus"),
+        el("th", {}, "positions")
+      ])),
+      el("tbody", {}, VOCAB.map(function (w, v) {
+        const where = IDS.map(function (t, i) { return t === v ? i : -1; })
+                         .filter(function (i) { return i >= 0; });
+        const tr = el("tr", {}, [
+          el("td", {}, String(v)),
+          el("td", { class: "n" }, '"' + w + '"'),
+          el("td", { class: "n" }, counts[v] ? String(counts[v]) + "×" : "—"),
+          el("td", { class: "n muted" }, where.length ? where.join(", ") : "never used")
+        ]);
+        tr.addEventListener("mouseenter", function () {
+          boxes.forEach(function (b, i) { b.classList.toggle("hot", IDS[i] === v); });
+        });
+        tr.addEventListener("mouseleave", function () {
+          boxes.forEach(function (b) { b.classList.remove("hot"); });
+        });
+        return tr;
+      }))
+    ]);
+    s.appendChild(sub("the vocabulary — hover a row to find it in the corpus"));
+    s.appendChild(el("div", { class: "wide" }, tbl));
+
+    s.appendChild(NN.callout("key", "Integers all the way down",
+      "The word&#8596;id table is a lookup, not a computation. It is fixed before training and it " +
+      "is not learned. Everything downstream — the embedding row that gets fetched, the attention " +
+      "scores, the loss, the gradient — is arithmetic on numbers indexed by those ids. The model " +
+      "has no notion that " + n(IDS[0], 0) + " means &ldquo;" + CORPUS[0] + "&rdquo;. The only thing " +
+      "id " + n(IDS[0], 0) + " means to it is <em>row " + n(IDS[0], 0) + " of the embedding matrix</em>."));
+
+    s.appendChild(p(
+      "The model underneath is the same shape as the one on page 09: " + n(M.meta.n_layers, 0) +
+      " transformer blocks, " + n(M.meta.d_model, 0) + " channels, " + n(M.meta.n_heads, 0) +
+      " attention heads, a feed-forward width of " + n(M.meta.d_ff, 0) + ". What changes on this " +
+      "page is not the machine, it is what we ask the machine for."));
+  })();
+
+  /* ==================================================================== */
+  /* 2. X AND Y — THE CENTREPIECE                                         */
+  /* ==================================================================== */
+  (function () {
+    const s = host("xy");
+    s.appendChild(h2("2 · X and Y are the same list, offset by one"));
+    s.appendChild(p(
+      "This is the single idea the rest of the page is built on, and it is smaller than people " +
+      "expect. <b>X</b> is what the model is shown. <b>Y</b> is what it is asked to produce. For a " +
+      "language model, Y is <em>X shifted left by one position</em>. Position " + n(0, 0) + " is " +
+      "asked to name the token at position 1; position 1 is asked to name the token at position 2; " +
+      "and so on. Step through it."));
+
+    /* --------------------------------------------------- the shift stage */
+    const CW = 100;                       /* 92px box + 8px gap */
+    const rowX = el("div", { class: "tokrow" });
+    const rowY = el("div", { class: "tokrow" });
+    const xb = [], yb = [];
+    IDS.forEach(function (id, i) {
+      const a = tok(id, { cap: "pos " + i }); rowX.appendChild(a); xb.push(a);
+      const b = tok(id, { cap: "" });        rowY.appendChild(b); yb.push(b);
+    });
+    const band = el("div", { class: "arrowband" });
+    const arrows = [];
+    for (let i = 0; i < OBJ.X.length; i++) {
+      const ar = el("div", { class: "ar", style: { left: (i * CW) + "px" } }, [
+        el("span", { class: "g" }, "↓"), "predicts"
+      ]);
+      band.appendChild(ar); arrows.push(ar);
+    }
+    const labX = el("div", { class: "lanelab" }, "");
+    const labY = el("div", { class: "lanelab" }, "");
+    const stage = el("div", { class: "shiftstage" },
+      el("div", { class: "shiftinner" }, [labX, rowX, band, labY, rowY]));
+    s.appendChild(stage);
+
+    const caption = el("p", { class: "eq", style: { minHeight: "3.2em", marginTop: "14px" } });
+    s.appendChild(caption);
+    const ctl = el("div", {}); s.appendChild(ctl);
+
+    const STEPS = [
+      { lab: "the corpus",
+        x: "the token ids, as they arrive",
+        y: "",
+        cap: "Six tokens. Nothing has been split into inputs and targets yet — there is only the corpus." },
+      { lab: "make a copy",
+        x: "the token ids, as they arrive",
+        y: "an identical copy, sitting directly underneath",
+        cap: "Copy the row. At this instant the two rows are the same list: no annotation has been " +
+             "introduced, and none ever will be." },
+      { lab: "slide the copy left by one",
+        x: "the token ids, as they arrive",
+        y: "the same list, shifted left by one",
+        cap: "Slide the copy one place to the left. The first token of the copy falls off the front — " +
+             "nothing precedes it, so it can never be a target. The last token of the top row now has " +
+             "nothing under it — there is no token after it, so it is not an input to anything." },
+      { lab: "lock them together",
+        x: "X — what the model sees",
+        y: "Y — what it must predict",
+        cap: "What is left, locked into columns, is the training set. Each column is one example: " +
+             "the box on top is the input, the box below is the correct answer. X = ids[0:5], " +
+             "Y = ids[1:6]." },
+      { lab: "five examples",
+        x: "X — what the model sees",
+        y: "Y — what it must predict",
+        cap: "" }
+    ];
+
+    const stepper = new NN.Stepper({
+      mount: ctl, count: STEPS.length, autoplayMs: 1900,
+      labels: STEPS.map(function (q) { return q.lab; }),
+      onStep: function (k) {
+        const st = STEPS[k];
+        labX.innerHTML = "<b>" + st.x + "</b>";
+        labY.innerHTML = st.y ? "<b>" + st.y + "</b>" : "&nbsp;";
+        rowY.style.opacity = k === 0 ? "0" : "1";
+        rowY.style.transform = "translateX(" + (k >= 2 ? -CW : 0) + "px)";
+        yb.forEach(function (b, i) {
+          b.classList.toggle("faded", k >= 2 && i === 0);
+          b.classList.toggle("tok-y", k >= 3);
+          b.querySelector(".cap").textContent = k >= 3 && i > 0 ? "Y[" + (i - 1) + "]" : "";
+        });
+        xb.forEach(function (b, i) {
+          b.classList.toggle("faded", k >= 2 && i === IDS.length - 1);
+          b.classList.toggle("tok-x", k >= 3);
+          b.querySelector(".cap").textContent = k >= 3 && i < IDS.length - 1
+            ? "X[" + i + "]" : "pos " + i;
+        });
+        arrows.forEach(function (a) { a.classList.toggle("on", k >= 3); });
+        caption.innerHTML = k === STEPS.length - 1
+          ? "That is " + n(OBJ.n_training_examples, 0) + " separate training examples, and every " +
+            "one of them was produced by a slice. " +
+            '<span class="mono">X = ids[:-1]</span>, <span class="mono">Y = ids[1:]</span>. ' +
+            "No labeller, no annotation, no dataset construction beyond &ldquo;get some text&rdquo;."
+          : st.cap;
+      }
+    });
+    stepper.render(0);
+
+    /* ---------------------------------------------------- the pairs table */
+    s.appendChild(sub("the " + OBJ.n_training_examples + " examples, written out"));
+    const ptbl = el("table", { class: "data" }, [
+      el("thead", {}, el("tr", {}, [
+        el("th", {}, "example"), el("th", {}, "context it may look at"),
+        el("th", {}, "X — sees"), el("th", {}, "Y — must predict"), el("th", {}, "ids")
+      ])),
+      el("tbody", {}, OBJ.pairs.map(function (q) {
+        return el("tr", {}, [
+          el("td", {}, "position " + q.pos),
+          el("td", { class: "n muted" }, q.context.join(" ")),
+          el("td", { class: "n", style: { color: "var(--activation)", fontWeight: 700 } }, '"' + q.sees + '"'),
+          el("td", { class: "n", style: { fontWeight: 700 } }, '"' + q.must_predict + '"'),
+          el("td", { class: "n muted" }, OBJ.X[q.pos] + " → " + OBJ.Y[q.pos])
+        ]);
+      }))
+    ]);
+    s.appendChild(el("div", { class: "wide" }, ptbl));
+    s.appendChild(el("p", { class: "small muted", html:
+      "The <b>context</b> column matters. Position " + n(OBJ.pairs.length - 1, 0) + " does not just " +
+      "see &ldquo;" + OBJ.pairs[OBJ.pairs.length - 1].sees + "&rdquo;; it sees the whole prefix " +
+      "&ldquo;" + OBJ.pairs[OBJ.pairs.length - 1].context.join(" ") + "&rdquo;. Attention is what " +
+      "lets each position read everything to its left, and the causal mask is what stops it reading " +
+      "to its right — which would be reading its own answer." }));
+
+    s.appendChild(NN.callout("why", "This is why it scales",
+      OBJ.how_made + " A human-labelled dataset costs money per example and runs out. A corpus of " +
+      "raw text with " + n(REF.seq, 0) + " tokens in a sequence yields " +
+      n(REF.seq - 1, 0) + " supervised examples from that one sequence, " +
+      "for free, for every sequence you can find. The objective is not clever. Its cheapness is the " +
+      "entire trick."));
+
+    /* -------------------------------------------- parallel vs sequential */
+    s.appendChild(el("h3", {}, "All " + OBJ.n_training_examples + " examples, one forward pass"));
+    s.appendChild(p(OBJ.parallel_note));
+    s.appendChild(p(
+      "Run the two side by side. Each cell is one of the " + n(OBJ.n_training_examples, 0) +
+      " examples above; a cell lights when its prediction is being computed. The recurrent model " +
+      "cannot start example 1 until example 0 has produced its hidden state. The transformer has no " +
+      "such dependency — the causal mask does the ordering, so the arithmetic for every position " +
+      "happens in the same matrix multiplies."));
+
+    const raceGrid = el("div", { class: "race" });
+    function lane(title, subt, cls) {
+      const cells = OBJ.pairs.map(function (q) {
+        return el("div", { class: "rcell" }, [
+          el("div", {}, q.sees + "→" + q.must_predict),
+          el("div", { style: { fontSize: ".6rem" } }, "pos " + q.pos)
+        ]);
+      });
+      const row = el("div", { class: "racecells" }, cells);
+      raceGrid.appendChild(el("div", { class: "racelab" }, [title, el("span", { class: "s" }, subt)]));
+      raceGrid.appendChild(row);
+      return cells;
+    }
+    const rnnCells = lane("RNN", OBJ.n_training_examples + " sequential steps");
+    const tfCells  = lane("Transformer", "1 step, all positions");
+    s.appendChild(raceGrid);
+
+    const clock = el("div", { class: "raceclock" }, "not started");
+    const runBtn = el("button", { class: "btn primary" }, "▶ Run both");
+    let racing = false;
+    function resetRace() {
+      rnnCells.concat(tfCells).forEach(function (c) { c.classList.remove("lit", "done"); });
+      clock.textContent = "not started";
+    }
+    runBtn.addEventListener("click", function () {
+      if (racing) return;
+      racing = true; resetRace();
+      let t = 0;
+      tfCells.forEach(function (c) { c.classList.add("lit"); });
+      clock.textContent = "tick 1 — transformer: all " + OBJ.n_training_examples +
+                          " positions computed. RNN: position 0.";
+      const iv = setInterval(function () {
+        if (t > 0) rnnCells[t - 1].classList.replace("lit", "done");
+        if (t >= rnnCells.length) {
+          clearInterval(iv);
+          tfCells.forEach(function (c) { c.classList.replace("lit", "done"); });
+          clock.textContent = "done — transformer finished at tick 1, RNN at tick " +
+                              rnnCells.length + ". Same " + OBJ.n_training_examples + " examples.";
+          racing = false;
+          return;
+        }
+        rnnCells[t].classList.add("lit");
+        clock.textContent = "tick " + (t + 1) + " — RNN is on position " + t +
+                            "; the transformer has been finished since tick 1.";
+        t++;
+      }, 700);
+    });
+    s.appendChild(el("div", { class: "controls" }, [runBtn,
+      el("button", { class: "btn", onclick: function () { if (!racing) resetRace(); } }, "Reset"),
+      clock]));
+  })();
+
+  /* ==================================================================== */
+  /* 3. ŷ IS A DISTRIBUTION                                               */
+  /* ==================================================================== */
+  (function () {
+    const s = host("yhat");
+    s.appendChild(h2("3 · ŷ is a distribution over the whole vocabulary, not a word"));
+    s.appendChild(p(
+      "The obvious guess is that the model outputs a word. It does not. At every position it " +
+      "outputs one number for <em>every</em> token in the vocabulary — " + n(V, 0) + " numbers here, " +
+      "one per row of the table in section 1. Those raw numbers are called <b>logits</b> (written z). " +
+      "A logit is an unbounded score: it can be negative, it has no units, and only the differences " +
+      "between logits carry information."));
+    s.appendChild(NN.formula({
+      rule: "z = model(X)<sub>i</sub> &nbsp; — one score per vocabulary token, at every position i",
+      sub: "p = softmax(z), &nbsp; p<sub>v</sub> = e<sup>z<sub>v</sub></sup> / &Sigma;<sub>u</sub> e<sup>z<sub>u</sub></sup>",
+      result: "ŷ = p, a vector of " + V + " probabilities that sums to 1",
+      cls: "activation"
+    }));
+    s.appendChild(p(
+      "<b>Softmax</b> turns scores into probabilities: exponentiate (so everything is positive), " +
+      "then divide by the total (so they sum to one). It is monotone — it never reorders anything — " +
+      "so the largest logit is always the largest probability. The model's <em>prediction</em>, if " +
+      "you insist on one word, is the <b>argmax</b>: the id of the largest entry. But argmax is a " +
+      "read-out, not the output. The whole vector is the output, and the whole vector is what gets " +
+      "trained."));
+
+    /* controls: position + before/after */
+    const bar = el("div", { class: "chipbar" });
+    bar.appendChild(el("span", { class: "klabel" }, "position"));
+    const posBtns = OBJ.pairs.map(function (q) {
+      return el("button", { class: "pick" }, q.pos + " · " + q.sees + "→" + q.must_predict);
+    });
+    posBtns.forEach(function (b) { bar.appendChild(b); });
+    bar.appendChild(el("span", { class: "klabel", style: { marginLeft: "14px" } }, "weights"));
+    const whenBtns = [el("button", { class: "pick alt" }, "before training"),
+                      el("button", { class: "pick alt" }, "after training")];
+    whenBtns.forEach(function (b) { bar.appendChild(b); });
+    s.appendChild(bar);
+
+    let pos = 0, when = 0;
+    const line = el("p", { class: "eq" });
+    s.appendChild(line);
+
+    s.appendChild(sub("z — the logits, raw scores (hover a bar)"));
+    const zc = signedChart({ values: BEF.per_position[0].logits, color: A });
+    s.appendChild(zc);
+
+    s.appendChild(sub("ŷ = softmax(z) — probabilities, summing to 1"));
+    const pc = distChart({ values: BEF.per_position[0].probs });
+    s.appendChild(pc);
+
+    const foot = el("p", { class: "small" });
+    s.appendChild(foot);
+
+    function draw() {
+      const rec = (when ? AFT : BEF).per_position[pos];
+      posBtns.forEach(function (b, i) { b.classList.toggle("on", i === pos); });
+      whenBtns.forEach(function (b, i) { b.classList.toggle("on", i === when); });
+      const total = rec.probs.reduce(function (a, q) { return a + q; }, 0);
+      line.innerHTML =
+        "Position " + n(pos, 0) + " sees <b>&ldquo;" + rec.input_str + "&rdquo;</b> (id " +
+        n(rec.input, 0) + ") in the context <span class='mono'>" +
+        OBJ.pairs[pos].context.join(" ") + "</span>, and the true next token is <b>&ldquo;" +
+        rec.target_str + "&rdquo;</b> (id " + n(rec.target, 0) + "). The model's argmax is " +
+        "<b>" + qw(rec.predicted) + "</b> — " +
+        (rec.correct ? "<span class='ok'>correct ✓</span>" : "<span class='bad'>wrong ✗</span>") + ".";
+      const tipFor = function (v) {
+        return "<b>" + qw(v) + "</b> · id " + v +
+          "<br>logit z = " + NN.fmt(rec.logits[v], 5) +
+          "<br>prob p = " + NN.fmt(rec.probs[v], 6) + " (" + pct(rec.probs[v]) + ")" +
+          (v === rec.target ? "<br><b>this is Y — the true next token</b>" : "") +
+          (v === rec.predicted ? "<br><b>this is the argmax — the prediction</b>" : "");
+      };
+      zc.set({ values: rec.logits, color: A, tip: tipFor });
+      const flags = {}; flags[rec.target] = "Y";
+      if (rec.predicted !== rec.target) flags[rec.predicted] = "argmax";
+      else flags[rec.target] = "Y = argmax";
+      pc.set({ values: rec.probs, color: A, target: rec.target, flags: flags,
+               tip: tipFor, fmt: function (q) { return NN.fmt(q, 3); } });
+      foot.innerHTML =
+        "The bars sum to " + n(total, 6) + " — that is what softmax guarantees. The probability the " +
+        "model puts on the <em>true</em> next token, &ldquo;" + rec.target_str + "&rdquo;, is " +
+        n(rec.prob_of_target, 5) + " (" + pct(rec.prob_of_target) + "). Uniform guessing over " +
+        n(V, 0) + " tokens would be " + n(1 / V, 5) + ". That one number, p[Y], is the only entry " +
+        "the loss looks at — but every entry moves when the model is trained, because they are tied " +
+        "together by the division in softmax.";
+    }
+    posBtns.forEach(function (b, i) { b.addEventListener("click", function () { pos = i; draw(); }); });
+    whenBtns.forEach(function (b, i) { b.addEventListener("click", function () { when = i; draw(); }); });
+    draw();
+
+    s.appendChild(NN.callout("mem", "The same vector, at real scale",
+      "This distribution has " + n(V, 0) + " entries. " + REF.name +
+      " has a vocabulary of " + NN.count(REF.vocab) + " (" +
+      n(REF.vocab, 0) + ") and a training sequence of " +
+      n(REF.seq, 0) + " positions, so the logits for a single sequence " +
+      "are " + n(REF.seq, 0) + " × " +
+      n(REF.vocab, 0) + " = " +
+      NN.count(REF.seq * REF.vocab) +
+      " numbers — " + NN.bytes(REF.seq *
+      REF.vocab * T.memory.dtype_bytes.fp32) +
+      " in fp32, for one sequence, before the batch dimension. The logit tensor is routinely the " +
+      "largest single activation in a language model, which is why fused cross-entropy kernels that " +
+      "never materialise it in full are worth writing."));
+  })();
+
+  /* ==================================================================== */
+  /* 4. CROSS-ENTROPY, DERIVED                                            */
+  /* ==================================================================== */
+  (function () {
+    const s = host("xent");
+    s.appendChild(h2("4 · The loss: pick the true token's bar, and take −log of it"));
+    s.appendChild(p(
+      "Training needs one number to push down. The distribution above has " + n(V, 0) + " entries " +
+      "and the truth Y names exactly one of them, so the loss is built from a single question: " +
+      "<em>how much probability did you put on the token that actually came next?</em> Take that " +
+      "one probability and apply −log. That is cross-entropy, in full, for a language model."));
+    s.appendChild(NN.formula({
+      rule: "L<sub>i</sub> = −log p[Y<sub>i</sub>]",
+      sub: "and over the sequence, L = mean over the " + OBJ.n_training_examples + " positions",
+      result: "one scalar",
+      cls: "gradient"
+    }));
+    s.appendChild(p(
+      "−log is the right shape and nothing else is. It is 0 when p = 1 (you were certain and right, " +
+      "so there is nothing to fix), it is small when p is large, and it climbs without bound as " +
+      "p → 0 — being <em>confidently wrong</em> is punished arbitrarily hard, which is exactly the " +
+      "behaviour you want from a training signal. Drag the slider along the curve."));
+
+    /* -log p curve with real markers */
+    const curve = [];
+    for (let k = 1; k <= 200; k++) { const q = k / 200; curve.push([q, -Math.log(q)]); }
+    const befPts = BEF.per_position.map(function (r) { return [r.prob_of_target, r.loss]; });
+    const aftPts = AFT.per_position.map(function (r) { return [r.prob_of_target, r.loss]; });
+    const chart = plot({
+      width: 980, height: 300, xMin: 0, xMax: 1, yMin: 0, yMax: 5.2,
+      xlabel: "p[Y] — probability given to the true next token",
+      ylabel: "L = −log p[Y]", ydigits: 2, xdigits: 2,
+      markColor: "var(--ink)",
+      series: [
+        { points: curve, color: GD },
+        { points: befPts, color: GD, kind: "dots", tip: function (i) {
+            const r = BEF.per_position[i];
+            return "<b>before training</b> · position " + i + "<br>true token &ldquo;" +
+              r.target_str + "&rdquo;<br>p = " + NN.fmt(r.prob_of_target, 5) +
+              "<br>L = " + NN.fmt(r.loss, 5); } },
+        { points: aftPts, color: A, kind: "dots", tip: function (i) {
+            const r = AFT.per_position[i];
+            return "<b>after training</b> · position " + i + "<br>true token &ldquo;" +
+              r.target_str + "&rdquo;<br>p = " + NN.fmt(r.prob_of_target, 5) +
+              "<br>L = " + NN.fmt(r.loss, 5); } }
+      ]
+    });
+    s.appendChild(chart);
+    s.appendChild(el("div", { class: "legend" }, [
+      el("span", { class: "tclass tclass-gradient" }, "▼ before training — the five real positions"),
+      el("span", { class: "tclass tclass-activation" }, "● after training — the same five positions")
+    ]));
+
+    const slider = el("input", { type: "range", min: 1, max: 999, value: 500 });
+    const read = el("span", {});
+    s.appendChild(el("div", { class: "sliderrow" }, [
+      el("span", { class: "klabel" }, "p[Y]"), slider, read
+    ]));
+    function slide() {
+      const q = Number(slider.value) / 1000;
+      chart.setMark(q, -Math.log(q));
+      read.innerHTML = "p = " + n(q, 3) + " &nbsp;→&nbsp; L = −log p = " + n(-Math.log(q), 4) +
+                       " &nbsp;→&nbsp; perplexity = e<sup>L</sup> = " + n(Math.exp(-Math.log(q)), 3);
+    }
+    slider.addEventListener("input", slide);
+    slide();
+
+    /* the per-position table, before and after */
+    s.appendChild(sub("every position, before and after training"));
+    const rows = OBJ.pairs.map(function (q, i) {
+      const b = BEF.per_position[i], a = AFT.per_position[i];
+      return el("tr", {}, [
+        el("td", {}, "pos " + i),
+        el("td", { class: "n" }, '"' + b.target_str + '"'),
+        el("td", { class: "n" }, NN.fmt(b.prob_of_target, 5)),
+        el("td", { class: "n" }, NN.fmt(b.loss, 4)),
+        el("td", { class: "n" }, NN.fmt(a.prob_of_target, 5)),
+        el("td", { class: "n" }, NN.fmt(a.loss, 4))
+      ]);
+    });
+    rows.push(el("tr", { style: { fontWeight: 700 } }, [
+      el("td", {}, "mean"), el("td", {}, ""),
+      el("td", { class: "n muted" }, "—"),
+      el("td", { class: "n" }, NN.fmt(BEF.loss, 4)),
+      el("td", { class: "n muted" }, "—"),
+      el("td", { class: "n" }, NN.fmt(AFT.loss, 4))
+    ]));
+    s.appendChild(el("div", { class: "wide" }, el("table", { class: "data" }, [
+      el("thead", {}, el("tr", {}, [
+        el("th", {}, "position"), el("th", {}, "Y"), el("th", {}, "p[Y] before"),
+        el("th", {}, "L before"), el("th", {}, "p[Y] after"), el("th", {}, "L after")
+      ])),
+      el("tbody", {}, rows)
+    ])));
+
+    /* perplexity */
+    s.appendChild(el("h3", {}, "Perplexity is the same number, in units you can feel"));
+    s.appendChild(p(
+      "A loss of " + n(BEF.loss, 4) + " means nothing on its own. Exponentiate it — " +
+      "<span class='mono'>perplexity = e<sup>L</sup></span> — and it becomes a count: the effective " +
+      "number of tokens the model is choosing between. A model that has learned nothing spreads its " +
+      "probability uniformly over all " + n(V, 0) + " tokens, giving p[Y] = 1/" + n(V, 0) +
+      ", L = log " + n(V, 0) + " = " + n(BEF.uniform_loss, 4) + " and perplexity exactly " +
+      n(BEF.uniform_perplexity, 0) + " — <em>the vocabulary size</em>. A perfect model has " +
+      "perplexity 1: it knows which token comes next."));
+    s.appendChild(NN.tiles([
+      { k: "uniform guessing", v: NN.fmt(BEF.uniform_perplexity, 0),
+        s: "= vocab size, L = " + NN.fmt(BEF.uniform_loss, 4) },
+      { k: "before training", v: NN.fmt(BEF.perplexity, 2), cls: "gradient",
+        s: "L = " + NN.fmt(BEF.loss, 4) },
+      { k: "after training", v: NN.fmt(AFT.perplexity, 2), cls: "activation",
+        s: "L = " + NN.fmt(AFT.loss, 4) },
+      { k: "perfect", v: Math.exp(-Math.log(1)).toFixed(2), s: "p[Y] = 1 at every position" }
+    ]));
+    s.appendChild(el("p", { class: "small muted", html:
+      "Note where the untrained model starts: perplexity " + n(BEF.perplexity, 2) + " against a " +
+      "uniform " + n(BEF.uniform_perplexity, 0) + ". It is <em>worse</em> than guessing, because " +
+      "random initial weights do not produce a uniform distribution — they produce an arbitrary " +
+      "one, and an arbitrary distribution is on average worse than an honest shrug." }));
+  })();
+
+  /* ==================================================================== */
+  /* 5. THE GRADIENT — dL/dz = p − onehot                                 */
+  /* ==================================================================== */
+  (function () {
+    const s = host("grad");
+    s.appendChild(h2("5 · The gradient: dL/dz = p − onehot"));
+    s.appendChild(p(
+      "Everything above is the forward direction. To train, we need the derivative of the loss with " +
+      "respect to the logits — the numbers the model actually produced. The answer is the most " +
+      "elegant result in this project, and it is worth deriving in full because the cancellation " +
+      "looks like a trick and is not."));
+
+    s.appendChild(NN.formula({
+      rule: "L = −log p<sub>y</sub> = −log ( e<sup>z<sub>y</sub></sup> / &Sigma;<sub>u</sub> e<sup>z<sub>u</sub></sup> )",
+      sub: "= log &Sigma;<sub>u</sub> e<sup>z<sub>u</sub></sup> − z<sub>y</sub> &nbsp;=&nbsp; logsumexp(z) − z<sub>y</sub>",
+      cls: "gradient"
+    }));
+    s.appendChild(p(
+      "Written that way the loss is two terms, and each differentiates on its own. The second is " +
+      "trivial: <span class='mono'>d z<sub>y</sub> / d z<sub>v</sub></span> is 1 when v is the true " +
+      "token and 0 everywhere else — that is a one-hot vector. The first term is the interesting one."));
+    s.appendChild(NN.formula({
+      rule: "d/dz<sub>v</sub> log &Sigma;<sub>u</sub> e<sup>z<sub>u</sub></sup> " +
+            "= e<sup>z<sub>v</sub></sup> / &Sigma;<sub>u</sub> e<sup>z<sub>u</sub></sup>",
+      sub: "= p<sub>v</sub> &nbsp;&nbsp; <b>the derivative of logsumexp IS softmax</b>",
+      cls: "activation"
+    }));
+    s.appendChild(p(
+      "Pause on that. Softmax is not bolted on to the loss; it <em>falls out</em> of differentiating " +
+      "the normaliser. That is why the pairing of softmax with cross-entropy is not a convention — " +
+      "it is the only pairing where the log and the exponential annihilate each other and leave " +
+      "arithmetic this cheap:"));
+    s.appendChild(NN.formula({
+      rule: "dL/dz<sub>v</sub> = p<sub>v</sub> − 1[v = y]",
+      sub: "vector form: <b>dL/dz = p − onehot(y)</b>",
+      result: "no exponentials, no divisions, no Jacobian — one subtraction",
+      cls: "gradient"
+    }));
+    s.appendChild(NN.callout("key", "What it means, in words",
+      "<b>Push down whatever you predicted, push up the truth.</b> Every entry of the gradient is " +
+      "just the probability the model assigned to that token — a positive number, so gradient " +
+      "descent pushes that logit down — except the true token, which has 1 subtracted from it, " +
+      "making it negative, so that logit gets pushed up. The size of each push is exactly how much " +
+      "probability was misplaced. The entries sum to zero, so the total probability mass is " +
+      "conserved: this gradient only ever <em>moves</em> mass from the wrong tokens to the right one."));
+
+    /* animated three-panel */
+    const rec = GRAD;
+    const capt = el("p", { class: "eq", style: { minHeight: "3.2em" } });
+    const ctl = el("div", {});
+    s.appendChild(ctl);
+    s.appendChild(capt);
+
+    const lab1 = sub("p = softmax(z) — what the model said, at position " + rec.position);
+    const c1 = distChart({ values: rec.probs, color: A });
+    const lab2 = sub("onehot(y) — the truth: 1 at " + qw(rec.target) + ", 0 everywhere else");
+    const c2 = distChart({ values: rec.onehot, color: AC });
+    const lab3 = sub("dL/dz = p − onehot — the gradient");
+    const c3 = signedChart({ values: rec.analytic, color: GD });
+    [lab1, c1, lab2, c2, lab3, c3].forEach(function (e) { s.appendChild(e); });
+
+    const tipP = function (v) {
+      return "<b>" + qw(v) + "</b> · id " + v +
+        "<br>p = " + NN.fmt(rec.probs[v], 6) +
+        "<br>onehot = " + NN.fmt(rec.onehot[v], 0) +
+        "<br>dL/dz = " + NN.fmtSigned(rec.analytic[v], 6) +
+        "<br>" + (rec.analytic[v] < 0 ? "<b>negative → this logit is pushed UP</b>"
+                                      : "positive → this logit is pushed down");
+    };
+    c1.set({ values: rec.probs, color: A, target: rec.target, tip: tipP });
+    c2.set({ values: rec.onehot, color: AC, target: rec.target, tip: tipP,
+             fmt: function (q) { return NN.fmt(q, 0); } });
+    c3.set({ values: rec.analytic, color: GD, tip: tipP });
+
+    /* verification table — built before the stepper, which renders on construction */
+    const verify = el("div", {});
+    verify.appendChild(sub("verification — closed form vs central differences on L"));
+    verify.appendChild(el("div", { class: "wide" }, el("table", { class: "data" }, [
+      el("thead", {}, el("tr", {}, [
+        el("th", {}, "token"), el("th", {}, "p"), el("th", {}, "onehot"),
+        el("th", {}, "p − onehot"), el("th", {}, "finite difference"), el("th", {}, "|Δ|")
+      ])),
+      el("tbody", {}, VOCAB.map(function (w, v) {
+        const d = Math.abs(rec.analytic[v] - rec.numeric[v]);
+        return el("tr", { class: v === rec.target ? "hi" : null }, [
+          el("td", {}, '"' + w + '"' + (v === rec.target ? "  ← Y" : "")),
+          el("td", { class: "n" }, NN.fmt(rec.probs[v], 6)),
+          el("td", { class: "n" }, NN.fmt(rec.onehot[v], 0)),
+          el("td", { class: "n" }, NN.fmtSigned(rec.analytic[v], 6)),
+          el("td", { class: "n" }, NN.fmtSigned(rec.numeric[v], 6)),
+          el("td", { class: "n muted" }, NN.fmt(d, 1))
+        ]);
+      }))
+    ])));
+    verify.appendChild(el("p", { class: "eq", html:
+      "max |analytic − numerical| = " + n(rec.max_abs_err, 1) + " &nbsp; " +
+      (rec.passed ? "<span class='ok'>✓ passed</span>" : "<span class='bad'>✗ failed</span>") +
+      " &nbsp;<span class='muted'>— " + rec.note + "</span>" }));
+    verify.appendChild(el("p", { class: "small muted", html:
+      "The entries also sum to " + n(rec.analytic.reduce(function (a, q) { return a + q; }, 0), 1) +
+      " — zero, to floating-point round-off. That is the conservation property: softmax outputs sum " +
+      "to 1 and the one-hot sums to 1, so their difference sums to 0. The gradient can only move " +
+      "probability mass around, never create it." }));
+    s.appendChild(verify);
+
+    const GSTEP = [
+      { lab: "what the model said",
+        cap: "The model's distribution at position " + rec.position + ", which sees " +
+             qw(OBJ.X[rec.position]) + ". Nothing about the truth has entered yet." },
+      { lab: "what the truth is",
+        cap: "The truth is one token: " + qw(rec.target) + ", id " + rec.target +
+             ". As a vector over the vocabulary it is one 1 and " + (V - 1) + " zeros. That is all " +
+             "the supervision there is." },
+      { lab: "subtract",
+        cap: "Subtract, entry by entry. Every wrong token keeps its own probability as a positive " +
+             "gradient; the true token becomes p − 1, which is negative because p ≤ 1. The true " +
+             "token's entry here is " + NN.fmtSigned(rec.analytic[rec.target], 5) + " — the only " +
+             "negative bar." },
+      { lab: "check it against finite differences",
+        cap: "And it is not an assertion. Below, the closed form is compared with a central " +
+             "difference computed on the loss itself." }
+    ];
+    const gstep = new NN.Stepper({
+      mount: ctl, count: GSTEP.length, autoplayMs: 2200,
+      labels: GSTEP.map(function (q) { return q.lab; }),
+      onStep: function (k) {
+        capt.innerHTML = GSTEP[k].cap;
+        [lab1, c1].forEach(function (e) { e.style.opacity = "1"; });
+        [lab2, c2].forEach(function (e) { e.style.opacity = k >= 1 ? "1" : "0.12"; });
+        [lab3, c3].forEach(function (e) { e.style.opacity = k >= 2 ? "1" : "0.12"; });
+        verify.style.opacity = k >= 3 ? "1" : "0.12";
+      }
+    });
+
+    gstep.render(0);
+
+    s.appendChild(NN.callout("why", "Where this lands in the backward pass",
+      "This is the <em>first</em> gradient of the backward pass — the seed. Page 10 takes " +
+      "<span class='mono'>dL/dz</span> and pushes it back through the output projection, the final " +
+      "LayerNorm, both transformer blocks and finally into the embedding table. Every gradient on " +
+      "that page starts life as this subtraction. Note also what the averaging does: the loss is a " +
+      "mean over " + n(OBJ.n_training_examples, 0) + " positions, so the gradient the optimiser " +
+      "actually sees is <span class='mono'>(p − onehot) / " + n(OBJ.n_training_examples, 0) +
+      "</span> — the same shape, scaled. That division is why loss is a mean and not a sum: it keeps " +
+      "the gradient magnitude independent of how many tokens happen to be in the batch."));
+  })();
+
+  /* ==================================================================== */
+  /* 6. TRAINING, WATCHED                                                 */
+  /* ==================================================================== */
+  (function () {
+    const s = host("training");
+    s.appendChild(h2("6 · Training, watched step by step"));
+    s.appendChild(p(
+      "Now run it: " + n(HIST.length, 0) + " steps of gradient descent at learning rate " +
+      n(M.meta.lr, 2) + ", on the " + n(OBJ.n_training_examples, 0) + " examples from section 2, " +
+      "all of them in every step. Nothing else changes — same forward pass, same loss, same " +
+      "gradient. Play it and watch the per-position predictions flip to correct one at a time."));
+
+    const lossPts = HIST.map(function (q) { return [q.step, q.loss]; });
+    const ppxPts  = HIST.map(function (q) { return [q.step, q.perplexity]; });
+    const lossChart = plot({ width: 520, height: 210, series: [{ points: lossPts, color: GD }],
+                             xlabel: "training step", ylabel: "loss L", yMin: 0,
+                             ydigits: 2, xdigits: 0, markColor: GD });
+    const ppxChart  = plot({ width: 520, height: 210, series: [{ points: ppxPts, color: AC }],
+                             xlabel: "training step", ylabel: "perplexity  e^L", yMin: 0,
+                             ydigits: 1, xdigits: 0, markColor: AC });
+    s.appendChild(el("div", { class: "grid2" }, [
+      el("div", {}, [sub("loss — the number being minimised"), lossChart]),
+      el("div", {}, [sub("perplexity — the same number, as a token count"), ppxChart])
+    ]));
+    s.appendChild(el("p", { class: "small muted" }, "Two scales, two charts. Loss and perplexity " +
+      "are the same quantity related by e^L; overlaying them on one pair of axes would be a lie " +
+      "about the vertical scale."));
+
+    const tilehost = el("div", {});
+    s.appendChild(tilehost);
+
+    const rows = OBJ.pairs.map(function (q) {
+      return el("tr", {}, [
+        el("td", {}, "pos " + q.pos),
+        el("td", { class: "n" }, '"' + q.sees + '"'),
+        el("td", { class: "n" }, '"' + q.must_predict + '"'),
+        el("td", { class: "n" }, ""), el("td", { class: "n" }, ""), el("td", {}, "")
+      ]);
+    });
+    s.appendChild(el("div", { class: "wide" }, el("table", { class: "data" }, [
+      el("thead", {}, el("tr", {}, [
+        el("th", {}, "position"), el("th", {}, "X — sees"), el("th", {}, "Y — must predict"),
+        el("th", {}, "argmax now"), el("th", {}, "p[Y] now"), el("th", {}, "")
+      ])),
+      el("tbody", {}, rows)
+    ])));
+
+    const ctl = el("div", {});
+    s.appendChild(ctl);
+    new NN.Stepper({
+      mount: ctl, count: HIST.length, autoplayMs: 260,
+      onStep: function (k) {
+        const q = HIST[k];
+        lossChart.setMark(q.step, q.loss);
+        ppxChart.setMark(q.step, q.perplexity);
+        tilehost.innerHTML = "";
+        tilehost.appendChild(NN.tiles([
+          { k: "step", v: String(q.step), s: "of " + (HIST.length - 1) },
+          { k: "loss", v: NN.fmt(q.loss, 4), cls: "gradient",
+            s: "started at " + NN.fmt(HIST[0].loss, 4) },
+          { k: "perplexity", v: NN.fmt(q.perplexity, 2),
+            s: "uniform = " + NN.fmt(BEF.uniform_perplexity, 0) },
+          { k: "positions correct", v: q.n_correct + " / " + OBJ.n_training_examples,
+            cls: q.n_correct === OBJ.n_training_examples ? "activation" : null,
+            s: "argmax = Y" }
+        ]));
+        rows.forEach(function (tr, i) {
+          const pred = q.predictions[i], ok = pred === OBJ.Y[i];
+          const cells = tr.children;
+          cells[3].textContent = '"' + VOCAB[pred] + '"';
+          cells[3].style.color = ok ? "var(--activation)" : "var(--ink-2)";
+          cells[3].style.fontWeight = ok ? "700" : "400";
+          cells[4].textContent = NN.fmt(q.target_probs[i], 5);
+          cells[5].innerHTML = ok ? "<span class='ok'>✓ correct</span>"
+                                  : "<span class='muted'>…</span>";
+          tr.classList.toggle("hi", ok);
+        });
+      }
+    });
+
+    s.appendChild(el("h3", {}, "The same token, two different answers"));
+    s.appendChild(p(
+      "After " + n(HIST.length, 0) + " steps the loss is " + n(AFT.loss, 4) + " and perplexity is " +
+      n(AFT.perplexity, 4) + " — from " + n(BEF.loss, 4) + " and " + n(BEF.perplexity, 2) +
+      ". All " + n(OBJ.n_training_examples, 0) + " positions are correct. Look carefully at which " +
+      "ones:"));
+    const dupRows = AFT.per_position.map(function (r, i) {
+      const dup = r.input === AFT.per_position[0].input;
+      return el("tr", { class: dup ? "rowmark" : null }, [
+        el("td", {}, "pos " + i),
+        el("td", { class: "n" }, '"' + r.input_str + '" (id ' + r.input + ")"),
+        el("td", { class: "n muted" }, OBJ.pairs[i].context.join(" ")),
+        el("td", { class: "n" }, '"' + VOCAB[r.predicted] + '"'),
+        el("td", { class: "n" }, '"' + r.target_str + '"'),
+        el("td", { class: "n" }, NN.fmt(r.prob_of_target, 4)),
+        el("td", { html: r.correct ? "<span class='ok'>✓</span>" : "<span class='bad'>✗</span>" })
+      ]);
+    });
+    s.appendChild(el("div", { class: "wide" }, el("table", { class: "data" }, [
+      el("thead", {}, el("tr", {}, [
+        el("th", {}, "position"), el("th", {}, "input token"), el("th", {}, "context"),
+        el("th", {}, "argmax"), el("th", {}, "Y"), el("th", {}, "p[Y]"), el("th", {}, "")
+      ])),
+      el("tbody", {}, dupRows)
+    ])));
+
+    const p0 = AFT.per_position[0], p4 = AFT.per_position[AFT.per_position.length - 1];
+    s.appendChild(NN.callout("key", "This is attention, visible in one table",
+      "Position " + n(p0.pos, 0) + " and position " + n(p4.pos, 0) + " are fed the <em>identical " +
+      "input token</em>: &ldquo;" + p0.input_str + "&rdquo;, id " + n(p0.input, 0) + ". Same " +
+      "embedding row, same weights, same everything the token itself can offer. Yet position " +
+      n(p0.pos, 0) + " predicts " + qw(p0.predicted) + " with p = " +
+      n(p0.prob_of_target, 4) + " and position " + n(p4.pos, 0) + " predicts &ldquo;" +
+      qw(p4.predicted) + " with p = " + n(p4.prob_of_target, 4) + ". The only thing that " +
+      "differs is the context each one is allowed to read: &ldquo;" +
+      OBJ.pairs[p0.pos].context.join(" ") + "&rdquo; versus &ldquo;" +
+      OBJ.pairs[p4.pos].context.join(" ") + "&rdquo;. A model without attention — one that mapped " +
+      "each token id to an output through a fixed function — <em>could not do this at all</em>. It " +
+      "would have to give both positions the same answer and eat the loss on one of them."));
+  })();
+
+  /* ==================================================================== */
+  /* 7. INFERENCE                                                         */
+  /* ==================================================================== */
+  (function () {
+    const s = host("inference");
+    s.appendChild(h2("7 · Inference: how it actually produces the next word"));
+    s.appendChild(p(
+      "Training and inference run the same weights through the same forward pass. They differ in " +
+      "exactly one place, and every practical consequence in the second half of this site comes out " +
+      "of it: <b>where the input at position i comes from.</b>"));
+
+    const tf = INF.teacher_forcing_contrast;
+    s.appendChild(el("div", { class: "grid2" }, [
+      el("div", { class: "panel train" }, [
+        el("h4", {}, "Training — teacher forcing"),
+        el("div", { class: "panelsub" }, tf.training)
+      ]),
+      el("div", { class: "panel infer" }, [
+        el("h4", {}, "Inference — autoregressive"),
+        el("div", { class: "panelsub" }, tf.inference)
+      ])
+    ]));
+
+    /* ------------------------------------------------ the two animations */
+    const modeBar = el("div", { class: "chipbar" }, [el("span", { class: "klabel" }, "weights")]);
+    const modeBtns = [el("button", { class: "pick alt" }, "untrained model"),
+                      el("button", { class: "pick alt" }, "trained model")];
+    modeBtns.forEach(function (b) { modeBar.appendChild(b); });
+    s.appendChild(modeBar);
+
+    /* TRAINING panel — static, all positions at once */
+    const trainRow = el("div", { class: "tokstrip" });
+    const trainNotes = el("div", {});
+    OBJ.pairs.forEach(function (q, i) {
+      const b = tok(OBJ.X[i], { cls: "tok-x small", cap: "X[" + i + "]" });
+      trainRow.appendChild(b);
+    });
+    const trainTargets = el("div", { class: "tokstrip" });
+    OBJ.pairs.forEach(function (q, i) {
+      trainTargets.appendChild(tok(OBJ.Y[i], { cls: "tok-y small", cap: "Y[" + i + "]" }));
+    });
+
+    /* INFERENCE panel */
+    const infCtx = el("div", { class: "tokstrip" });
+    const infRows = el("div", { class: "wide" });
+    const infDistLab = sub("");
+    const infDist = distChart({ values: INF.trained.steps[0].probs });
+    const infLine = el("p", { class: "eq" });
+    const infWaste = el("p", { class: "small muted" });
+
+    const panels = el("div", { class: "grid2" }, [
+      el("div", { class: "panel train" }, [
+        el("h4", {}, "Training — one pass, every position"),
+        el("div", { class: "panelsub" }, "The inputs are the true corpus tokens. They are all " +
+          "known in advance, so all " + OBJ.n_training_examples + " rows are computed together and " +
+          "all " + OBJ.n_training_examples + " are used."),
+        sub("X — fed to the model, all at once"), trainRow,
+        sub("Y — compared against, all at once"), trainTargets,
+        trainNotes
+      ]),
+      el("div", { class: "panel infer" }, [
+        el("h4", {}, "Inference — one token at a time"),
+        el("div", { class: "panelsub" }, "There is no true next token. Position i is fed whatever " +
+          "the model itself produced at step i−1, so the steps cannot be run in parallel: step 2 " +
+          "does not know its own input until step 1 has finished."),
+        sub("context so far — the model's own output, fed back"), infCtx,
+        infRows, infDistLab, infDist, infLine, infWaste
+      ])
+    ]);
+    s.appendChild(panels);
+
+    trainNotes.appendChild(el("p", { class: "small muted", html:
+      "The model's own argmax at these positions before training was " +
+      BEF.per_position.map(function (r) { return qw(r.predicted); }).join(", ") +
+      " — every one of them " +
+      (BEF.per_position.every(function (r) { return !r.correct; }) ? "wrong" : "mostly wrong") +
+      ". It made no difference to the inputs. Training never lets the model's own output touch the " +
+      "input stream; that is what &ldquo;teacher forcing&rdquo; means." }));
+    trainNotes.appendChild(el("p", { class: "small", html:
+      "<b>Count the forward passes.</b> This panel: " + n(1, 0) + " pass, producing all " +
+      n(OBJ.n_training_examples, 0) + " predictions, every one of them supervised. The panel on " +
+      "the right: " + n(INF.trained.steps.length, 0) + " passes, producing " +
+      n(INF.trained.steps.length, 0) + " tokens, one per pass, each pass waiting on the one before " +
+      "it. Same weights, same arithmetic per row — a completely different cost structure, which is " +
+      "why pages 24 onwards treat inference as its own machine rather than as training with the " +
+      "backward pass removed." }));
+
+    const ctl = el("div", {});
+    s.appendChild(ctl);
+    let mode = 1;
+    let stepper = null;
+
+    function run(gen, k) {
+      const st = gen.steps[k];
+      infCtx.innerHTML = "";
+      st.context.forEach(function (id, i) {
+        infCtx.appendChild(tok(id, {
+          cls: (i === 0 ? "tok-x" : "tok-y") + " small",
+          cap: i === 0 ? "prompt" : "step " + (i - 1)
+        }));
+      });
+      const arrow = el("div", { class: "tokbox small", style: { border: "none", background: "none" } },
+        el("div", { class: "w", style: { color: "var(--ink-muted)" } }, "→"));
+      infCtx.appendChild(arrow);
+      const chosen = tok(st.chosen, { cls: "tok-y small", cap: "new" });
+      chosen.style.borderColor = "var(--optimizer)";
+      infCtx.appendChild(chosen);
+
+      /* the rows computed / discarded */
+      infRows.innerHTML = "";
+      const tbl = el("table", { class: "data" }, [
+        el("thead", {}, el("tr", {}, [
+          el("th", {}, "row"), el("th", {}, "token at that position"), el("th", {}, "what happens to it")
+        ])),
+        el("tbody", {}, st.context.map(function (id, i) {
+          const used = i === st.row_used;
+          return el("tr", { class: used ? "hi" : null }, [
+            el("td", {}, "row " + i),
+            el("td", { class: "n" }, '"' + VOCAB[id] + '"'),
+            el("td", { class: "n", style: { color: used ? "var(--optimizer)" : "var(--ink-muted)" } },
+               used ? "USED — this row's distribution picks the next token"
+                    : "computed, then discarded")
+          ]);
+        }))
+      ]);
+      infRows.appendChild(tbl);
+
+      infDistLab.innerHTML = "<b>row " + st.row_used + "</b>'s distribution — the only one that is read";
+      infDist.set({
+        values: st.probs, color: OPT, target: st.chosen,
+        flags: (function () { const f = {}; f[st.chosen] = "argmax"; return f; })(),
+        tip: function (v) {
+          return "<b>" + qw(v) + "</b> · id " + v +
+            "<br>logit z = " + NN.fmt(st.logits[v], 5) +
+            "<br>p = " + NN.fmt(st.probs[v], 6) + " (" + pct(st.probs[v]) + ")";
+        }
+      });
+      infLine.innerHTML =
+        "Step " + n(st.step, 0) + ": context <span class='mono'>&ldquo;" +
+        st.context_str.join(" ") + "&rdquo;</span> → argmax picks <b>&ldquo;" + st.chosen_str +
+        "&rdquo;</b> with p = " + n(st.prob_of_chosen, 5) + " (" + pct(st.prob_of_chosen) +
+        "). It is appended to the context, and the whole forward pass runs again.";
+      infWaste.textContent = st.wasted_note;
+    }
+
+    function build() {
+      const gen = mode ? INF.trained : INF.untrained;
+      modeBtns.forEach(function (b, i) { b.classList.toggle("on", i === mode); });
+      if (stepper) { stepper.pause(); ctl.innerHTML = ""; }
+      stepper = new NN.Stepper({
+        mount: ctl, count: gen.steps.length, autoplayMs: 1800,
+        labels: gen.steps.map(function (st, i) {
+          return "generate token " + (i + 1) + " — context length " + st.all_rows_computed;
+        }),
+        onStep: function (k) { run(gen, k); }
+      });
+      stepper.render(0);
+      finalLine();
+    }
+    modeBtns.forEach(function (b, i) {
+      b.addEventListener("click", function () { mode = i; build(); });
+    });
+
+    /* the payoff: the two final strings */
+    const finals = el("div", {});
+    s.appendChild(finals);
+    function finalLine() {
+      finals.innerHTML = "";
+      finals.appendChild(el("h3", {}, "The payoff"));
+      finals.appendChild(el("p", { html:
+        "Same code path, same prompt <span class='mono'>&ldquo;" +
+        esc(VOCAB[INF.trained.prompt[0]]) + "&rdquo;</span>, same number of steps. The only difference " +
+        "is the values in the weight matrices." }));
+      [["untrained weights", INF.untrained, GD], ["trained weights", INF.trained, A]]
+        .forEach(function (row) {
+          const strip = el("div", { class: "tokstrip" });
+          row[1].final_str.forEach(function (w, i) {
+            const b = tok(row[1].final[i], { cls: "small", cap: i === 0 ? "prompt" : "step " + (i - 1) });
+            b.style.borderColor = i === 0 ? "var(--hairline)" : row[2];
+            strip.appendChild(b);
+          });
+          finals.appendChild(sub(row[0]));
+          finals.appendChild(strip);
+          finals.appendChild(el("p", { class: "mono small muted" },
+            '"' + row[1].final_str.join(" ") + '"'));
+        });
+      finals.appendChild(el("p", { class: "small muted", html:
+        "The untrained run collapses onto one token and repeats it, because with arbitrary weights " +
+        "one logit happens to be largest and feeding its token back does not change that ranking " +
+        "enough to escape. The trained run reproduces the corpus it was trained on — which for a " +
+        "corpus of " + n(OBJ.n_training_examples, 0) + " examples and a loss of " + n(AFT.loss, 4) +
+        " is exactly what should happen, and is also the smallest possible demonstration of " +
+        "memorisation." }));
+    }
+    build();
+
+    s.appendChild(NN.callout("mem", "Every discarded row is the KV cache's reason to exist",
+      "Count the waste. At the last inference step the model computed " +
+      n(INF.trained.steps[INF.trained.steps.length - 1].all_rows_computed, 0) + " rows and used " +
+      n(1, 0) + ". Worse, the rows it recomputed were for tokens it had already processed on the " +
+      "previous step — identical inputs, identical weights, identical results. Page 25 shows the " +
+      "fix: keep the per-token key and value vectors from previous steps in a cache, and each new " +
+      "step only has to compute the single new row. That turns the per-token cost from " +
+      "quadratic-in-context back to linear, and it is the reason a served model spends its memory " +
+      "budget on a cache rather than on more weights."));
+  })();
+
+  /* ==================================================================== */
+  /* 8. SAMPLING                                                          */
+  /* ==================================================================== */
+  (function () {
+    const s = host("sampling");
+    s.appendChild(h2("8 · Sampling: turning the distribution into one token"));
+    s.appendChild(p(
+      "Section 7 used argmax every time, which is called <b>greedy</b> decoding and is completely " +
+      "deterministic. It is one choice among several, and the others do not change the model at " +
+      "all — they reshape the distribution before drawing from it. Every strategy below is applied " +
+      "to the same probabilities the model produced; switch between them and watch the bars move."));
+
+    /* labels and prose are written from the parameters the generator recorded,
+       so nothing about a strategy is typed here by hand */
+    const S0 = INF.trained.steps[0].strategies;
+    const STRATS = Object.keys(S0).map(function (key) {
+      const sd = S0[key];
+      const T_ = NN.fmt(sd.temperature, 2);
+      if (key === "greedy") {
+        return { key: key, label: "greedy", why:
+          "The distribution is left exactly as the model produced it (temperature " + T_ +
+          ", no truncation) and the largest entry is taken with certainty. No randomness: repeat " +
+          "the prompt, get the same output forever." };
+      }
+      if (sd.temperature !== 1) {
+        return { key: key, label: "temperature " + T_, why:
+          "Divide the logits by T = " + T_ + ", then softmax again. " +
+          (sd.temperature < 1
+            ? "T below 1 magnifies the differences between scores, so the distribution sharpens: " +
+              "the leader takes more mass and the tail is squeezed. T → 0 becomes greedy."
+            : "T above 1 shrinks the differences, so the distribution flattens and unlikely tokens " +
+              "get a real chance. T → ∞ becomes uniform sampling.") +
+          " This is the knob people mean by &ldquo;creativity&rdquo;, and it is literally a division." };
+      }
+      if (sd.top_k) {
+        return { key: key, label: "top-k, k = " + NN.fmt(sd.top_k, 0), why:
+          "Keep the " + NN.fmt(sd.top_k, 0) + " highest-probability tokens, set every other " +
+          "probability to zero, renormalise so the survivors sum to 1. A hard truncation: the tail " +
+          "cannot be sampled at all, no matter how many times you draw." };
+      }
+      return { key: key, label: "top-p (nucleus), p = " + NN.fmt(sd.top_p, 2), why:
+        "Sort by probability, walk down the list accumulating mass, stop once the running total " +
+        "reaches " + NN.fmt(sd.top_p, 2) + ", discard the rest and renormalise. Unlike top-k the " +
+        "size of the kept set adapts: a confident distribution keeps one token, a flat one keeps many." };
+    });
+
+    const bar = el("div", { class: "chipbar" }, [el("span", { class: "klabel" }, "inference step")]);
+    const stepBtns = INF.trained.steps.map(function (st, i) {
+      return el("button", { class: "pick" }, "step " + i + " · after \"" + st.context_str.join(" ") + "\"");
+    });
+    stepBtns.forEach(function (b) { bar.appendChild(b); });
+    s.appendChild(bar);
+
+    const bar2 = el("div", { class: "chipbar" }, [el("span", { class: "klabel" }, "strategy")]);
+    const stratBtns = STRATS.map(function (q) {
+      return el("button", { class: "pick alt" }, q.label);
+    });
+    stratBtns.forEach(function (b) { bar2.appendChild(b); });
+    s.appendChild(bar2);
+
+    const lab = sub("");
+    const chart = distChart({ values: INF.trained.steps[0].strategies.greedy.dist, ghost: true });
+    const why = el("p", { class: "small" });
+    const stats = el("p", { class: "eq" });
+    s.appendChild(lab); s.appendChild(chart); s.appendChild(stats); s.appendChild(why);
+    s.appendChild(el("p", { class: "small muted", html:
+      "The dashed outline behind every bar is the model's raw distribution, unchanged. The solid " +
+      "bar is what the strategy would actually sample from." }));
+
+    let si = 0, ti = 0;
+    function draw() {
+      stepBtns.forEach(function (b, i) { b.classList.toggle("on", i === si); });
+      stratBtns.forEach(function (b, i) { b.classList.toggle("on", i === ti); });
+      const st = INF.trained.steps[si];
+      const sd = st.strategies[STRATS[ti].key];
+      const dropped = [];
+      for (let v = 0; v < V; v++) if (sd.kept.indexOf(v) < 0) dropped.push(v);
+      lab.innerHTML = "context <b>&ldquo;" + st.context_str.join(" ") + "&rdquo;</b> · " +
+                      STRATS[ti].label;
+      chart.set({
+        values: sd.dist, ghost: st.probs, color: OPT, dropped: dropped,
+        target: st.chosen, max: 1,
+        flags: (function () {
+          const f = {};
+          dropped.forEach(function (v) { f[v] = "cut"; });
+          return f;
+        })(),
+        tip: function (v) {
+          return "<b>" + qw(v) + "</b> · id " + v +
+            "<br>model's p = " + NN.fmt(st.probs[v], 6) +
+            "<br>after " + STRATS[ti].label + " = " + NN.fmt(sd.dist[v], 6) +
+            (sd.kept.indexOf(v) < 0 ? "<br><b>cut — cannot be sampled</b>" : "");
+        }
+      });
+      const kept = sd.kept.map(function (v) { return qw(v); }).join(", ");
+      stats.innerHTML =
+        "temperature " + n(sd.temperature, 2) +
+        " · top-k " + (sd.top_k ? n(sd.top_k, 0) : "off") +
+        " · top-p " + (sd.top_p ? n(sd.top_p, 2) : "off") +
+        " · " + n(sd.kept.length, 0) + " of " + n(V, 0) + " tokens survive: " +
+        "<span class='mono'>" + kept + "</span>" +
+        " · they sum to " + n(sd.dist.reduce(function (a, q) { return a + q; }, 0), 6);
+      why.innerHTML = STRATS[ti].why;
+    }
+    stepBtns.forEach(function (b, i) { b.addEventListener("click", function () { si = i; draw(); }); });
+    stratBtns.forEach(function (b, i) { b.addEventListener("click", function () { ti = i; draw(); }); });
+    draw();
+
+    s.appendChild(NN.callout("why", "None of this is training",
+      "Sampling strategy is a decoding-time decision. The weights are frozen, the forward pass is " +
+      "identical, and the loss is not involved. It is worth being precise about that because " +
+      "temperature is often talked about as if it changed the model: it does not. It changes one " +
+      "division, applied after the model has finished, to the " + n(V, 0) + " numbers coming out of " +
+      "the final row."));
+  })();
+
+  /* ==================================================================== */
+  /* 9. EXPOSURE BIAS AND WHAT COMES NEXT                                 */
+  /* ==================================================================== */
+  (function () {
+    const s = host("next");
+    s.appendChild(h2("9 · The gap the objective leaves open"));
+    const tf = INF.teacher_forcing_contrast;
+    s.appendChild(NN.callout("warn", "Exposure bias",
+      "<p>The consequence, stated by the generator itself: " + tf.consequence + "</p>" +
+      "<p>Look at what training rehearsed and what inference asks for. Training gave the model " +
+      "the prefix <span class='mono'>&ldquo;" +
+      OBJ.pairs[OBJ.pairs.length - 1].context.join(" ") + "&rdquo;</span> — a prefix drawn from " +
+      "real text, correct in every position. Inference hands it a prefix it wrote itself, which " +
+      "after a single mistake is a prefix that appears nowhere in the training data. The model is " +
+      "then conditioning on a distribution it was never trained on, and errors compound: the " +
+      "further generation runs, the further off-distribution the context drifts.</p>" +
+      "<p>It is not a bug in the implementation, it is a property of the objective. Teacher forcing " +
+      "is what makes training parallel — all " + NN.fmt(OBJ.n_training_examples, 0) + " positions " +
+      "computable in one pass, as in section 2 — and giving it up to train on the model's own " +
+      "outputs would make training as sequential as inference is. The field mostly pays the " +
+      "exposure-bias price and buys the parallelism.</p>"));
+
+    s.appendChild(el("h3", {}, "What you now have"));
+    s.appendChild(el("ul", { html:
+      "<li><b>X</b> — the token ids the model is shown: <span class='mono'>[" + OBJ.X.join(", ") +
+        "]</span>, that is &ldquo;" + OBJ.X_str.join(" ") + "&rdquo;.</li>" +
+      "<li><b>Y</b> — the same list shifted left by one: <span class='mono'>[" + OBJ.Y.join(", ") +
+        "]</span>, that is &ldquo;" + OBJ.Y_str.join(" ") + "&rdquo;. No labels exist anywhere.</li>" +
+      "<li><b>ŷ</b> — not a word but a vector of " + NN.fmt(V, 0) + " probabilities, at every " +
+        "position, summing to 1.</li>" +
+      "<li><b>L</b> — −log of the one entry Y points at, averaged over positions; " +
+        NN.fmt(BEF.loss, 4) + " before training, " + NN.fmt(AFT.loss, 4) + " after.</li>" +
+      "<li><b>dL/dz</b> — <span class='mono'>p − onehot</span>, verified to " +
+        NN.fmt(GRAD.max_abs_err, 1) + " against finite differences. Push down what you predicted, " +
+        "push up the truth.</li>" +
+      "<li><b>Inference</b> — the same forward pass in a loop, fed its own output, using only the " +
+        "last row." + "</li>"
+    }));
+
+    s.appendChild(NN.callout("key", "Next: the machine that produces those logits",
+      "This page never opened the model. It treated <span class='mono'>model(X)</span> as a box " +
+      "that turns " + NN.fmt(OBJ.n_training_examples, 0) + " token ids into " +
+      NN.fmt(OBJ.n_training_examples, 0) + " rows of " + NN.fmt(V, 0) + " scores. " +
+      "<a href='09-transformer-forward.html'>Page 09 — Transformer Forward</a> opens the box: two " +
+      "real blocks, every matrix printed, the causal mask that makes section 2's parallelism honest, " +
+      "and the attention that makes section 6's two answers for &ldquo;" +
+      AFT.per_position[0].input_str + "&rdquo; possible. Page 10 then takes " +
+      "<span class='mono'>dL/dz</span> from section 5 and pushes it all the way back to the " +
+      "embedding table."));
+  })();
+
+  NN.page("lm");
+})();
+</script>
+</body>
+</html>

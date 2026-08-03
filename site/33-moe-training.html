@@ -1,0 +1,1030 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 33 MoE Training</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* page-local layout only; every colour comes from design.css custom properties */
+.panel { background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 8px; padding: 12px 14px; }
+.panel h4 { margin: 0 0 9px; font-family: var(--mono); font-size: .68rem; letter-spacing: .13em;
+            text-transform: uppercase; color: var(--ink-muted); font-weight: 700; }
+.hint { font-size: .7rem; color: var(--ink-muted); font-family: var(--mono); line-height: 1.55; }
+
+.chiprow { display: flex; flex-wrap: wrap; gap: 4px; margin: 5px 0; }
+.chip { font-family: var(--mono); font-size: .66rem; padding: 1px 7px; border-radius: 4px;
+        border: 1px solid var(--hairline); color: var(--ink-2); }
+.chip.exp { border-color: var(--weight); color: var(--weight); background: var(--weight-w); }
+.chip.tok { border-color: var(--activation); color: var(--activation); background: var(--activation-w); }
+.chip.grad { border-color: var(--gradient); color: var(--gradient); background: var(--gradient-w); }
+
+/* --- the all-to-all wire diagram --- */
+.wirewrap { position: relative; margin: 14px 0; }
+.wireviz { width: 100%; display: block; }
+.wireviz .lane { stroke: var(--hairline); stroke-width: 1; }
+.wireviz .hop { fill: none; stroke-width: 2.2; stroke-linecap: round; transition: opacity .35s, stroke-width .2s; }
+.wireviz .hop.local { stroke-dasharray: 2 4; }
+.wireviz text { fill: var(--ink-2); font-family: var(--mono); font-size: 10px; }
+.wireviz text.small { fill: var(--ink-muted); font-size: 8.5px; }
+.wireviz .gbox { fill: var(--surface-2); stroke: var(--hairline); }
+.wireviz .gbox.hot { stroke: var(--ink); stroke-width: 1.6; }
+
+table.pairs { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .73rem;
+              font-variant-numeric: tabular-nums; }
+table.pairs th, table.pairs td { padding: 3px 7px; border-bottom: 1px solid var(--hairline-2);
+                                 text-align: left; white-space: nowrap; }
+table.pairs th { font-size: .6rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-muted); }
+table.pairs tr.cross td.k { color: var(--activation); font-weight: 700; }
+table.pairs tr.loc  td.k { color: var(--ink-muted); }
+table.pairs tr.now td { background: var(--surface-3); }
+.stateTag { display: inline-block; font-family: var(--mono); font-size: .55rem; letter-spacing: .08em;
+            text-transform: uppercase; font-weight: 700; padding: 1px 6px; border-radius: 99px;
+            border: 1px solid var(--hairline); }
+.stateTag.cross { border-color: var(--activation); color: var(--activation);
+                  background: var(--activation-w); }
+.stateTag.local { border-style: dashed; color: var(--ink-muted); }
+.stateTag.drop  { border-style: dotted; border-color: var(--critical); color: var(--critical); }
+
+table.dm { border-collapse: collapse; font-family: var(--mono); font-size: .82rem; margin: 8px 0; }
+table.dm td, table.dm th { border: 1px solid var(--hairline); padding: 7px 13px; text-align: center; }
+table.dm th { font-size: .62rem; letter-spacing: .09em; text-transform: uppercase; color: var(--ink-muted); }
+table.dm td.diag { color: var(--ink-muted); border-style: dashed; }
+table.dm td.off  { color: var(--activation); font-weight: 700; background: var(--activation-w); }
+
+/* --- load balance --- */
+.lbrow { display: grid; grid-template-columns: 34px 1fr 60px; align-items: center; gap: 8px;
+         margin: 4px 0; font-family: var(--mono); font-size: .74rem; }
+.lbtrack { height: 15px; background: var(--surface-3); border-radius: 4px; overflow: hidden; position: relative; }
+.lbfill { height: 100%; transition: width .3s cubic-bezier(.4,0,.2,1); border-radius: 0 4px 4px 0; }
+.lbideal { position: absolute; top: -2px; bottom: -2px; width: 0; border-left: 2px dashed var(--ink-muted); }
+.lbrow .lv { text-align: right; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+
+.gauge { height: 12px; background: var(--surface-3); border-radius: 6px; overflow: hidden; margin: 5px 0; position: relative; }
+.gauge > i { display: block; height: 100%; background: var(--gradient); transition: width .25s; }
+
+/* --- capacity queues --- */
+.queue { border: 1px solid var(--hairline); border-radius: 8px; background: var(--surface-2); padding: 10px 11px; }
+.queue h5 { margin: 0 0 7px; font-family: var(--mono); font-size: .74rem; font-weight: 700; }
+.slot { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: .7rem;
+        padding: 4px 8px; border-radius: 5px; margin: 3px 0; border: 1px solid var(--activation);
+        background: var(--activation-w); color: var(--activation); }
+.slot.dropped { border-style: dotted; border-color: var(--critical); color: var(--critical);
+                background: transparent;
+                background-image: repeating-linear-gradient(135deg, rgba(208,59,59,.13) 0 6px, transparent 6px 12px); }
+.slot.empty { border-style: dashed; border-color: var(--hairline); background: transparent; color: var(--ink-muted); }
+.caprule { border-top: 2px dashed var(--critical); margin: 6px 0; position: relative; height: 0; }
+.caprule span { position: absolute; right: 0; top: -8px; background: var(--surface-2); padding: 0 5px;
+                font-family: var(--mono); font-size: .58rem; letter-spacing: .08em;
+                text-transform: uppercase; color: var(--critical); font-weight: 700; }
+
+.ctlrow { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; margin: 12px 0; }
+.ctlrow label { font-family: var(--mono); font-size: .74rem; color: var(--ink-2);
+                display: flex; align-items: center; gap: 9px; }
+.ctlrow input[type="range"] { width: 210px; }
+.kv { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.vtable { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .76rem; margin: 8px 0; }
+.vtable td, .vtable th { padding: 5px 9px; border-bottom: 1px solid var(--hairline-2); text-align: left; }
+.vtable td.r, .vtable th.r { text-align: right; font-variant-numeric: tabular-nums; }
+.vtable th { font-size: .61rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-muted); }
+.ok { color: var(--good); font-weight: 700; }
+table.data td.wrap, table.data th.wrap { white-space: normal; }
+.axcard { border: 1px solid var(--hairline); border-left-width: 4px; border-radius: 7px;
+          background: var(--surface-2); padding: 10px 12px; margin: 8px 0; }
+.axcard .h { font-family: var(--mono); font-size: .78rem; font-weight: 700; display: flex;
+             flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
+.axcard .b { font-size: .84rem; color: var(--ink-2); margin-top: 4px; line-height: 1.55; }
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 33</div>
+    <h1>MoE Training</h1>
+    <p class="lede">Experts do not fit on one GPU, so they are split across GPUs. Tokens arrive
+      sharded by sequence, and the router — not the programmer — decides which GPU each one has to
+      visit. That is an all&#8209;to&#8209;all, the one collective this site has taught and never
+      used, and its payload size is not known until the router has run. Then there is the harder
+      problem: nothing makes the router balanced.</p>
+    <noscript><p class="callout warn">This page derives every number in the browser from
+      <code>assets/data/moe.js</code> and <code>assets/data/parallel.js</code>. With JavaScript
+      disabled you will see an empty shell.</p></noscript>
+  </div>
+
+  <section class="block" id="ep">
+    <h2>1 · Expert parallelism: the weights stop being replicated</h2>
+    <div id="epBody"></div>
+  </section>
+
+  <section class="block" id="a2a">
+    <h2>2 · The all-to-all</h2>
+    <div id="a2aBody"></div>
+  </section>
+
+  <section class="block" id="datadep">
+    <h2>3 · Why this collective is different: the size is data-dependent</h2>
+    <div id="datadepBody"></div>
+  </section>
+
+  <section class="block" id="balance">
+    <h2>4 · Load balancing, and the trick that makes it differentiable</h2>
+    <div id="balanceBody"></div>
+  </section>
+
+  <section class="block" id="capacity">
+    <h2>5 · Capacity, and deliberately dropping tokens</h2>
+    <div id="capBody"></div>
+  </section>
+
+  <section class="block" id="compose">
+    <h2>6 · Composing EP with TP and DP</h2>
+    <div id="composeBody"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/parallel.js"></script>
+<script src="../assets/data/infer.js"></script>
+<script src="../assets/data/moe.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T = NN.T;
+  const M = window.MOE;
+  const P = window.PARALLEL;
+  const el = NN.el, fmt = NN.fmt;
+
+  if (!M) {
+    document.querySelector("#epBody").appendChild(NN.callout("warn",
+      "moe.js did not load",
+      "Run <code>python3 code/moe_toy.py</code> to regenerate <code>assets/data/moe.js</code>."));
+    NN.page("moetrain");
+    return;
+  }
+
+  const MET = M.meta;
+  const NT = MET.n_tokens, NE = MET.n_experts, K = MET.top_k;
+  const DM = MET.d_model,  DF = MET.d_ff, EP = MET.ep_degree;
+  const RT = M.routing, PEX = M.per_expert, ACC = M.accounting;
+  const XP = M.expert_parallel, LB = M.load_balance;
+  const DET = XP.detail, DMAT = XP.dispatch_matrix;
+  const FP32 = T.memory.dtype_bytes.fp32;
+  const BF16 = T.memory.dtype_bytes.bf16;
+
+  function tokLabel(t) { return "t" + t + " “" + MET.tokens[t] + "”"; }
+  function softmax(v) {
+    const m = Math.max.apply(null, v);
+    const e = v.map(function (x) { return Math.exp(x - m); });
+    const s = e.reduce(function (a, b) { return a + b; }, 0);
+    return e.map(function (x) { return x / s; });
+  }
+
+  /* ==================================================================== */
+  /*  1 · EXPERT PARALLELISM                                              */
+  /* ==================================================================== */
+  (function () {
+    const host = document.querySelector("#epBody");
+
+    host.appendChild(el("p", { html:
+      "Data parallelism (<a href=\"17-data-parallel.html\">page 17</a>) replicates every weight on " +
+      "every GPU. For an MoE that is exactly the wrong thing to do: the whole point of holding " +
+      NE + " experts is that they are <i>too big to replicate</i>. Expert parallelism shards the " +
+      "expert weights by expert index. With <code>EP = " + EP + "</code> each GPU owns " +
+      XP.experts_per_gpu + " experts and no copy of the others exists in its memory." }));
+
+    host.appendChild(NN.tiles([
+      { k: "EP degree", v: String(EP), s: NE + " experts / " + XP.experts_per_gpu + " per GPU" },
+      { k: "expert params per GPU", v: NN.count(XP.gpus[0].expert_params), cls: "weight",
+        s: XP.experts_per_gpu + " × " + ACC.toy.params_per_expert + ", not replicated" },
+      { k: "tokens per GPU (home)", v: String(NT / EP), cls: "activation",
+        s: "sharded by sequence position" },
+      { k: "(token, expert) pairs", v: String(XP.pairs_total), cls: "activation",
+        s: NT + " tokens × top-" + K }
+    ]));
+
+    const grid = NN.gpu.grid({
+      count: EP,
+      label: function (g) { return "GPU " + g; },
+      render: function (g) {
+        const G = XP.gpus[g];
+        return [
+          el("div", { class: "hint" }, "EXPERTS RESIDENT (weights, sharded)"),
+          el("div", { class: "chiprow" }, G.experts.map(function (e) {
+            return el("span", { class: "chip exp" },
+              "E" + e + " · " + ACC.toy.params_per_expert + "p");
+          })),
+          el("div", { class: "scrollx" }, NN.tensor({
+            name: "W_up (E" + G.experts[0] + ")", shape: [DM, DF],
+            values: M.input.experts[G.experts[0]].W_up, cls: "weight", digits: 2, signed: true,
+            note: "one of " + G.experts.length
+          })),
+          el("div", { class: "hint" }, "HOME TOKENS (activations, sharded by sequence)"),
+          el("div", { class: "chiprow" }, G.home_tokens.map(function (t) {
+            return el("span", { class: "chip tok" }, tokLabel(t));
+          })),
+          el("div", { class: "hint" },
+            "after dispatch this GPU holds " + G.tokens_after_dispatch + " token-slots to compute " +
+            "(its experts' groups), not " + (G.home_tokens.length * K))
+        ];
+      }
+    });
+    host.appendChild(grid);
+
+    host.appendChild(el("p", { html:
+      "Notice the mismatch already. GPU 0 is home to " + XP.gpus[0].home_tokens.length +
+      " tokens and must therefore produce " + (XP.gpus[0].home_tokens.length * K) +
+      " expert results — but the experts it <i>owns</i> were chosen " +
+      XP.gpus[0].tokens_after_dispatch + " times, and GPU 1's were chosen " +
+      XP.gpus[1].tokens_after_dispatch + " times. Tokens and the weights they need are on " +
+      "different devices. Something has to move." }));
+
+    host.appendChild(NN.callout("mem", "WHAT EP REPLACES, AND WHAT IT DOES NOT",
+      "<p>EP replaces data parallelism <i>for the expert weights only</i>. Attention, the " +
+      "embeddings, the LayerNorms and the router itself stay replicated (or TP-sharded) exactly as " +
+      "before. A real configuration therefore has two different sharding rules inside one layer, " +
+      "and the boundary between them is where the all-to-all lives.</p>"));
+  })();
+
+  /* ==================================================================== */
+  /*  2 · THE ALL-TO-ALL                                                  */
+  /* ==================================================================== */
+  (function () {
+    const host = document.querySelector("#a2aBody");
+    const A2A = P && P.collectives
+      ? P.collectives.filter(function (c) { return c.op === "all_to_all"; })[0] : null;
+
+    host.appendChild(el("p", { html:
+      "<a href=\"16-collectives.html\">Page 16</a> defined " +
+      (P ? P.collectives.length : "") + " collectives. Seven of them have been used since: " +
+      "all-reduce for data-parallel gradients, all-gather and reduce-scatter for ZeRO, broadcast " +
+      "and reduce at startup and logging, scatter and gather for the batch, point-to-point for the " +
+      "pipeline. <b>all_to_all</b> has appeared in no schedule on any page. This is what it is for." }));
+
+    if (A2A) {
+      host.appendChild(el("div", { class: "axcard", style: { borderLeftColor: NN.gpu.opColor("all_to_all") } }, [
+        el("div", { class: "h" }, [
+          el("span", { style: { color: NN.gpu.opColor("all_to_all") } }, A2A.op),
+          el("span", { class: "muted" }, A2A.sig),
+          el("span", { class: "muted" }, "ring cost " + A2A.ring_factor),
+          el("span", { class: "muted" }, "inverse: " + A2A.inverse)
+        ]),
+        el("div", { class: "b" }, A2A.what + " " + A2A.used_for)
+      ]));
+    }
+
+    host.appendChild(el("p", { html:
+      "Rank i sends its j-th chunk to rank j — a distributed transpose. Here the chunks are not " +
+      "equal slices of a tensor; they are “all my tokens whose expert lives on you”. The " +
+      "<b>dispatch</b> all-to-all sends token vectors out; the <b>combine</b> all-to-all sends " +
+      "expert outputs back along exactly the reversed pattern." }));
+
+    /* ---------------- the wire diagram ---------------- */
+    const STEPS = [
+      "home: " + NT + " tokens sharded by sequence, " + (NT / EP) + " per GPU",
+      "the router fixes " + XP.pairs_total + " (token, expert) pairs — " +
+        XP.pairs_crossing_gpus + " of them cross a GPU boundary",
+      "DISPATCH all-to-all: crossing token vectors leave; local ones never touch the wire",
+      "each GPU groups what it now holds and runs one GEMM per resident expert",
+      "COMBINE all-to-all: expert outputs return along the reversed pattern",
+      "blend at home: each token adds its " + K + " weighted expert outputs"
+    ];
+
+    const W = 940, H = 300;
+    const svg = NN.svg;
+    const viz = svg("svg", { class: "wireviz", viewBox: "0 0 " + W + " " + H, width: "100%", height: H, role: "img" });
+
+    const colL = 92, colR = W - 92;
+    const gh = 116, gy = [26, 26 + gh + 32];
+    const gboxes = [], hops = [], hopLabels = [];
+
+    /* two columns: left = home GPU, right = owning GPU */
+    [0, 1].forEach(function (side) {
+      for (let g = 0; g < EP; g++) {
+        const x = side === 0 ? colL - 66 : colR - 66;
+        const b = svg("rect", { class: "gbox", x: x, y: gy[g], width: 132, height: gh, rx: 8 });
+        viz.appendChild(b);
+        const t = svg("text", { x: x + 8, y: gy[g] + 15 });
+        t.textContent = "GPU " + g + (side === 0 ? " · home tokens" : " · owns E" + XP.gpus[g].experts.join(",E"));
+        viz.appendChild(t);
+        gboxes.push(b);
+        if (side === 0) {
+          XP.gpus[g].home_tokens.forEach(function (tk, i) {
+            const tt = svg("text", { class: "small", x: x + 10, y: gy[g] + 34 + i * 15 });
+            tt.textContent = tokLabel(tk).replace(/“|”/g, "");
+            viz.appendChild(tt);
+          });
+        } else {
+          XP.gpus[g].experts.forEach(function (e, i) {
+            const tt = svg("text", { class: "small", x: x + 10, y: gy[g] + 34 + i * 15 });
+            tt.textContent = "E" + e + " group: " + PEX[e].n_tokens + " slot(s)";
+            viz.appendChild(tt);
+          });
+          const tt2 = svg("text", { class: "small", x: x + 10, y: gy[g] + 34 + EP * 15 + 8 });
+          tt2.textContent = XP.gpus[g].tokens_after_dispatch + " slots after dispatch";
+          viz.appendChild(tt2);
+        }
+      }
+    });
+
+    const headL = svg("text", { x: colL - 66, y: 16 }); headL.textContent = "where the token lives";
+    const headR = svg("text", { x: colR - 66, y: 16 }); headR.textContent = "where its expert lives";
+    viz.appendChild(headL); viz.appendChild(headR);
+
+    /* one path per (token, expert) pair */
+    DET.forEach(function (d, i) {
+      const n = DET.length;
+      const y1 = gy[d.from_gpu] + 30 + (i % 6) * 13;
+      const y2 = gy[d.to_gpu] + 30 + (i % 6) * 13;
+      const x1 = colL + 4, x2 = colR - 70;
+      const mid = (x1 + x2) / 2 + (i - n / 2) * 4;
+      const p = svg("path", {
+        class: "hop" + (d.local ? " local" : ""),
+        d: "M" + x1 + " " + y1 + " C" + mid + " " + y1 + " " + mid + " " + y2 + " " + x2 + " " + y2,
+        stroke: d.local ? "var(--accent)" : "var(--activation)",
+        opacity: 0
+      });
+      viz.appendChild(p);
+      hops.push(p);
+      hopLabels.push(d);
+    });
+
+    const capt = svg("text", { x: W / 2, y: H - 8, "text-anchor": "middle" });
+    viz.appendChild(capt);
+
+    host.appendChild(el("div", { class: "wirewrap" }, viz));
+
+    /* legend — pattern + label, never colour alone */
+    host.appendChild(el("div", { class: "chiprow", style: { gap: "14px", margin: "2px 0 10px" } }, [
+      el("span", { class: "stateTag cross" }, "solid line · crosses a GPU boundary (" + XP.pairs_crossing_gpus + ")"),
+      el("span", { class: "stateTag local" }, "dashed line · local, never sent (" + XP.pairs_local + ")")
+    ]));
+
+    const ctl = el("div");
+    host.appendChild(ctl);
+
+    const pairHost = el("div");
+    const matHost = el("div");
+    host.appendChild(el("div", { class: "grid2" }, [
+      el("div", { class: "panel" }, [el("h4", {}, "every (token, expert) hop"), pairHost]),
+      el("div", { class: "panel" }, [el("h4", {}, "dispatch matrix — chunk sizes in token-slots"), matHost])
+    ]));
+
+    /* pair table */
+    const ptbl = el("table", { class: "pairs" });
+    ptbl.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "token"), el("th", {}, "expert"), el("th", {}, "slot"),
+      el("th", {}, "from"), el("th", {}, "to"), el("th", {}, "state")
+    ])));
+    const ptb = el("tbody");
+    const pairRows = DET.map(function (d) {
+      const tr = el("tr", { class: d.local ? "loc" : "cross" }, [
+        el("td", { class: "k" }, tokLabel(d.token)),
+        el("td", { class: "k" }, "E" + d.expert),
+        el("td", {}, "#" + (d.slot + 1)),
+        el("td", {}, "GPU " + d.from_gpu),
+        el("td", {}, "GPU " + d.to_gpu),
+        el("td", {}, el("span", { class: "stateTag " + (d.local ? "local" : "cross") },
+          d.local ? "local" : "crosses"))
+      ]);
+      tr.addEventListener("mouseenter", function () {
+        hops.forEach(function (h, i) { h.setAttribute("opacity", DET[i] === d ? 1 : 0.12); });
+        tr.classList.add("now");
+      });
+      tr.addEventListener("mouseleave", function () {
+        tr.classList.remove("now");
+        paint(cur);
+      });
+      ptb.appendChild(tr);
+      return tr;
+    });
+    ptbl.appendChild(ptb);
+    pairHost.appendChild(el("div", { class: "scrollx" }, ptbl));
+    pairHost.appendChild(el("div", { class: "hint" }, "hover a row to isolate its hop in the diagram"));
+
+    /* dispatch matrix */
+    const mt = el("table", { class: "dm" });
+    const hrow = el("tr", {}, [el("th", {}, "src ↓ / dst →")]);
+    for (let j = 0; j < EP; j++) hrow.appendChild(el("th", {}, "GPU " + j));
+    hrow.appendChild(el("th", {}, "sent"));
+    mt.appendChild(el("thead", {}, hrow));
+    const mtb = el("tbody");
+    for (let i = 0; i < EP; i++) {
+      const row = [el("th", {}, "GPU " + i)];
+      let sent = 0;
+      for (let j = 0; j < EP; j++) {
+        if (i !== j) sent += DMAT[i][j];
+        row.push(el("td", { class: i === j ? "diag" : "off" }, String(DMAT[i][j])));
+      }
+      row.push(el("td", {}, String(sent)));
+      mtb.appendChild(el("tr", {}, row));
+    }
+    mt.appendChild(mtb);
+    matHost.appendChild(mt);
+    matHost.appendChild(el("div", { class: "hint" },
+      "Solid cells cross the wire; dashed diagonal stays put. " +
+      XP.pairs_crossing_gpus + " of " + XP.pairs_total +
+      " token-slots are sent, each " + DM + " floats — " +
+      (XP.pairs_crossing_gpus * DM) + " elements per dispatch, " +
+      NN.bytes(XP.pairs_crossing_gpus * DM * BF16) + " in bf16."));
+
+    XP.collectives_per_layer.forEach(function (c) {
+      matHost.appendChild(NN.gpu.commCard({
+        op: c.op, phase: c.phase, tensor: c.phase === "dispatch" ? "token vectors" : "expert outputs",
+        elements: c.elements, sent_per_gpu_elements: c.elements / EP, why: c.why
+      }));
+    });
+
+    let cur = 0;
+    function paint(i) {
+      cur = i;
+      capt.textContent = STEPS[i];
+      hops.forEach(function (h, k) {
+        const d = DET[k];
+        let op = 0;
+        if (i === 1) op = 0.35;
+        else if (i === 2) op = d.local ? 0.2 : 0.95;
+        else if (i === 3) op = 0.18;
+        else if (i === 4) op = d.local ? 0.2 : 0.95;
+        else if (i === 5) op = 0.3;
+        h.setAttribute("opacity", op);
+        h.setAttribute("stroke", i === 4 ? "var(--gradient)" : (d.local ? "var(--accent)" : "var(--activation)"));
+      });
+      gboxes.forEach(function (b, k) {
+        const isRight = k >= EP;
+        b.classList.toggle("hot", (i === 3 && isRight) || ((i === 0 || i === 5) && !isRight));
+      });
+      pairRows.forEach(function (tr, k) {
+        tr.classList.toggle("now", (i === 2 || i === 4) && !DET[k].local);
+      });
+    }
+
+    const st = new NN.Stepper({ mount: ctl, count: STEPS.length, labels: STEPS,
+      onStep: paint, autoplayMs: 2000 });
+    void st;
+
+    host.appendChild(NN.callout("key", "FOUR ALL-TO-ALLS PER MoE LAYER PER STEP",
+      "<p>Forward is dispatch then combine. Backward is the same two in reverse: the gradient of " +
+      "the combine is a dispatch of <span class=\"chip grad\">gradient</span>, and the gradient of " +
+      "the dispatch is a combine. <b>" + (XP.collectives_per_layer.length * 2) + " all-to-alls per " +
+      "MoE layer per training step</b>, and they sit on the critical path exactly the way tensor " +
+      "parallelism's all-reduce does — you cannot start the expert GEMM before the tokens arrive.</p>" +
+      "<p class=\"hint\">" + XP.note + "</p>"));
+  })();
+
+  /* ==================================================================== */
+  /*  3 · DATA-DEPENDENT PAYLOAD                                          */
+  /* ==================================================================== */
+  (function () {
+    const host = document.querySelector("#datadepBody");
+    const AR = P && P.collectives ? P.collectives.filter(function (c) { return c.op === "all_reduce"; })[0] : null;
+    const A2A = P && P.collectives ? P.collectives.filter(function (c) { return c.op === "all_to_all"; })[0] : null;
+
+    host.appendChild(el("p", { html:
+      "This is the part that makes MoE communication genuinely hard, and it is not the bandwidth." }));
+
+    const tbl = el("table", { class: "data" });
+    tbl.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", { class: "wrap" }, ""),
+      el("th", { class: "wrap" }, "tensor-parallel all-reduce"),
+      el("th", { class: "wrap" }, "expert-parallel all-to-all")
+    ])));
+    const tb = el("tbody");
+    function row(k, a, b) {
+      tb.appendChild(el("tr", {}, [
+        el("td", { class: "wrap" }, k),
+        el("td", { class: "wrap" , html: a }),
+        el("td", { class: "wrap", html: b })
+      ]));
+    }
+    row("signature", AR ? AR.sig : "all → all (sum)", A2A ? A2A.sig : "all → all (transpose)");
+    row("ring cost", AR ? AR.ring_factor : "", A2A ? A2A.ring_factor : "");
+    row("payload size",
+      "<b>fixed by the shapes</b> — batch × seq × d_model, known when the model is built",
+      "<b>decided by the router at run time</b> — " + XP.pairs_crossing_gpus + " of " +
+      XP.pairs_total + " slots crossed <i>in this batch</i>, and the next batch will differ");
+    row("buffer allocation",
+      "sized once, reused every step",
+      "either a metadata exchange first, or a worst-case buffer sized by a capacity factor " +
+      "(§5), or a variable-size allocation every step");
+    row("failure mode if you guess wrong",
+      "none — there is nothing to guess",
+      "too small: tokens dropped. too large: memory and bandwidth wasted on padding");
+    row("when it runs", "twice per transformer block, forward",
+      XP.collectives_per_layer.length + " per MoE layer forward, " +
+      (XP.collectives_per_layer.length * 2) + " per step with backward");
+    tbl.appendChild(tb);
+    host.appendChild(el("div", { class: "scrollx" }, tbl));
+
+    /* the counterfactual: what a different routing would have sent */
+    host.appendChild(el("h3", {}, "The same layer, a different batch"));
+    host.appendChild(el("p", { html:
+      "The dispatch matrix here is <span class=\"kv\">[" +
+      DMAT.map(function (r) { return "[" + r.join(",") + "]"; }).join(", ") +
+      "]</span>. Nothing about the model produced those numbers; " +
+      "the <i>data</i> did. Two extremes bound it, and both are reachable with the same weights:" }));
+
+    const crossMin = 0, crossMax = XP.pairs_total;
+    host.appendChild(NN.tiles([
+      { k: "this batch", v: XP.pairs_crossing_gpus + " / " + XP.pairs_total, cls: "activation",
+        s: fmt(XP.pairs_crossing_gpus / XP.pairs_total * 100, 0) + "% of slots on the wire" },
+      { k: "best case", v: crossMin + " / " + XP.pairs_total,
+        s: "every token routed to an expert already on its GPU" },
+      { k: "worst case", v: crossMax + " / " + XP.pairs_total,
+        s: "every token routed off-device" },
+      { k: "elements sent, this batch", v: NN.count(XP.pairs_crossing_gpus * DM), cls: "activation",
+        s: "× " + DM + " floats per token-slot" }
+    ]));
+
+    host.appendChild(NN.callout("warn", "YOU CANNOT SIZE THE BUFFERS IN ADVANCE",
+      "<p>An all-reduce moves a tensor whose shape is a property of the model. An MoE all-to-all " +
+      "moves a tensor whose shape is a property of <i>this batch's routing decisions</i>. " +
+      "Between " + crossMin + " and " + crossMax + " of the " + XP.pairs_total +
+      " token-slots may need to be sent, and the split between destinations is whatever the softmax " +
+      "produced.</p>" +
+      "<p>Implementations resolve this one of two ways. Either exchange the counts first (an extra " +
+      "small collective and a synchronisation before the big one), or fix a <b>capacity</b> per " +
+      "expert so the buffers are a known size and throw away anything that overflows. The second is " +
+      "what §5 is about, and it is the more common answer precisely because a variable-size " +
+      "collective on the critical path is worse than losing a few tokens.</p>"));
+  })();
+
+  /* ==================================================================== */
+  /*  4 · LOAD BALANCE                                                    */
+  /* ==================================================================== */
+  (function () {
+    const host = document.querySelector("#balanceBody");
+
+    host.appendChild(el("p", { html:
+      "Here is this batch's load: <span class=\"kv\">[" + LB.counts.join(", ") +
+      "]</span> token-slots across " + NE + " experts, against an ideal of " +
+      fmt(LB.ideal_per_expert, 1) + " each. Six tokens produced a <b>" +
+      fmt(LB.imbalance_ratio, 2) + "×</b> imbalance. Nothing in the router's definition prevents " +
+      "this, and left alone the imbalance compounds: an expert that gets more tokens gets more " +
+      "gradient, becomes better, and gets chosen more." }));
+
+    /* static picture of the toy's own load */
+    const loadHost = el("div", { class: "panel" });
+    loadHost.appendChild(el("h4", {}, "expert load, this batch"));
+    const maxc = Math.max.apply(null, LB.counts);
+    LB.counts.forEach(function (c, e) {
+      const track = el("div", { class: "lbtrack" }, [
+        el("div", { class: "lbfill", style: { width: (c / maxc * 100) + "%", background: "var(--activation)" } }),
+        el("div", { class: "lbideal", style: { left: (LB.ideal_per_expert / maxc * 100) + "%" } })
+      ]);
+      loadHost.appendChild(el("div", { class: "lbrow" }, [
+        el("span", { class: "muted" }, "E" + e), track,
+        el("span", { class: "lv" }, c + " slot" + (c === 1 ? "" : "s"))
+      ]));
+    });
+    loadHost.appendChild(el("div", { class: "hint" },
+      "dashed rule = ideal " + fmt(LB.ideal_per_expert, 1) + " slots (" +
+      (NT * K) + " slots / " + NE + " experts)"));
+
+    const stragHost = el("div", { class: "panel" }, [
+      el("h4", {}, "what the imbalance costs"),
+      NN.formula({
+        rule: "imbalance r = max load / ideal",
+        sub: LB.max_load + " / " + fmt(LB.ideal_per_expert, 1),
+        result: fmt(LB.imbalance_ratio, 2) + "×", cls: "activation"
+      }),
+      NN.formula({
+        rule: "idle fraction = 1 − 1/r",
+        sub: "1 − 1/" + fmt(LB.imbalance_ratio, 2),
+        result: fmt((1 - 1 / LB.imbalance_ratio) * 100, 1) + "%", cls: "gradient"
+      }),
+      el("p", { class: "hint", style: { marginTop: "8px" } }, LB.straggler_note)
+    ]);
+    host.appendChild(el("div", { class: "grid2" }, [loadHost, stragHost]));
+
+    host.appendChild(el("p", { html:
+      "The busiest expert is <b>E" + LB.counts.indexOf(LB.max_load) + "</b> with " + LB.max_load +
+      " slots; the quietest is <b>E" + LB.counts.indexOf(LB.min_load) + "</b> with " + LB.min_load +
+      ". Under EP those live on different GPUs, so the GPU holding the quiet one finishes its " +
+      "expert GEMM early and then waits at the combine all-to-all — which is a barrier, because " +
+      "no token can be blended until all its experts have reported. The step costs what the " +
+      "busiest expert costs." }));
+
+    /* ---------------- the auxiliary loss ---------------- */
+    host.appendChild(el("h3", {}, "The auxiliary loss"));
+    host.appendChild(el("p", { html:
+      "The standard fix adds a term to the loss that is minimised when the routing is uniform. " +
+      "It is built from two quantities per expert, and the difference between them is the whole " +
+      "trick." }));
+
+    const fP = el("div", { class: "grid2" });
+    function sideCard(title, cls, vals, note, badge) {
+      const c = el("div", { class: "panel" });
+      c.appendChild(el("h4", {}, title));
+      c.appendChild(el("div", { class: "chiprow" }, el("span", { class: "stateTag " + (badge === "grad" ? "cross" : "local") }, badge === "grad" ? "differentiable" : "no gradient")));
+      const mx = Math.max.apply(null, vals);
+      vals.forEach(function (v, e) {
+        c.appendChild(el("div", { class: "lbrow" }, [
+          el("span", { class: "muted" }, "E" + e),
+          el("div", { class: "lbtrack" }, el("div", {
+            class: "lbfill", style: { width: (v / mx * 100) + "%", background: cls }
+          })),
+          el("span", { class: "lv" }, fmt(v, 4))
+        ]));
+      });
+      c.appendChild(el("div", { class: "hint" }, note));
+      return c;
+    }
+    fP.appendChild(sideCard("f — fraction of token-slots routed to E", "var(--activation)",
+      LB.fraction,
+      "hard counts [" + LB.counts.join(", ") + "] ÷ " + (NT * K) +
+      " slots. Produced by an argmax. Σf = " + fmt(LB.fraction.reduce(function (a, b) { return a + b; }, 0), 3),
+      "nograd"));
+    fP.appendChild(sideCard("P — mean router probability for E", "var(--gradient)",
+      LB.mean_prob,
+      "mean over " + NT + " tokens of softmax(logits)[e]. A smooth function of W_gate. ΣP = " +
+      fmt(LB.mean_prob.reduce(function (a, b) { return a + b; }, 0), 3),
+      "grad"));
+    host.appendChild(fP);
+
+    host.appendChild(NN.formula({
+      rule: "L<sub>aux</sub> = " + LB.aux_loss_formula.replace("N * sum_e f_e * P_e", "N · Σ<sub>e</sub> f<sub>e</sub> · P<sub>e</sub>"),
+      sub: NE + " · (" + LB.fraction.map(function (f, e) {
+        return fmt(f, 4) + "·" + fmt(LB.mean_prob[e], 4);
+      }).join(" + ") + ")",
+      result: fmt(LB.aux_loss, 4), cls: "gradient"
+    }));
+
+    host.appendChild(NN.tiles([
+      { k: "L_aux, this batch", v: fmt(LB.aux_loss, 4), cls: "gradient",
+        s: fmt((LB.aux_loss - LB.aux_loss_if_uniform) / (LB.aux_loss_if_collapsed - LB.aux_loss_if_uniform) * 100, 1) +
+           "% of the way to collapse" },
+      { k: "minimum (uniform)", v: fmt(LB.aux_loss_if_uniform, 1),
+        s: NE + " · Σ (1/" + NE + ")·(1/" + NE + ")" },
+      { k: "maximum (collapsed)", v: fmt(LB.aux_loss_if_collapsed, 1),
+        s: "all mass on one expert, f = P = 1" },
+      { k: "imbalance ratio", v: fmt(LB.imbalance_ratio, 2) + "×",
+        s: "max " + LB.max_load + " vs ideal " + fmt(LB.ideal_per_expert, 1) }
+    ]));
+
+    host.appendChild(NN.callout("why", "ONLY P CARRIES GRADIENT — AND THAT IS THE POINT",
+      "<p>" + LB.aux_gradient_note + "</p>" +
+      "<p>Read the product again with that in mind. <code>f<sub>e</sub></code> is a measurement of " +
+      "what the argmax actually did — a constant to autograd, a coefficient. " +
+      "<code>P<sub>e</sub></code> is the smooth thing the optimiser can move. So " +
+      "<code>∂L<sub>aux</sub>/∂P<sub>e</sub> = N·f<sub>e</sub></code>: the experts that were " +
+      "<i>overloaded this batch</i> get the largest push <b>down</b> on their probability, and the " +
+      "underloaded ones get almost none. You have steered a discrete decision by putting a " +
+      "measurement of that decision in front of a differentiable term. No gradient ever has to " +
+      "pass through the top-" + K + ".</p>" +
+      "<p>Compare the dead ReLU unit on <a href=\"04-backward.html\">page 04</a>, whose gradient row " +
+      "is exactly zero and stays dead forever. An unloved expert has the same problem, and the " +
+      "auxiliary loss is the mechanism that stops it happening.</p>"));
+
+    /* ---------------- interactive: drive the router toward collapse -------- */
+    host.appendChild(el("h3", {}, "Drive it toward collapse"));
+    host.appendChild(el("p", { html:
+      "Add a bias <code>λ</code> to one expert's logit for every token and recompute the whole " +
+      "chain — softmax, top-k, hard counts f, mean probabilities P, the auxiliary loss, the " +
+      "imbalance and the idle time. At <code>λ = 0</code> and <code>k = " + K + "</code> this " +
+      "reproduces the generated numbers exactly; that is the check that the simulation is honest." }));
+
+    const target = LB.mean_prob.indexOf(Math.max.apply(null, LB.mean_prob));
+    const lam = el("input", { type: "range", min: "0", max: "60", step: "1", value: "0" });
+    const kSel = el("input", { type: "range", min: "1", max: String(NE), step: "1", value: String(K) });
+    const lamOut = el("span", { class: "kv" }, "");
+    const kOut = el("span", { class: "kv" }, "");
+    host.appendChild(el("div", { class: "ctlrow" }, [
+      el("label", {}, ["bias λ on E" + target, lam, lamOut]),
+      el("label", {}, ["top-k", kSel, kOut]),
+      el("span", { class: "hint" }, "λ is added to E" + target + "'s logit for every token")
+    ]));
+
+    const simHost = el("div");
+    host.appendChild(simHost);
+
+    function sim() {
+      const lv = parseInt(lam.value, 10) / 10;      /* 0 .. 6.0 */
+      const k = parseInt(kSel.value, 10);
+      lamOut.textContent = "λ = " + fmt(lv, 1);
+      kOut.textContent = "k = " + k + (k === K ? " (as generated)" : "");
+
+      const counts = new Array(NE).fill(0);
+      const psum = new Array(NE).fill(0);
+      for (let t = 0; t < NT; t++) {
+        const logits = RT[t].logits.map(function (v, e) { return e === target ? v + lv : v; });
+        const probs = softmax(logits);
+        for (let e = 0; e < NE; e++) psum[e] += probs[e];
+        const order = probs.map(function (p, e) { return e; })
+          .sort(function (a, b) { return probs[b] - probs[a] || a - b; });
+        order.slice(0, k).forEach(function (e) { counts[e] += 1; });
+      }
+      const totalSlots = NT * k;
+      const f = counts.map(function (c) { return c / totalSlots; });
+      const Pm = psum.map(function (s) { return s / NT; });
+      const aux = NE * f.reduce(function (a, _, e) { return a + f[e] * Pm[e]; }, 0);
+      const ideal = totalSlots / NE;
+      const imb = Math.max.apply(null, counts) / ideal;
+      const idle = 1 - 1 / imb;
+      const ceiling = NE / k;    /* the most L_aux can reach at this k */
+
+      simHost.innerHTML = "";
+
+      const left = el("div", { class: "panel" });
+      left.appendChild(el("h4", {}, "resulting load"));
+      const mx = Math.max.apply(null, counts);
+      counts.forEach(function (c, e) {
+        left.appendChild(el("div", { class: "lbrow" }, [
+          el("span", { class: "muted" }, "E" + e),
+          el("div", { class: "lbtrack" }, [
+            el("div", { class: "lbfill", style: {
+              width: (mx ? c / mx * 100 : 0) + "%",
+              background: e === target ? "var(--gradient)" : "var(--activation)" } }),
+            el("div", { class: "lbideal", style: { left: (mx ? ideal / mx * 100 : 0) + "%" } })
+          ]),
+          el("span", { class: "lv" }, String(c))
+        ]));
+      });
+      left.appendChild(el("div", { class: "hint" },
+        "f = [" + f.map(function (v) { return fmt(v, 3); }).join(", ") + "]  ·  " +
+        "P = [" + Pm.map(function (v) { return fmt(v, 3); }).join(", ") + "]"));
+
+      const right = el("div", { class: "panel" });
+      right.appendChild(el("h4", {}, "consequences"));
+      const auxSpan = (ceiling - LB.aux_loss_if_uniform) || 1;
+      right.appendChild(el("div", { class: "lbrow" }, [
+        el("span", { class: "muted" }, "L"),
+        el("div", { class: "gauge" }, el("i", { style: {
+          width: NN.clamp((aux - LB.aux_loss_if_uniform) / auxSpan * 100, 0, 100) + "%" } })),
+        el("span", { class: "lv" }, fmt(aux, 4))
+      ]));
+      right.appendChild(el("div", { class: "lbrow" }, [
+        el("span", { class: "muted" }, "r"),
+        el("div", { class: "gauge" }, el("i", { style: {
+          width: NN.clamp((imb - 1) / (NE / 1 - 1) * 100, 0, 100) + "%",
+          background: "var(--activation)" } })),
+        el("span", { class: "lv" }, fmt(imb, 2) + "×")
+      ]));
+      right.appendChild(el("div", { class: "lbrow" }, [
+        el("span", { class: "muted" }, "idle"),
+        el("div", { class: "gauge" }, el("i", { style: {
+          width: NN.clamp(idle * 100, 0, 100) + "%", background: "var(--critical)" } })),
+        el("span", { class: "lv" }, fmt(idle * 100, 1) + "%")
+      ]));
+      const vt = el("table", { class: "vtable" });
+      const vtb = el("tbody");
+      function vr(a, b, c) {
+        vtb.appendChild(el("tr", {}, [el("td", {}, a), el("td", { class: "r" }, b),
+          el("td", { class: "r muted" }, c || "")]));
+      }
+      vr("L_aux", fmt(aux, 4), "min " + fmt(LB.aux_loss_if_uniform, 1));
+      vr("ceiling at k = " + k, fmt(ceiling, 2), "N / k");
+      vr("absolute maximum", fmt(LB.aux_loss_if_collapsed, 1), "N, needs k = 1");
+      vr("imbalance", fmt(imb, 2) + "×", "ideal " + fmt(ideal, 1) + " slots");
+      vr("GPUs idle", fmt(idle * 100, 1) + "%", "1 − 1/r");
+      vt.appendChild(vtb);
+      right.appendChild(vt);
+
+      if (lv === 0 && k === K) {
+        const ok = Math.abs(aux - LB.aux_loss) < 1e-12 &&
+                   counts.join() === LB.counts.join();
+        right.appendChild(el("div", { class: "hint" }, [
+          el("span", { class: ok ? "ok" : "bad" }, ok ? "✓ " : "✗ "),
+          "at λ = 0, k = " + K + " the simulation reproduces MOE.load_balance exactly: " +
+          "counts [" + counts.join(", ") + "] and L_aux " + fmt(aux, 6) + " vs " + fmt(LB.aux_loss, 6)
+        ]));
+      } else if (k !== K) {
+        right.appendChild(el("div", { class: "hint" },
+          "With top-" + k + " no expert can hold more than 1/" + k + " of the slots, so L_aux " +
+          "cannot exceed N/k = " + fmt(ceiling, 2) + ". The stated maximum of " +
+          fmt(LB.aux_loss_if_collapsed, 1) + " is the k = 1 case: total collapse."));
+      } else {
+        right.appendChild(el("div", { class: "hint" },
+          "Top-" + K + " caps L_aux at N/k = " + fmt(ceiling, 2) + " — a token always spends its " +
+          "second choice somewhere else. Set k = 1 to reach the full " +
+          fmt(LB.aux_loss_if_collapsed, 1) + "."));
+      }
+
+      simHost.appendChild(el("div", { class: "grid2" }, [left, right]));
+    }
+    lam.addEventListener("input", sim);
+    kSel.addEventListener("input", sim);
+    sim();
+
+    host.appendChild(el("div", { class: "hint" },
+      "The auxiliary loss is added to the language-modelling loss with a small coefficient — large " +
+      "enough to keep the router honest, small enough not to fight the objective. It is a " +
+      "regulariser on a routing decision, not a term you want to minimise on its own: a perfectly " +
+      "uniform router is a router that has stopped specialising."));
+  })();
+
+  /* ==================================================================== */
+  /*  5 · CAPACITY AND DROPPING                                           */
+  /* ==================================================================== */
+  (function () {
+    const host = document.querySelector("#capBody");
+
+    host.appendChild(el("p", { html:
+      "§3 left an unresolved problem: the all-to-all buffers have to be some size before the router " +
+      "runs. Capacity is the answer that most implementations pick. Fix a <b>capacity factor</b> " +
+      "— here <code>" + LB.capacity_factor + "</code> — and give every expert room for exactly" }));
+
+    host.appendChild(NN.formula({
+      rule: "capacity = ⌈ capacity_factor · slots / N ⌉",
+      sub: "⌈ " + LB.capacity_factor + " · " + (NT * K) + " / " + NE + " ⌉",
+      result: LB.capacity_per_expert + " token-slots per expert", cls: "activation"
+    }));
+
+    host.appendChild(el("p", { html:
+      "Now every buffer is a known size, the all-to-all is a fixed-shape collective, and the GEMM " +
+      "shapes are static. The cost is that an expert over its capacity simply refuses the extra " +
+      "tokens. They are <b>dropped</b>: not queued, not re-routed, not deferred. The token's " +
+      "output loses that expert's contribution entirely." }));
+
+    const queues = el("div", { class: "grid2" });
+    const droppedSet = {};
+    LB.dropped.forEach(function (d) { droppedSet[d.expert + ":" + d.token + ":" + d.slot] = true; });
+
+    for (let e = 0; e < NE; e++) {
+      const q = el("div", { class: "queue" });
+      const p = PEX[e];
+      q.appendChild(el("h5", {}, [
+        el("span", { class: "v-weight" }, "Expert " + e),
+        el("span", { class: "muted", style: { fontWeight: "400", marginLeft: "8px", fontSize: ".68rem" } },
+          p.n_tokens + " arrived · capacity " + LB.capacity_per_expert)
+      ]));
+      p.tokens.forEach(function (tk, i) {
+        const isDrop = i >= LB.capacity_per_expert;
+        if (i === LB.capacity_per_expert) {
+          q.appendChild(el("div", { class: "caprule" }, el("span", {}, "capacity " + LB.capacity_per_expert)));
+        }
+        q.appendChild(el("div", { class: "slot" + (isDrop ? " dropped" : "") }, [
+          el("span", {}, tokLabel(tk)),
+          el("span", { class: "muted", style: { marginLeft: "auto" } },
+            "gate " + fmt(p.weights[i], 4)),
+          el("span", { class: "stateTag " + (isDrop ? "drop" : "cross") }, isDrop ? "dropped" : "kept")
+        ]));
+      });
+      for (let i = p.n_tokens; i < LB.capacity_per_expert; i++) {
+        q.appendChild(el("div", { class: "slot empty" },
+          "empty slot — padded, computed, and thrown away"));
+      }
+      queues.appendChild(q);
+    }
+    host.appendChild(queues);
+
+    host.appendChild(el("div", { class: "chiprow", style: { gap: "14px", margin: "10px 0" } }, [
+      el("span", { class: "stateTag cross" }, "solid · kept"),
+      el("span", { class: "stateTag drop" }, "dotted + hatched · dropped"),
+      el("span", { class: "stateTag local" }, "dashed · empty padding")
+    ]));
+
+    /* who actually got hurt */
+    host.appendChild(el("h3", {}, "What the dropped tokens lose"));
+    const dt = el("table", { class: "vtable" });
+    dt.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "token"), el("th", {}, "expert refused"), el("th", {}, "which choice"),
+      el("th", { class: "r" }, "gate weight lost"), el("th", {}, "what it keeps")
+    ])));
+    const dtb = el("tbody");
+    LB.dropped.forEach(function (d) {
+      const r = RT[d.token];
+      const i = PEX[d.expert].tokens.indexOf(d.token);
+      const other = r.chosen.filter(function (e) { return e !== d.expert; });
+      dtb.appendChild(el("tr", {}, [
+        el("td", {}, tokLabel(d.token)),
+        el("td", { class: "v-weight" }, "E" + d.expert),
+        el("td", {}, d.slot === 0 ? "its top-1" : "its #" + (d.slot + 1)),
+        el("td", { class: "r v-gradient" }, fmt(PEX[d.expert].weights[i], 4)),
+        el("td", {}, other.map(function (e) { return "E" + e; }).join(", ") + " only")
+      ]));
+    });
+    dt.appendChild(dtb);
+    host.appendChild(dt);
+
+    const lostWeight = LB.dropped.reduce(function (a, d) {
+      return a + PEX[d.expert].weights[PEX[d.expert].tokens.indexOf(d.token)];
+    }, 0);
+
+    host.appendChild(NN.tiles([
+      { k: "capacity factor", v: String(LB.capacity_factor), s: "chosen, not derived" },
+      { k: "capacity per expert", v: String(LB.capacity_per_expert), s: "token-slots" },
+      { k: "token-slots dropped", v: String(LB.n_dropped), cls: "gradient",
+        s: fmt(LB.n_dropped / (NT * K) * 100, 1) + "% of " + (NT * K) + " slots" },
+      { k: "gate mass discarded", v: fmt(lostWeight, 3), cls: "gradient",
+        s: "out of " + NT + ".0 total (1 per token)" }
+    ]));
+
+    host.appendChild(NN.callout("warn", "A DROPPED TOKEN IS A REAL LOSS, CHOSEN ON PURPOSE",
+      "<p>" + LB.dropped.map(function (d) {
+        return "<b>" + tokLabel(d.token) + "</b> had E" + d.expert + " as its " +
+          (d.slot === 0 ? "top choice" : "choice #" + (d.slot + 1)) + ", gate " +
+          fmt(PEX[d.expert].weights[PEX[d.expert].tokens.indexOf(d.token)], 4);
+      }).join(", and ") + ". Both are refused. Their layer output is built from their remaining " +
+      "expert alone — the residual stream still carries them forward, so the network does not break, " +
+      "but those tokens got strictly less computation than their neighbours did.</p>" +
+      "<p>This is not a bug being tolerated; it is a trade being made. The alternative is a " +
+      "variable-size all-to-all with a synchronising metadata exchange in front of it, on the " +
+      "critical path, " + (XP.collectives_per_layer.length * 2) + " times per MoE layer per step. " +
+      "Dropping " + fmt(LB.n_dropped / (NT * K) * 100, 1) + "% of token-slots is cheaper than that, " +
+      "and the auxiliary loss of §4 exists to keep the drop rate low. The two mechanisms are a pair: " +
+      "the aux loss makes the imbalance small, and the capacity factor bounds what the imbalance can " +
+      "still cost you.</p>"));
+
+    host.appendChild(el("p", { class: "hint" },
+      "Note also the empty slots. " + LB.counts.filter(function (c) { return c < LB.capacity_per_expert; }).length +
+      " of " + NE + " experts came in under capacity, and a fixed-shape implementation pads them out " +
+      "to " + LB.capacity_per_expert + " and computes on the padding. Capacity factor " +
+      LB.capacity_factor + " means you have budgeted for " +
+      fmt((LB.capacity_factor - 1) * 100, 0) + "% waste in exchange for static shapes."));
+  })();
+
+  /* ==================================================================== */
+  /*  6 · COMPOSING                                                       */
+  /* ==================================================================== */
+  (function () {
+    const host = document.querySelector("#composeBody");
+
+    host.appendChild(el("p", { html:
+      "<a href=\"23-3d-parallelism.html\">Page 23</a> composed tensor, pipeline and data " +
+      "parallelism into one 3-D mapping onto real hardware. Expert parallelism is a fourth axis, " +
+      "and it does not stack the way the others do — it <i>replaces</i> data parallelism for one " +
+      "specific set of weights and leaves everything else alone." }));
+
+    const rows = [
+      { ax: "DP", cls: "gradient", what: "batch", weights: "replicated (or ZeRO-sharded)",
+        moe: "still applies to attention, embeddings and the router — <b>but not to the experts</b>",
+        comm: "all_reduce / reduce_scatter + all_gather on gradients" },
+      { ax: "TP", cls: "weight", what: "each weight matrix",
+        weights: "column- then row-sharded",
+        moe: "composes <i>inside</i> an expert: an expert's " + DM + "×" + DF +
+             " and " + DF + "×" + DM + " pair is cut exactly like any other MLP",
+        comm: "all_reduce per MLP, on the critical path" },
+      { ax: "PP", cls: "activation", what: "layers",
+        weights: "each stage holds some layers",
+        moe: "unchanged — an MoE layer is just a layer; it lands on some stage",
+        comm: "p2p at stage boundaries" },
+      { ax: "EP", cls: "weight", what: "experts",
+        weights: "expert e lives on GPU e ÷ (N/EP)",
+        moe: "<b>the new axis.</b> Replaces DP for expert weights: no expert is replicated across " +
+             "the EP group, so its gradient is never all-reduced across it",
+        comm: XP.collectives_per_layer.length + " all_to_all forward, " +
+              (XP.collectives_per_layer.length * 2) + " per step" }
+    ];
+
+    const tbl = el("table", { class: "data" });
+    tbl.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "axis"), el("th", { class: "wrap" }, "splits"),
+      el("th", { class: "wrap" }, "what a GPU holds"),
+      el("th", { class: "wrap" }, "with MoE"), el("th", { class: "wrap" }, "collective")
+    ])));
+    const tb = el("tbody");
+    rows.forEach(function (r) {
+      tb.appendChild(el("tr", {}, [
+        el("td", {}, el("span", { class: "chip " + (r.cls === "weight" ? "exp" : r.cls === "gradient" ? "grad" : "tok") }, r.ax)),
+        el("td", { class: "wrap" }, r.what),
+        el("td", { class: "wrap" }, r.weights),
+        el("td", { class: "wrap", html: r.moe }),
+        el("td", { class: "wrap" }, r.comm)
+      ]));
+    });
+    tbl.appendChild(tb);
+    host.appendChild(el("div", { class: "scrollx" }, tbl));
+
+    host.appendChild(el("p", { html:
+      "The arithmetic of the mapping is the same as page 23's: <code>world = DP × TP × PP</code> " +
+      "becomes <code>world = DP × TP × PP</code> still, with EP carved out of the DP group. A GPU's " +
+      "EP rank and its DP rank are the same coordinate read two ways — for attention weights it is " +
+      "a data-parallel replica, for expert weights it is the sole owner of its shard. That is why " +
+      "the expert gradients are <i>not</i> all-reduced across that group: there is nothing to " +
+      "average, because no other GPU computed a gradient for those weights." }));
+
+    /* an honest note on where the topology puts it */
+    const inter = P && P.interconnects ? P.interconnects : null;
+    host.appendChild(NN.callout("key", "WHERE EP GOES ON THE WIRE",
+      "<p>" + (inter ? inter.why_it_matters + " " : "") +
+      "The all-to-all is on the critical path and cannot be overlapped with the expert GEMM that " +
+      "depends on it, which argues for keeping the EP group inside a node alongside TP. But EP " +
+      "exists precisely because the experts are too large to fit in one node's memory, which argues " +
+      "for spreading it. That tension — not bandwidth arithmetic — is what makes MoE topology " +
+      "mapping hard, and it is why production MoE systems care so much about the drop rate: every " +
+      "dropped token is bandwidth you did not have to buy.</p>"));
+
+    host.appendChild(el("p", { html:
+      "One more accounting note. Under EP the optimizer state follows the weights: each expert's " +
+      "<span class=\"chip exp\">weight</span>, its <span class=\"chip grad\">gradient</span> and " +
+      "its <span class=\"chip\" style=\"border-color:var(--optimizer);color:var(--optimizer);background:var(--optimizer-w)\">optimizer state</span> " +
+      "all live on the one GPU that owns it. For the toy that is " +
+      NN.bytes(XP.gpus[0].expert_params * FP32) + " of fp32 expert weights per GPU rather than " +
+      NN.bytes(ACC.toy.params_per_expert * NE * FP32) + " — the memory saving EP is there to buy. " +
+      "Inference does not get to make the same trade, because there is no gradient and no optimizer " +
+      "state to shard: that is <a href=\"34-moe-inference.html\">page 34</a>." }));
+  })();
+
+  NN.page("moetrain");
+})();
+</script>
+</body>
+</html>

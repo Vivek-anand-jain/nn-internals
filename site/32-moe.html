@@ -1,0 +1,929 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 32 Mixture of Experts</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* page-local layout only; every colour comes from design.css custom properties */
+.panel { background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 8px; padding: 12px 14px; }
+.panel h4 { margin: 0 0 9px; font-family: var(--mono); font-size: .68rem; letter-spacing: .13em;
+            text-transform: uppercase; color: var(--ink-muted); font-weight: 700; }
+.hint { font-size: .7rem; color: var(--ink-muted); font-family: var(--mono); line-height: 1.55; }
+
+/* --- router --- */
+.rtwrap { display: grid; grid-template-columns: 248px 1fr 262px; gap: 13px; margin: 14px 0; align-items: start; }
+@media (max-width: 900px) { .rtwrap { grid-template-columns: 1fr; } }
+.tokbadge { display: inline-flex; align-items: baseline; gap: 8px; font-family: var(--mono);
+            border: 1px solid var(--activation); border-radius: 7px; padding: 4px 10px;
+            background: var(--activation-w); }
+.tokbadge .ix { font-size: .64rem; color: var(--ink-muted); letter-spacing: .09em; text-transform: uppercase; }
+.tokbadge .tx { font-size: 1rem; font-weight: 700; color: var(--activation); }
+
+.gaterow { display: grid; grid-template-columns: 30px 1fr 66px 74px; align-items: center;
+           gap: 7px; margin: 5px 0; font-family: var(--mono); font-size: .74rem; }
+.gaterow .en { color: var(--ink-2); font-weight: 700; }
+.gatetrack { height: 15px; background: var(--surface-3); border-radius: 4px; overflow: hidden; position: relative; }
+.gatefill { height: 100%; background: var(--activation); opacity: .35;
+            transition: width .35s cubic-bezier(.4,0,.2,1), opacity .3s; border-radius: 0 4px 4px 0; }
+.gaterow.pick .gatefill { opacity: 1; }
+.gaterow.pick .gatetrack { outline: 2px solid var(--activation); outline-offset: 1px; }
+.gaterow .pv { text-align: right; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.gaterow .tag { font-size: .55rem; letter-spacing: .07em; text-transform: uppercase; font-weight: 700;
+                text-align: right; color: var(--ink-muted); }
+.gaterow.pick .tag { color: var(--activation); }
+
+/* --- routing table --- */
+table.rt { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .74rem;
+           font-variant-numeric: tabular-nums; margin-top: 10px; }
+table.rt th, table.rt td { padding: 4px 7px; border-bottom: 1px solid var(--hairline-2); text-align: right; white-space: nowrap; }
+table.rt th { font-size: .6rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-muted); }
+table.rt td.l, table.rt th.l { text-align: left; }
+table.rt td.pick { background: var(--activation-w); color: var(--activation); font-weight: 700;
+                   outline: 1px solid var(--activation); outline-offset: -1px; }
+table.rt tr.now td { background: var(--surface-3); }
+table.rt tr.now td.pick { background: var(--activation-w); }
+
+/* --- grouping --- */
+.stage { display: grid; grid-template-columns: repeat(auto-fit, minmax(238px, 1fr)); gap: 11px; margin: 12px 0; }
+/* the four expert cards sit side by side, so their tensors get a tighter cell */
+.ebox .cell { min-width: 50px; padding: 5px 6px; font-size: .73rem; }
+.ebox .tensor { margin: 0 0 10px; }
+.ebox .tensor-label { font-size: .72rem; }
+.ebox .tensor-shape { font-size: .66rem; }
+.ebox { border: 1px solid var(--hairline); border-left: 3px solid var(--weight); border-radius: 8px;
+        background: var(--surface-2); padding: 10px 11px; transition: opacity .3s, border-color .3s; }
+.ebox.off { opacity: .3; }
+.ebox.busy { border-left-color: var(--activation); box-shadow: 0 0 0 2px var(--activation-w); }
+.ebox .eh { font-family: var(--mono); font-size: .76rem; font-weight: 700; display: flex;
+            justify-content: space-between; gap: 8px; align-items: baseline; }
+.ebox .es { font-family: var(--mono); font-size: .64rem; color: var(--ink-muted); margin-top: 2px; }
+.tokchips { display: flex; flex-wrap: wrap; gap: 4px; margin: 7px 0 2px; }
+.tchip { font-family: var(--mono); font-size: .64rem; padding: 1px 6px; border-radius: 4px;
+         border: 1px solid var(--activation); color: var(--activation); background: var(--activation-w); }
+.tchip.ghost { border-style: dashed; opacity: .5; }
+
+.flowrow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0; }
+.stagetag { font-family: var(--mono); font-size: .6rem; letter-spacing: .1em; text-transform: uppercase;
+            font-weight: 700; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--hairline);
+            color: var(--ink-muted); }
+.stagetag.on { border-color: var(--activation); color: var(--activation); background: var(--activation-w); }
+.arrow { color: var(--ink-muted); font-family: var(--mono); }
+
+/* --- verification --- */
+.vtable { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .78rem; margin: 8px 0; }
+.vtable td, .vtable th { padding: 6px 9px; border-bottom: 1px solid var(--hairline-2); text-align: left; }
+.vtable td.r, .vtable th.r { text-align: right; font-variant-numeric: tabular-nums; }
+.vtable th { font-size: .62rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-muted); }
+.ok  { color: var(--good); font-weight: 700; }
+.bad { color: var(--critical); font-weight: 700; }
+.verdict { border-radius: 8px; padding: 13px 17px; margin: 14px 0; border: 1px solid var(--hairline);
+           border-left: 4px solid var(--good); background: var(--surface-2); display: flex;
+           flex-wrap: wrap; align-items: baseline; gap: 5px 20px; }
+.verdict .big { font-size: 1.5rem; font-weight: 800; letter-spacing: -.02em; color: var(--good); }
+.verdict .det { font-family: var(--mono); font-size: .82rem; color: var(--ink-2); }
+
+/* --- residency bar: pattern, not colour, marks the untouched half --- */
+.residbar { display: flex; height: 30px; border-radius: 7px; overflow: hidden;
+            border: 1px solid var(--hairline); margin: 10px 0 4px; }
+.residbar .seg { display: flex; align-items: center; justify-content: center; font-family: var(--mono);
+                 font-size: .68rem; font-weight: 700; color: #fff; overflow: hidden; white-space: nowrap; }
+.residbar .seg.touched { background: var(--weight); }
+.residbar .seg.idle { color: var(--weight);
+    background: repeating-linear-gradient(135deg, var(--weight-w) 0 7px, transparent 7px 14px);
+    border-left: 1px dashed var(--weight); }
+.reslegend { display: flex; flex-wrap: wrap; gap: 16px; font-family: var(--mono); font-size: .7rem; color: var(--ink-2); }
+.reslegend .sw { display: inline-block; width: 22px; height: 11px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; }
+.reslegend .sw.touched { background: var(--weight); }
+.reslegend .sw.idle { background: repeating-linear-gradient(135deg, var(--weight-w) 0 5px, transparent 5px 10px);
+                      border: 1px dashed var(--weight); }
+
+.ctlrow { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin: 12px 0; }
+.ctlrow label { font-family: var(--mono); font-size: .74rem; color: var(--ink-2); display: flex;
+                align-items: center; gap: 9px; }
+.ctlrow input[type="range"] { width: 170px; }
+.kv { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+table.data td.wrap, table.data th.wrap { white-space: normal; }
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 32</div>
+    <h1>Mixture of Experts</h1>
+    <p class="lede">A dense MLP uses every weight for every token, which means parameter count and
+      compute per token are the same question asked twice. A mixture of experts holds N separate
+      MLPs and sends each token to only k of them. Capacity then grows with N while arithmetic
+      grows with k, and the two numbers come apart. This page shows the router that makes the
+      choice, the grouping that makes it fast, and the memory bill that arrives regardless.</p>
+    <noscript><p class="callout warn">This page derives every number in the browser from
+      <code>assets/data/moe.js</code>. With JavaScript disabled you will see an empty shell.</p></noscript>
+  </div>
+
+  <section class="block" id="decouple">
+    <h2>1 · Parameters and FLOPs come apart</h2>
+    <div id="decoupleBody"></div>
+  </section>
+
+  <section class="block" id="router">
+    <h2>2 · The router, token by token</h2>
+    <div id="routerBody"></div>
+  </section>
+
+  <section class="block" id="renorm">
+    <h2>3 · Why the kept gates are renormalised</h2>
+    <div id="renormBody"></div>
+  </section>
+
+  <section class="block" id="group">
+    <h2>4 · Grouping: one matmul per expert</h2>
+    <div id="groupBody"></div>
+  </section>
+
+  <section class="block" id="proof">
+    <h2>5 · The proof that grouping changes nothing</h2>
+    <div id="proofBody"></div>
+  </section>
+
+  <section class="block" id="cost">
+    <h2>6 · What it costs: every expert is resident</h2>
+    <div id="costBody"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/parallel.js"></script>
+<script src="../assets/data/infer.js"></script>
+<script src="../assets/data/moe.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T = NN.T;
+  const M = window.MOE;
+  const INFER = window.INFER;
+  const el = NN.el, fmt = NN.fmt;
+
+  if (!M) {
+    document.querySelector("#decoupleBody").appendChild(NN.callout("warn",
+      "moe.js did not load",
+      "Run <code>python3 code/moe_toy.py</code> to regenerate <code>assets/data/moe.js</code>."));
+    NN.page("moe");
+    return;
+  }
+
+  const MET   = M.meta;
+  const NT    = MET.n_tokens, NE = MET.n_experts, K = MET.top_k;
+  const DM    = MET.d_model,  DF = MET.d_ff;
+  const RT    = M.routing;
+  const ACC   = M.accounting;
+  const PE    = M.per_expert;
+  const X     = M.input.X, WG = M.input.W_gate, EXP = M.input.experts;
+  const FP32  = T.memory.dtype_bytes.fp32;
+  const BF16  = T.memory.dtype_bytes.bf16;
+
+  /* ==================================================================== */
+  /*  a JS mirror of code/moe_toy.py — used only to re-derive, never to   */
+  /*  invent. Every input comes out of MOE.input.                          */
+  /* ==================================================================== */
+  function matvec(v, W) {
+    const out = [];
+    for (let j = 0; j < W[0].length; j++) {
+      let s = 0;
+      for (let i = 0; i < v.length; i++) s += v[i] * W[i][j];
+      out.push(s);
+    }
+    return out;
+  }
+  function mm(A, B) {
+    return A.map(function (row) {
+      const o = [];
+      for (let j = 0; j < B[0].length; j++) {
+        let s = 0;
+        for (let t = 0; t < B.length; t++) s += row[t] * B[t][j];
+        o.push(s);
+      }
+      return o;
+    });
+  }
+  function gelu(x) {
+    const c = Math.sqrt(2.0 / Math.PI);
+    return 0.5 * x * (1.0 + Math.tanh(c * (x + 0.044715 * x * x * x)));
+  }
+  function softmax(v) {
+    const m = Math.max.apply(null, v);
+    const e = v.map(function (x) { return Math.exp(x - m); });
+    const s = e.reduce(function (a, b) { return a + b; }, 0);
+    return e.map(function (x) { return x / s; });
+  }
+  function expertForward(v, e) {
+    const u = matvec(v, EXP[e].W_up);
+    return matvec(u.map(gelu), EXP[e].W_down);
+  }
+  function maxdiff(A, B) {
+    let m = 0;
+    for (let i = 0; i < A.length; i++)
+      for (let j = 0; j < A[0].length; j++) m = Math.max(m, Math.abs(A[i][j] - B[i][j]));
+    return m;
+  }
+  /** top-k over a probability vector, ties broken by index — as in route(). */
+  function topk(probs, k) {
+    const order = probs.map(function (p, e) { return e; })
+      .sort(function (a, b) { return probs[b] - probs[a] || a - b; });
+    const chosen = order.slice(0, k);
+    const raw = chosen.map(function (e) { return probs[e]; });
+    const s = raw.reduce(function (a, b) { return a + b; }, 0);
+    return { chosen: chosen, raw: raw, sum: s, weights: raw.map(function (r) { return r / s; }) };
+  }
+
+  const EHUE = "var(--weight)";        /* experts are weights  */
+  const AHUE = "var(--activation)";    /* tokens are activations */
+
+  function tokLabel(t) { return "t" + t + " “" + MET.tokens[t] + "”"; }
+
+  /* ==================================================================== */
+  /*  1 · THE DECOUPLING                                                  */
+  /* ==================================================================== */
+  (function () {
+    const host = document.querySelector("#decoupleBody");
+    const toy = ACC.toy;
+
+    host.appendChild(el("p", { html:
+      "The toy on this page is deliberately printable: <b>" + NT + " tokens</b>, <b>" + NE +
+      " experts</b>, <b>top-" + K + "</b> routing, <code>d_model " + DM + "</code>, " +
+      "<code>d_ff " + DF + "</code>. Each expert is an ordinary two-matrix MLP — " +
+      "<code>" + DM + "×" + DF + "</code> up, <code>" + DF + "×" + DM + "</code> down — " +
+      "so it holds " + toy.params_per_expert + " parameters. There is nothing exotic inside an " +
+      "expert. The only new machinery is the choice of which ones to run." }));
+
+    host.appendChild(NN.tiles([
+      { k: "parameters held", v: NN.count(toy.params_total), cls: "weight",
+        s: NE + " × " + toy.params_per_expert + " expert + " + toy.gate_params + " gate" },
+      { k: "active per token", v: NN.count(toy.params_active_per_token), cls: "weight",
+        s: K + " × " + toy.params_per_expert + " expert + " + toy.gate_params + " gate" },
+      { k: "sparsity", v: fmt(toy.sparsity_ratio, 3) + "×",
+        s: toy.params_total + " / " + toy.params_active_per_token },
+      { k: "FLOPs per token", v: NN.count(toy.flops_per_token_moe), cls: "activation",
+        s: "2 × " + toy.params_active_per_token + " active params" }
+    ]));
+
+    host.appendChild(NN.formula({
+      rule: "sparsity = params_total / params_active_per_token",
+      sub: toy.params_total + " / " + toy.params_active_per_token,
+      result: fmt(toy.sparsity_ratio, 3) + "×", cls: "weight"
+    }));
+
+    host.appendChild(el("p", { html:
+      "The toy's ratio is modest — " + fmt(toy.sparsity_ratio, 3) + "× — because " + NE +
+      " experts with top-" + K + " is barely sparse, and the gate's " + toy.gate_params +
+      " parameters are counted as active every time. The ratio is <code>N/k</code> in the limit " +
+      "where the gate is negligible, which is why real models push N up hard and leave k small." }));
+
+    /* real models */
+    host.appendChild(el("h3", {}, "The same ratio on real models"));
+    const tbl = el("table", { class: "data" });
+    tbl.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", { class: "wrap" }, "model"), el("th", {}, "experts"), el("th", {}, "top-k"),
+      el("th", {}, "MLP params"), el("th", {}, "active"), el("th", {}, "sparsity")
+    ])));
+    const tb = el("tbody");
+    ACC.real.forEach(function (r) {
+      tb.appendChild(el("tr", {}, [
+        el("td", { class: "wrap" }, r.name),
+        el("td", { class: "n" }, String(r.n_experts)),
+        el("td", { class: "n" }, String(r.top_k)),
+        el("td", { class: "n v-weight" }, NN.count(r.mlp_params_total)),
+        el("td", { class: "n v-weight" }, NN.count(r.mlp_params_active)),
+        el("td", { class: "n" + (r.sparsity === Math.max.apply(null, ACC.real.map(function (q) { return q.sparsity; })) ? " best" : "") },
+          fmt(r.sparsity, 2) + "×")
+      ]));
+    });
+    tbl.appendChild(tb);
+    host.appendChild(el("div", { class: "scrollx" }, tbl));
+    host.appendChild(el("div", { class: "hint" }, ACC.real[0].note + "."));
+
+    host.appendChild(NN.chart.bars({
+      items: ACC.real.map(function (r) {
+        return { label: r.name, value: r.sparsity, color: EHUE,
+                 sub: "· " + NN.count(r.mlp_params_total) + " held, " + NN.count(r.mlp_params_active) + " used" };
+      }),
+      unit: "× sparse",
+      max: Math.max.apply(null, ACC.real.map(function (r) { return r.sparsity; })) * 1.12
+    }));
+
+    const dsv = ACC.real.filter(function (r) { return r.n_experts === Math.max.apply(null, ACC.real.map(function (q) { return q.n_experts; })); })[0];
+    const dense = ACC.real.filter(function (r) { return r.sparsity === 1; })[0];
+
+    host.appendChild(NN.callout("key", "THE HEADLINE",
+      "<p>" + dsv.name + " carries <b>" + NN.count(dsv.mlp_params_total) + "</b> of MLP parameters and " +
+      "uses <b>" + NN.count(dsv.mlp_params_active) + "</b> of them per token — " +
+      fmt(dsv.sparsity, 2) + "× sparse. Its per-token MLP arithmetic is therefore smaller than " +
+      dense.name.replace("a dense", "a dense model of") + " (" + NN.count(dense.mlp_params_active) +
+      " active), while its MLP capacity is " +
+      fmt(dsv.mlp_params_total / dense.mlp_params_total, 1) + "× larger.</p>" +
+      "<p>" + ACC.why + "</p>"));
+  })();
+
+  /* ==================================================================== */
+  /*  2 · THE ROUTER                                                      */
+  /* ==================================================================== */
+  let renormSync = null;   /* section 3 mirrors the router's current token */
+
+  (function () {
+    const host = document.querySelector("#routerBody");
+
+    host.appendChild(el("p", { html:
+      "The router is one small matrix. Multiply the token by <code>W_gate</code> " +
+      "(<code>" + DM + "×" + NE + "</code>, " + ACC.toy.gate_params + " parameters), softmax the " +
+      NE + " logits, keep the largest " + K + ", renormalise them so they sum to one. That is the " +
+      "whole mechanism. It is also the only part of a transformer where a discrete, " +
+      "data-dependent decision is made in the middle of the forward pass." }));
+
+    host.appendChild(el("div", { class: "flowrow" }, [
+      el("span", { class: "stagetag on" }, "x"), el("span", { class: "arrow" }, "→ W_gate →"),
+      el("span", { class: "stagetag on" }, "logits"), el("span", { class: "arrow" }, "→ softmax →"),
+      el("span", { class: "stagetag on" }, "probs"), el("span", { class: "arrow" }, "→ top-" + K + " →"),
+      el("span", { class: "stagetag on" }, "chosen"), el("span", { class: "arrow" }, "→ ÷ Σ →"),
+      el("span", { class: "stagetag on" }, "weights")
+    ]));
+
+    const wgTensor = NN.tensor({
+      name: "W_gate", shape: [DM, NE], values: WG, cls: "weight", digits: 4, signed: true,
+      note: ACC.toy.gate_params + " params"
+    });
+
+    /* --- the per-token viewer --- */
+    const badge = el("div", { class: "tokbadge" }, [
+      el("span", { class: "ix" }, "token"), el("span", { class: "tx" }, "")
+    ]);
+    const xHost = el("div");
+    const logitHost = el("div");
+    const gateHost = el("div");
+    const pickHost = el("div");
+
+    const viz = el("div", { class: "rtwrap" }, [
+      el("div", { class: "panel" }, [
+        el("h4", {}, "the token"), badge, xHost,
+        el("div", { class: "hint" }, "x is one row of the " + NT + "×" + DM + " activation block")
+      ]),
+      el("div", { class: "panel" }, [
+        el("h4", {}, "softmax over " + NE + " experts"), logitHost, gateHost
+      ]),
+      el("div", { class: "panel" }, [
+        el("h4", {}, "kept and renormalised"), pickHost
+      ])
+    ]);
+    host.appendChild(viz);
+
+    const ctl = el("div");
+    host.appendChild(ctl);
+
+    /* --- the full routing table, all six tokens at once --- */
+    const rtbl = el("table", { class: "rt" });
+    const hr = el("tr", {}, [el("th", { class: "l" }, "token"), el("th", { class: "l" }, "text")]);
+    for (let e = 0; e < NE; e++) hr.appendChild(el("th", {}, "p(E" + e + ")"));
+    hr.appendChild(el("th", {}, "chosen"));
+    hr.appendChild(el("th", {}, "weights"));
+    rtbl.appendChild(el("thead", {}, hr));
+    const rtb = el("tbody");
+    const rowEls = [];
+    RT.forEach(function (r) {
+      const cells = [el("td", { class: "l" }, "t" + r.token),
+                     el("td", { class: "l" }, "“" + r.text + "”")];
+      const pcells = [];
+      for (let e = 0; e < NE; e++) {
+        const isPick = r.chosen.indexOf(e) >= 0;
+        const c = el("td", { class: isPick ? "pick" : "" },
+          fmt(r.probs[e], 4) + (isPick ? " ✓" : ""));
+        pcells.push(c); cells.push(c);
+      }
+      cells.push(el("td", {}, r.chosen.map(function (e) { return "E" + e; }).join(", ")));
+      cells.push(el("td", {}, r.weights.map(function (w) { return fmt(w, 4); }).join(", ")));
+      const tr = el("tr", {}, cells);
+      rtb.appendChild(tr);
+      rowEls.push(tr);
+    });
+    rtbl.appendChild(rtb);
+    host.appendChild(el("div", { class: "scrollx" }, rtbl));
+    host.appendChild(el("div", { class: "hint" },
+      "Every probability here is MOE.routing[t].probs; every weight is MOE.routing[t].weights. " +
+      "✓ marks the top-" + K + "."));
+
+    host.appendChild(el("div", { class: "grid2" }, [
+      el("div", {}, [el("h4", { class: "hint" }, "THE ROUTER'S ONLY PARAMETERS"), wgTensor]),
+      el("div", {}, NN.callout("why", "A DISCRETE CHOICE IN A DIFFERENTIABLE GRAPH",
+        "<p>Everything else in a transformer is a smooth function of its input. The top-" + K +
+        " is not: shift a logit by a hair and a token jumps to a different expert, changing which " +
+        "weights get gradient at all. The gate value multiplying the expert output is what keeps a " +
+        "gradient path open to <code>W_gate</code> — the router learns because its <i>weight</i> " +
+        "scales the output, not because the <i>argmax</i> is differentiable. Page 33 shows the " +
+        "auxiliary loss that exploits exactly this split.</p>"))
+    ]));
+
+    function paint(t) {
+      const r = RT[t];
+      badge.querySelector(".tx").textContent = "“" + r.text + "”";
+      badge.querySelector(".ix").textContent = "index " + r.token;
+
+      xHost.innerHTML = "";
+      xHost.appendChild(el("div", { class: "scrollx" }, NN.tensor({
+        name: "x", shape: [1, DM], values: [X[t]], cls: "activation", digits: 4
+      })));
+
+      logitHost.innerHTML = "";
+      logitHost.appendChild(el("div", { class: "scrollx" }, NN.tensor({
+        name: "logits = x · W_gate", shape: [1, NE], values: [r.logits],
+        cls: "activation", digits: 4, signed: true
+      })));
+
+      gateHost.innerHTML = "";
+      const mx = Math.max.apply(null, r.probs);
+      for (let e = 0; e < NE; e++) {
+        const isPick = r.chosen.indexOf(e) >= 0;
+        const rank = r.chosen.indexOf(e);
+        gateHost.appendChild(el("div", { class: "gaterow" + (isPick ? " pick" : "") }, [
+          el("span", { class: "en" }, "E" + e),
+          el("div", { class: "gatetrack" }, el("div", {
+            class: "gatefill", style: { width: (r.probs[e] / mx * 100).toFixed(1) + "%" }
+          })),
+          el("span", { class: "pv" }, fmt(r.probs[e], 4)),
+          el("span", { class: "tag" }, isPick ? (rank === 0 ? "✓ top-1" : "✓ #" + (rank + 1)) : "not run")
+        ]));
+      }
+
+      const rawSum = r.raw_gates.reduce(function (a, b) { return a + b; }, 0);
+      pickHost.innerHTML = "";
+      pickHost.appendChild(NN.formula({
+        rule: "Σ kept gates",
+        sub: r.raw_gates.map(function (g) { return fmt(g, 4); }).join(" + "),
+        result: fmt(rawSum, 4), cls: "activation"
+      }));
+      r.chosen.forEach(function (e, i) {
+        pickHost.appendChild(NN.formula({
+          rule: "w<sub>" + i + "</sub> = p(E" + e + ") / Σ",
+          sub: fmt(r.raw_gates[i], 4) + " / " + fmt(rawSum, 4),
+          result: fmt(r.weights[i], 4), cls: "activation"
+        }));
+      });
+      pickHost.appendChild(el("div", { class: "hint" },
+        "Σ weights = " + fmt(r.weights.reduce(function (a, b) { return a + b; }, 0), 6) +
+        " — by construction, for every token."));
+
+      rowEls.forEach(function (tr, i) { tr.classList.toggle("now", i === t); });
+      if (renormSync) renormSync(t);
+    }
+
+    const stepper = new NN.Stepper({
+      mount: ctl, count: NT,
+      labels: RT.map(function (r) { return "routing " + tokLabel(r.token) + " → " +
+        r.chosen.map(function (e) { return "E" + e; }).join(" + "); }),
+      onStep: paint, autoplayMs: 1500
+    });
+    void stepper;
+  })();
+
+  /* ==================================================================== */
+  /*  3 · RENORMALISATION                                                 */
+  /* ==================================================================== */
+  (function () {
+    const host = document.querySelector("#renormBody");
+
+    host.appendChild(el("p", { html:
+      "A softmax over " + NE + " experts spreads roughly <code>1/" + NE + "</code> of the mass onto " +
+      "each. Keep the top " + K + " and their raw gates sum to well under one. If you used those raw " +
+      "values as blend weights, the layer's output magnitude would depend on <i>how much mass the " +
+      "router happened to concentrate</i> — and a top-1 layer, a top-2 layer and a top-4 layer would " +
+      "sit at three different scales feeding the residual stream. Renormalising over the kept set " +
+      "removes that entirely: the blend is always a convex combination." }));
+
+    const kslider = el("input", { type: "range", min: 1, max: NE, step: 1, value: String(K) });
+    const kout = el("span", { class: "kv" }, "");
+    const tout = el("span", { class: "kv muted" }, "");
+    host.appendChild(el("div", { class: "ctlrow" }, [
+      el("label", {}, ["keep top-k", kslider, kout]),
+      el("span", { class: "hint" }, "drag k; the token follows the stepper above"),
+      tout
+    ]));
+
+    const cmp = el("div");
+    host.appendChild(cmp);
+
+    let curT = 0;
+    function draw() {
+      const k = parseInt(kslider.value, 10);
+      const r = RT[curT];
+      const d = topk(r.probs, k);
+      kout.textContent = "k = " + k + (k === K ? "  (as generated)" : "");
+      tout.textContent = "token " + tokLabel(curT);
+
+      cmp.innerHTML = "";
+      const left = el("div", { class: "panel" }, [
+        el("h4", {}, "raw gates — no renormalisation"),
+        NN.formula({
+          rule: "scale = Σ<sub>kept</sub> p(E)",
+          sub: d.raw.map(function (g) { return fmt(g, 4); }).join(" + "),
+          result: fmt(d.sum, 4), cls: "activation"
+        }),
+        el("div", { class: "hint" },
+          "the layer output would be scaled by " + fmt(d.sum, 4) + " — " +
+          "a number that moves with k and with the token")
+      ]);
+      const right = el("div", { class: "panel" }, [
+        el("h4", {}, "renormalised — what MoE actually does"),
+        NN.formula({
+          rule: "Σ w = Σ p(E) / Σ<sub>kept</sub> p(E)",
+          sub: d.weights.map(function (w) { return fmt(w, 4); }).join(" + "),
+          result: fmt(d.weights.reduce(function (a, b) { return a + b; }, 0), 6), cls: "activation"
+        }),
+        el("div", { class: "hint" },
+          "exactly 1 for every k and every token — the residual stream sees a stable scale")
+      ]);
+      cmp.appendChild(el("div", { class: "grid2" }, [left, right]));
+
+      /* the sweep over k, for this token */
+      const rows = [];
+      for (let kk = 1; kk <= NE; kk++) rows.push({ k: kk, d: topk(r.probs, kk) });
+      const tb = el("table", { class: "vtable" });
+      tb.appendChild(el("thead", {}, el("tr", {}, [
+        el("th", {}, "k"), el("th", {}, "experts run"),
+        el("th", { class: "r" }, "Σ raw gates (unrenormalised scale)"),
+        el("th", { class: "r" }, "Σ weights (renormalised)")
+      ])));
+      const body = el("tbody");
+      rows.forEach(function (row) {
+        body.appendChild(el("tr", { style: row.k === k ? { background: "var(--surface-3)" } : null }, [
+          el("td", {}, String(row.k)),
+          el("td", {}, row.d.chosen.map(function (e) { return "E" + e; }).join(", ")),
+          el("td", { class: "r v-activation" }, fmt(row.d.sum, 4)),
+          el("td", { class: "r" }, fmt(row.d.weights.reduce(function (a, b) { return a + b; }, 0), 4))
+        ]));
+      });
+      tb.appendChild(body);
+      cmp.appendChild(tb);
+      cmp.appendChild(el("div", { class: "hint" },
+        "Left column swings by " + fmt(rows[NE - 1].d.sum / rows[0].d.sum, 2) + "× across k for this " +
+        "token. Right column does not move at all. That is the whole argument."));
+    }
+    kslider.addEventListener("input", draw);
+    renormSync = function (t) { curT = t; draw(); };
+    draw();
+  })();
+
+  /* ==================================================================== */
+  /*  4 · GROUPING                                                        */
+  /* ==================================================================== */
+  (function () {
+    const host = document.querySelector("#groupBody");
+
+    host.appendChild(el("p", { html:
+      "The obvious implementation loops over tokens: for each token, for each of its " + K +
+      " experts, run a " + DM + "-element vector through two matrices. That is " + (NT * K) +
+      " matrix-<i>vector</i> products, each of which reads a whole expert's weights to do almost no " +
+      "arithmetic. It is correct and it is unusably slow." }));
+    host.appendChild(el("p", { html:
+      "The real implementation inverts the loop. <b>Group the tokens by expert</b>, so expert e gets " +
+      "a dense <code>n<sub>e</sub>×" + DM + "</code> block, run <i>one</i> matmul per expert over " +
+      "its whole group, then scatter the rows back to the tokens they came from and blend by gate " +
+      "weight. " + NE + " GEMMs instead of " + (NT * K) + " GEMVs. Same arithmetic, same answer, " +
+      "different shape." }));
+
+    const stagebar = el("div", { class: "flowrow" });
+    const STAGES = ["tokens", "assign", "gather", "one GEMM per expert", "scatter + blend", "output"];
+    const stagetags = STAGES.map(function (s) {
+      const t = el("span", { class: "stagetag" }, s);
+      stagebar.appendChild(t);
+      return t;
+    });
+    host.appendChild(stagebar);
+
+    const board = el("div");
+    host.appendChild(board);
+    const ctl = el("div");
+    host.appendChild(ctl);
+
+    const outHost = el("div");
+    host.appendChild(outHost);
+
+    /* the six token rows, always visible */
+    const tokStrip = el("div", { class: "stage" });
+
+    function expertBox(e, stage) {
+      const p = PE[e];
+      const box = el("div", { class: "ebox" + (p.n_tokens ? "" : " off") +
+        (stage >= 3 && p.n_tokens ? " busy" : "") });
+      box.appendChild(el("div", { class: "eh" }, [
+        el("span", { class: "v-weight" }, "Expert " + e),
+        el("span", { class: "muted", style: { fontSize: ".68rem" } },
+          p.n_tokens + " / " + (NT * K) + " slots")
+      ]));
+      box.appendChild(el("div", { class: "es" },
+        "W_up " + DM + "×" + DF + " · W_down " + DF + "×" + DM +
+        " · " + ACC.toy.params_per_expert + " params"));
+
+      if (stage >= 2 && p.n_tokens) {
+        box.appendChild(el("div", { class: "tokchips" }, p.tokens.map(function (t) {
+          return el("span", { class: "tchip" }, tokLabel(t));
+        })));
+      } else if (stage === 1 && p.n_tokens) {
+        box.appendChild(el("div", { class: "tokchips" }, p.tokens.map(function (t) {
+          return el("span", { class: "tchip ghost" }, tokLabel(t));
+        })));
+      }
+
+      if (stage >= 2 && p.n_tokens) {
+        box.appendChild(el("div", { class: "scrollx" }, NN.tensor({
+          name: "X_" + e, shape: [p.n_tokens, DM], values: p.input, cls: "activation", digits: 3,
+          note: "gathered"
+        })));
+      }
+      if (stage >= 3 && p.n_tokens) {
+        box.appendChild(NN.formula({
+          rule: "Y_" + e + " = gelu(X_" + e + " W_up<sup>(" + e + ")</sup>) W_down<sup>(" + e + ")</sup>",
+          sub: "(" + p.n_tokens + "×" + DM + ")(" + DM + "×" + DF + ") → (" +
+               p.n_tokens + "×" + DF + ")(" + DF + "×" + DM + ")",
+          result: p.n_tokens + "×" + DM, cls: "weight"
+        }));
+        box.appendChild(el("div", { class: "scrollx" }, NN.tensor({
+          name: "Y_" + e, shape: [p.n_tokens, DM], values: p.output, cls: "activation", digits: 3,
+          signed: true, note: "expert out"
+        })));
+      }
+      if (stage >= 4 && p.n_tokens) {
+        box.appendChild(el("div", { class: "hint" },
+          "scatter back with gate weights " +
+          p.weights.map(function (w, i) { return "t" + p.tokens[i] + ":" + fmt(w, 3); }).join("  ")));
+      }
+      if (!p.n_tokens) {
+        box.appendChild(el("div", { class: "hint" },
+          "no token chose this expert in this batch — its weights sit in memory unread"));
+      }
+      return box;
+    }
+
+    function paint(stage) {
+      stagetags.forEach(function (t, i) { t.classList.toggle("on", i <= stage); });
+
+      board.innerHTML = "";
+      /* row of tokens */
+      tokStrip.innerHTML = "";
+      board.appendChild(el("div", { class: "panel", style: { marginBottom: "12px" } }, [
+        el("h4", {}, "the " + NT + " tokens (activation block, " + NT + "×" + DM + ")"),
+        el("div", { class: "scrollx" }, NN.tensor({
+          name: "X", shape: [NT, DM], values: X, cls: "activation", digits: 3
+        })),
+        stage >= 1 ? el("div", { class: "tokchips" }, RT.map(function (r) {
+          return el("span", { class: "tchip" },
+            tokLabel(r.token) + " → " + r.chosen.map(function (e) { return "E" + e; }).join(","));
+        })) : el("div", { class: "hint" }, "before the router runs, every token looks the same to the layer")
+      ]));
+
+      const grid = el("div", { class: "stage" });
+      for (let e = 0; e < NE; e++) grid.appendChild(expertBox(e, stage));
+      board.appendChild(grid);
+
+      outHost.innerHTML = "";
+      if (stage >= 4) {
+        const r0 = RT[0];
+        const e0 = r0.chosen[0], e1 = r0.chosen[1];
+        const i0 = PE[e0].tokens.indexOf(0), i1 = PE[e1].tokens.indexOf(0);
+        outHost.appendChild(el("h3", {}, "One row of the blend, in full"));
+        outHost.appendChild(NN.formula({
+          rule: "y[t0] = w<sub>0</sub>·Y_" + e0 + "[" + i0 + "] + w<sub>1</sub>·Y_" + e1 + "[" + i1 + "]",
+          sub: fmt(r0.weights[0], 4) + "·[" + PE[e0].output[i0].map(function (v) { return fmt(v, 4); }).join(", ") + "] + " +
+               fmt(r0.weights[1], 4) + "·[" + PE[e1].output[i1].map(function (v) { return fmt(v, 4); }).join(", ") + "]",
+          result: "[" + M.grouped_output[0].map(function (v) { return fmt(v, 4); }).join(", ") + "]",
+          cls: "activation"
+        }));
+      }
+      if (stage >= 5) {
+        outHost.appendChild(el("div", { class: "scrollx" }, NN.tensor({
+          name: "MoE output", shape: [NT, DM], values: M.grouped_output, cls: "activation",
+          digits: 4, signed: true, note: "one row per token, back in sequence order"
+        })));
+        outHost.appendChild(el("div", { class: "hint" },
+          "The scatter is the gather run backwards. Every token gets exactly " + K +
+          " contributions, blended by weights that sum to 1."));
+      }
+    }
+
+    const st = new NN.Stepper({
+      mount: ctl, count: STAGES.length,
+      labels: [
+        "the batch arrives — " + NT + " tokens, nothing decided yet",
+        "the router assigns " + (NT * K) + " (token, expert) pairs",
+        "gather: each expert collects its rows into one contiguous block",
+        "compute: " + NE + " matmuls, one per expert, over whole groups",
+        "scatter: rows go home, blended by their gate weights",
+        "the " + NT + "×" + DM + " output — identical to the per-token loop"
+      ],
+      onStep: paint, autoplayMs: 1900
+    });
+    void st;
+
+    host.appendChild(NN.callout("key", "THE GROUPS ARE RAGGED, AND THAT IS THE PROBLEM",
+      "<p>Look at the group sizes: " + PE.map(function (p) { return p.n_tokens; }).join(", ") +
+      " for " + NE + " experts over " + (NT * K) + " slots. They are not equal and nothing forces " +
+      "them to be. A GEMM whose <code>m</code> dimension is decided by a softmax at run time cannot " +
+      "have its buffers sized ahead of time, cannot be shape-specialised by the compiler, and does " +
+      "not divide evenly across GPUs. Pages 33 and 34 are both, ultimately, about this one fact.</p>"));
+  })();
+
+  /* ==================================================================== */
+  /*  5 · INDEPENDENT VERIFICATION                                        */
+  /* ==================================================================== */
+  (function () {
+    const host = document.querySelector("#proofBody");
+
+    host.appendChild(el("p", { html:
+      "<code>moe_toy.py</code> computes the layer twice and reports " +
+      "<code>max_abs_err</code> = <b>" + M.equivalence.max_abs_err.toExponential(3) + "</b>. " +
+      "Taking that on trust would be the wrong habit, so the browser recomputes both paths from " +
+      "scratch — starting only from <code>MOE.input.X</code>, <code>MOE.input.W_gate</code> and " +
+      "<code>MOE.input.experts</code> — and compares four ways." }));
+
+    /* --- re-derive routing --- */
+    const table = [];
+    for (let t = 0; t < NT; t++) {
+      const logits = matvec(X[t], WG);
+      const probs = softmax(logits);
+      const d = topk(probs, K);
+      table.push({ chosen: d.chosen, weights: d.weights, probs: probs });
+    }
+
+    /* --- path A: per-token reference loop --- */
+    const refJS = [];
+    for (let t = 0; t < NT; t++) {
+      const acc = new Array(DM).fill(0);
+      table[t].chosen.forEach(function (e, k) {
+        const y = expertForward(X[t], e);
+        for (let d = 0; d < DM; d++) acc[d] += table[t].weights[k] * y[d];
+      });
+      refJS.push(acc);
+    }
+
+    /* --- path B: grouped, one matmul per expert --- */
+    const groups = [];
+    for (let e = 0; e < NE; e++) groups.push([]);
+    for (let t = 0; t < NT; t++)
+      table[t].chosen.forEach(function (e, k) {
+        groups[e].push({ token: t, weight: table[t].weights[k] });
+      });
+    const grpJS = [];
+    for (let t = 0; t < NT; t++) grpJS.push(new Array(DM).fill(0));
+    const groupSizes = [];
+    for (let e = 0; e < NE; e++) {
+      const g = groups[e];
+      groupSizes.push(g.length);
+      if (!g.length) continue;
+      const Xe = g.map(function (it) { return X[it.token]; });
+      const U = mm(Xe, EXP[e].W_up);
+      const G = U.map(function (r) { return r.map(gelu); });
+      const Y = mm(G, EXP[e].W_down);
+      g.forEach(function (it, i) {
+        for (let d = 0; d < DM; d++) grpJS[it.token][d] += it.weight * Y[i][d];
+      });
+    }
+
+    const checks = [
+      { k: "browser reference loop  vs  browser grouped", v: maxdiff(refJS, grpJS) },
+      { k: "browser grouped  vs  MOE.grouped_output", v: maxdiff(grpJS, M.grouped_output) },
+      { k: "browser reference  vs  MOE.reference_output", v: maxdiff(refJS, M.reference_output) },
+      { k: "MOE.reference_output  vs  MOE.grouped_output", v: maxdiff(M.reference_output, M.grouped_output) }
+    ];
+    const TOL = 1e-12;
+    const worst = Math.max.apply(null, checks.map(function (c) { return c.v; }));
+
+    const tb = el("table", { class: "vtable" });
+    tb.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "comparison"), el("th", { class: "r" }, "max |Δ|"), el("th", { class: "r" }, "verdict")
+    ])));
+    const body = el("tbody");
+    checks.forEach(function (c) {
+      body.appendChild(el("tr", {}, [
+        el("td", {}, c.k),
+        el("td", { class: "r" }, c.v === 0 ? "0" : c.v.toExponential(3)),
+        el("td", { class: "r " + (c.v < TOL ? "ok" : "bad") }, c.v < TOL ? "✓ identical" : "✗ differs")
+      ]));
+    });
+    tb.appendChild(body);
+    host.appendChild(tb);
+
+    host.appendChild(el("div", { class: "verdict" }, [
+      el("span", { class: "big" }, worst < TOL ? "✓ identical" : "✗ mismatch"),
+      el("span", { class: "det" },
+        "worst disagreement " + (worst === 0 ? "0" : worst.toExponential(3)) +
+        " over " + (NT * DM) + " output values, tolerance " + TOL.toExponential(0)),
+      el("span", { class: "det" }, "group sizes recomputed in the browser: [" + groupSizes.join(", ") + "]")
+    ]));
+
+    host.appendChild(el("div", { class: "hint" },
+      "The browser also re-derives the routing: group sizes [" + groupSizes.join(", ") +
+      "] against MOE.per_expert [" + PE.map(function (p) { return p.n_tokens; }).join(", ") + "]."));
+
+    host.appendChild(NN.callout("why", "WHAT THE PROOF IS FOR", "<p>" + M.equivalence.claim + "</p>" +
+      "<p>This matters because every later optimisation — expert parallelism, capacity limits, " +
+      "fused grouped GEMMs — is justified by the claim that grouping is a pure rearrangement. " +
+      "If it were an approximation, none of the rest would be safe.</p>"));
+  })();
+
+  /* ==================================================================== */
+  /*  6 · THE MEMORY BILL                                                 */
+  /* ==================================================================== */
+  (function () {
+    const host = document.querySelector("#costBody");
+    const toy = ACC.toy;
+
+    host.appendChild(el("p", { html:
+      "Sparsity is a statement about arithmetic, not about storage. Every expert must be resident " +
+      "in some GPU's HBM before the router runs, because the router's answer is not known until the " +
+      "token arrives. In the toy, " + toy.params_total + " parameters are held and " +
+      toy.params_active_per_token + " are read per token." }));
+
+    const bytesTotal = toy.params_total * FP32;
+    const bytesActive = toy.params_active_per_token * FP32;
+    const strip = el("div", { class: "residbar" }, [
+      el("div", { class: "seg touched", style: { flexGrow: String(bytesActive) } },
+        NN.bytes(bytesActive)),
+      el("div", { class: "seg idle", style: { flexGrow: String(bytesTotal - bytesActive) } },
+        NN.bytes(bytesTotal - bytesActive))
+    ]);
+    host.appendChild(strip);
+    host.appendChild(el("div", { class: "reslegend" }, [
+      el("span", {}, [el("i", { class: "sw touched" }), "read for this token — " +
+        toy.params_active_per_token + " params, " + NN.bytes(bytesActive) + " fp32"]),
+      el("span", {}, [el("i", { class: "sw idle" }), "resident, untouched — " +
+        (toy.params_total - toy.params_active_per_token) + " params, " +
+        NN.bytes(bytesTotal - bytesActive) + " fp32 (hatched, not a fifth class)"])
+    ]));
+
+    /* which experts sat idle in this batch */
+    const idle = PE.filter(function (p) { return p.n_tokens === 0; });
+    const quiet = PE.slice().sort(function (a, b) { return a.n_tokens - b.n_tokens; })[0];
+    host.appendChild(el("p", { html:
+      "Across the whole batch the quietest expert is <b>E" + quiet.expert + "</b>, chosen by " +
+      quiet.n_tokens + " of " + (NT * K) + " token-slots" +
+      (idle.length ? ", and " + idle.length + " expert(s) were never chosen at all" : "") +
+      ". Its " + toy.params_per_expert + " parameters occupied memory for the entire step anyway. " +
+      "There is no version of this where you only allocate the experts you turn out to need." }));
+
+    /* real scale */
+    const dsv = ACC.real.filter(function (r) { return r.n_experts === Math.max.apply(null, ACC.real.map(function (q) { return q.n_experts; })); })[0];
+    const heldB = dsv.mlp_params_total * BF16;
+    const actB = dsv.mlp_params_active * BF16;
+    const h100 = INFER && INFER.gpus ? INFER.gpus.filter(function (g) { return /H100/.test(g.name); })[0] : null;
+    const capGiB = 80;                       /* the "80GB" in the H100's own name */
+    const capBytes = capGiB * Math.pow(2, 30);
+
+    host.appendChild(el("h3", {}, "At real scale"));
+    host.appendChild(NN.tiles([
+      { k: dsv.name + " · MLP weights held", v: NN.bytes(heldB), cls: "weight",
+        s: NN.count(dsv.mlp_params_total) + " params in bf16" },
+      { k: "read per token", v: NN.bytes(actB), cls: "weight",
+        s: NN.count(dsv.mlp_params_active) + " params, " + fmt(dsv.sparsity, 2) + "× less" },
+      { k: h100 ? h100.name + "s just to hold it" : "GPUs to hold it",
+        v: String(Math.ceil(heldB / capBytes)),
+        s: "at " + NN.gibytes(capBytes) + " = " + NN.bytes(capBytes) + " each, weights only" },
+      { k: "if it were dense", v: NN.bytes(actB), cls: "weight",
+        s: "same arithmetic, " + fmt(dsv.sparsity, 2) + "× less memory" }
+    ]));
+    host.appendChild(el("div", { class: "hint" },
+      "Capacity in GiB (binary), model size in GB (decimal) — an “80 GB” H100 holds " +
+      NN.gibytes(capBytes) + ", which is " + NN.bytes(capBytes) + " decimal. MLP weights only; " +
+      "attention, embeddings, optimizer state and KV cache are all extra."));
+
+    const l70 = INFER && INFER.models
+      ? INFER.models.filter(function (m) { return /70B/.test(m.name); })[0] : null;
+    host.appendChild(NN.callout("mem", "SPARSITY BUYS CAPACITY, NOT MEMORY",
+      "<p><a href=\"15-scaling.html\">Page 15</a> counted a dense model — " +
+      (l70 ? l70.name + ", " + NN.count(l70.params) + " parameters — at " + NN.bytes(l70.params * BF16)
+           : "70B class") + " of bf16 weights and concluded it does not fit on one GPU. " +
+      "An MoE with the same per-token cost is <b>" + fmt(dsv.sparsity, 2) + "× worse</b> on that " +
+      "axis: " + NN.bytes(heldB) + " for the MLPs alone. Everything page 15 forced you into — " +
+      "sharding, ZeRO, tensor parallelism — an MoE forces harder, and adds one new axis of its own.</p>" +
+      "<p>The trade is real, not a swindle: you get " + NN.count(dsv.mlp_params_total) +
+      " parameters' worth of capacity at " + NN.count(dsv.mlp_params_active) +
+      " parameters' worth of arithmetic per token. You simply pay for it in HBM rather than in FLOPs, " +
+      "and HBM is the resource decode is already short of. That is <a href=\"34-moe-inference.html\">page 34</a>.</p>"));
+
+    host.appendChild(el("p", { html:
+      "Two consequences follow, and each gets its own page. Training: the experts do not fit on one " +
+      "GPU, so they are split across GPUs, and tokens must physically travel to reach them — " +
+      "<a href=\"33-moe-training.html\">page 33</a>, where the all-to-all this site has taught but " +
+      "never used finally appears. Inference: a decode batch is small and scatters across experts, " +
+      "so you read whole expert matrices to do almost no arithmetic — " +
+      "<a href=\"34-moe-inference.html\">page 34</a>." }));
+  })();
+
+  NN.page("moe");
+})();
+</script>
+</body>
+</html>

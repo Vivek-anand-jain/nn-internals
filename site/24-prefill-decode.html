@@ -1,0 +1,1018 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 24 Prefill vs Decode</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* page-local layout only; every colour comes from design.css custom properties */
+.ctlgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 13px; margin: 16px 0; }
+.panel { background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 8px; padding: 12px 14px; }
+.panel h4 { margin: 0 0 10px; font-family: var(--mono); font-size: .7rem; letter-spacing: .13em;
+            text-transform: uppercase; color: var(--ink-muted); font-weight: 700; }
+.fld { margin: 0 0 11px; } .fld:last-child { margin-bottom: 0; }
+.fld > label { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+               font-family: var(--mono); font-size: .74rem; color: var(--ink-2); margin-bottom: 4px; }
+.fld > label b { color: var(--ink); font-weight: 700; }
+.fld select, .fld input[type="range"] { width: 100%; }
+.fld select { background: var(--surface-3); color: var(--ink); border: 1px solid var(--hairline);
+              border-radius: 6px; padding: 5px 7px; font-family: var(--mono); font-size: .8rem; }
+.fld input[type="range"] { accent-color: var(--accent); }
+.hint { font-size: .68rem; color: var(--ink-muted); font-family: var(--mono); line-height: 1.5; }
+
+.verdict { border-radius: 8px; padding: 13px 17px; margin: 15px 0; border: 1px solid var(--hairline);
+           background: var(--surface-2); display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 22px; }
+.verdict .big { font-size: 1.5rem; font-weight: 800; letter-spacing: -.02em; line-height: 1.15; }
+.verdict .det { font-family: var(--mono); font-size: .82rem; color: var(--ink-2); }
+.verdict.ok  { border-left: 4px solid var(--good); }      .verdict.ok .big  { color: var(--good); }
+.verdict.bad { border-left: 4px solid var(--critical); }  .verdict.bad .big { color: var(--critical); }
+
+.arith { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .78rem;
+         font-variant-numeric: tabular-nums; margin: 6px 0 0; }
+.arith td, .arith th { padding: 5px 8px; border-bottom: 1px solid var(--hairline-2); text-align: left; }
+.arith th { font-size: .64rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-muted); }
+.arith td.r, .arith th.r { text-align: right; white-space: nowrap; }
+.arith td.op { color: var(--ink-muted); }
+.arith tr.sum td { border-top: 1px solid var(--hairline); border-bottom: none; font-weight: 700;
+                   color: var(--ink); padding-top: 8px; }
+
+/* ---- token strip ---- */
+.tokrow { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin: 10px 0 4px; }
+.tok { font-family: var(--mono); font-size: .78rem; padding: 4px 9px; border-radius: 6px;
+       border: 1px solid var(--hairline); background: var(--surface-2); color: var(--ink-2);
+       transition: background .3s, color .3s, border-color .3s; }
+.tok.fresh { background: var(--activation-w); color: var(--activation); border-color: var(--activation); font-weight: 700; }
+.tok.ghost { border-style: dashed; opacity: .75; }
+.tok .p { color: var(--ink-muted); font-size: .64rem; margin-left: 5px; }
+
+/* ---- shape diagram ---- */
+.shapewrap { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 14px 0 6px; }
+.matcol { display: flex; flex-direction: column; align-items: flex-start; }
+.matlbl { font-family: var(--mono); font-size: .68rem; color: var(--ink-muted); margin-bottom: 5px; white-space: nowrap; }
+.matbox { display: flex; flex-direction: column; }
+.mrow { display: grid; gap: 2px; height: 18px; margin-bottom: 2px; overflow: hidden;
+        transition: height .35s cubic-bezier(.4,0,.2,1), opacity .3s, margin-bottom .35s; }
+.mrow.off { height: 0; margin-bottom: 0; opacity: 0; }
+.mcell { width: 18px; height: 18px; border-radius: 3px; }
+.mcell.a { background: var(--activation-w); border: 1px solid var(--activation); }
+.mcell.w { background: var(--weight-w); border: 1px solid var(--weight); }
+.opsym { font-family: var(--mono); font-size: 1.1rem; color: var(--ink-muted); }
+.shapecap { font-family: var(--mono); font-size: .8rem; color: var(--ink); margin-top: 6px; }
+.shapecap .kind { font-weight: 700; }
+
+/* ---- two-bar comparison ---- */
+.bar2 { margin: 10px 0 0; }
+.bar2 .row { margin: 7px 0; }
+.bar2 .lbl { display: flex; justify-content: space-between; font-family: var(--mono);
+             font-size: .74rem; color: var(--ink-2); margin-bottom: 3px; }
+.bar2 .track { height: 14px; background: var(--surface-3); border-radius: 4px; overflow: hidden; }
+.bar2 .fill { height: 100%; border-radius: 0 4px 4px 0; transition: width .4s cubic-bezier(.4,0,.2,1); }
+
+/* ---- probability strip ---- */
+.pstrip { display: flex; gap: 3px; align-items: flex-end; margin-top: 8px; }
+.pbar { flex: 1; height: 62px; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; }
+.pbar .b { width: 100%; background: var(--accent); opacity: .4; border-radius: 3px 3px 0 0; transition: height .35s; }
+.pbar.win .b { background: var(--activation); opacity: 1; }
+.pbar .t { font-family: var(--mono); font-size: .6rem; color: var(--ink-muted); margin-top: 3px; white-space: nowrap; }
+.pbar.win .t { color: var(--activation); font-weight: 700; }
+
+/* ---- roofline ---- */
+.roofcard { background: var(--surface-1); border: 1px solid var(--hairline); border-radius: 10px; padding: 8px 10px 4px; }
+.roof text { fill: var(--ink-muted); font-family: var(--mono); font-size: 11px; }
+.roof text.strong { fill: var(--ink); font-weight: 700; }
+.roof .gl { stroke: var(--grid); stroke-width: 1; }
+.roof .ax { stroke: var(--hairline); stroke-width: 1.2; }
+.legrow { display: flex; flex-wrap: wrap; gap: 8px 16px; font-family: var(--mono); font-size: .74rem;
+          color: var(--ink-2); margin: 8px 2px 2px; align-items: center; }
+.legrow .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+
+/* ---- forward map ---- */
+.maplist { list-style: none; padding: 0; margin: 14px 0 0; }
+.maplist li { border-top: 1px solid var(--hairline-2); padding: 12px 0; display: grid;
+              grid-template-columns: 130px 1fr; gap: 4px 18px; }
+.maplist li:last-child { border-bottom: 1px solid var(--hairline-2); }
+.maplist .pg { font-family: var(--mono); font-size: .78rem; font-weight: 700; }
+.maplist .bd { color: var(--ink-2); line-height: 1.6; }
+
+.scrollx { overflow-x: auto; }
+@media (max-width: 860px) {
+  .verdict .big { font-size: 1.25rem; }
+  .maplist li { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 24</div>
+    <h1>Prefill vs Decode: Two Regimes, One Number Apart</h1>
+    <p class="lede">Training had one organising idea: four classes of tensor, and where the bytes
+      go. Inference has a different one, and everything in Part IV is an attack on it:
+      <strong>arithmetic intensity</strong> — FLOPs performed per byte moved out of memory.
+      Generating text runs the same weights in two completely different shapes. Prefill puts the
+      whole prompt through at once and is a big matrix multiply. Decode puts <em>one token</em>
+      through and is a matrix–vector product. Same weights, same bytes read, three orders of
+      magnitude less arithmetic per byte. This page measures that gap and puts both regimes on a
+      roofline.</p>
+    <noscript><p class="callout warn">This page computes every number in the browser from
+      <code>assets/data/infer.js</code>. With JavaScript disabled you will see an empty shell.</p></noscript>
+  </div>
+
+  <section class="block" id="gen">
+    <h2>1 · One generation, watched</h2>
+    <div id="genBody"></div>
+  </section>
+
+  <section class="block" id="intensity">
+    <h2>2 · Arithmetic intensity, and the roofline</h2>
+    <div id="intBody"></div>
+  </section>
+
+  <section class="block" id="bw">
+    <h2>3 · Why decode is bandwidth-bound, mechanically</h2>
+    <div id="bwBody"></div>
+  </section>
+
+  <section class="block" id="downstream">
+    <h2>4 · What this one number predicts about the next ten pages</h2>
+    <div id="mapBody"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/lm.js"></script>
+<script src="../assets/data/infer.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T  = NN.T;
+  const I  = window.INFER;
+  const el = NN.el;
+  const X = "×", ARR = "→", APPROX = "≈";
+
+  /* ======================================================================
+     0 · DERIVED HELPERS
+     Nothing below types a model number. Everything is read out of INFER
+     (generated by code/inference_toy.py) or derived from it in JS.
+     ====================================================================== */
+
+  const META   = I.meta;
+  const MODELS = I.models;
+  const GPUS   = I.gpus;
+  const ROOF   = I.roofline;
+  const TOKSTR = META.token_strings;
+
+  function gb(b, d) { return (b / 1e9).toFixed(d === undefined ? 2 : d) + " GB"; }
+  function tb(b, d) { return (b / 1e12).toFixed(d === undefined ? 2 : d) + " TB"; }
+  function tflops(f) { return (f / 1e12).toFixed(f / 1e12 < 10 ? 2 : 0) + " TFLOP/s"; }
+  function gflop(f) { return (f / 1e9).toFixed(1) + " GFLOP"; }
+  function pct(x, d) { return (x * 100).toFixed(d === undefined ? 2 : d) + "%"; }
+  function secs(s) {
+    if (s >= 1) return NN.fmt(s, 2) + " s";
+    if (s >= 1e-3) return NN.fmt(s * 1e3, s * 1e3 < 10 ? 2 : 1) + " ms";
+    return NN.fmt(s * 1e6, 1) + " µs";
+  }
+  function pname(p) {
+    const b = p / 1e9;
+    return NN.fmt(b, Math.abs(b - Math.round(b)) < 1e-9 ? 0 : 1) + "B";
+  }
+  function pageOf(id) { return NN.PAGES.filter(function (p) { return p.id === id; })[0]; }
+  function plink(id, label) {
+    const p = pageOf(id);
+    return '<a href="' + p.file + '">' + (label || (p.n + " " + p.title)) + "</a>";
+  }
+
+  /* ----------------------------------------------------------------------
+     The cost model, ported from code/inference_toy.py so the page can move
+     the sliders. It is checked against the stored INFER numbers below, and
+     the check is printed on the page -- if the generator changes and this
+     port does not, the page says so instead of lying.
+     ---------------------------------------------------------------------- */
+  function costModel(nParams, nLayers, nKvHeads, dHead, seq, batch, wB, kvB) {
+    wB = wB === undefined ? 2 : wB;
+    kvB = kvB === undefined ? 2 : kvB;
+    const kvPer = 2 * nLayers * batch * seq * nKvHeads * dHead * kvB;
+    const pfFlops = 2 * nParams * seq * batch +
+                    2 * 2 * nLayers * batch * nKvHeads * dHead * seq * seq;
+    const dcFlops = 2 * nParams * 1 * batch +
+                    2 * 2 * nLayers * batch * nKvHeads * dHead * seq;
+    const wBytes = nParams * wB;
+    return {
+      weight_bytes: wBytes, kv_bytes: kvPer,
+      prefill: { flops: pfFlops, bytes: wBytes + kvPer, intensity: pfFlops / (wBytes + kvPer) },
+      decode:  { flops: dcFlops, bytes: wBytes + kvPer, intensity: dcFlops / (wBytes + kvPer) }
+    };
+  }
+  function modelCost(m, seq, batch) {
+    return costModel(m.params, m.n_layers, m.n_kv_heads || m.n_heads,
+                     m.d_model / m.n_heads, seq === undefined ? m.seq : seq, batch);
+  }
+
+  /* self-check: the JS port must reproduce every stored roofline intensity */
+  const CHECK = (function () {
+    let worst = 0, n = 0;
+    ROOF.forEach(function (g) {
+      g.rows.forEach(function (r) {
+        const m = MODELS.filter(function (mm) { return mm.name === r.model; })[0];
+        const c = modelCost(m, m.seq, r.batch);
+        worst = Math.max(worst,
+          Math.abs(Math.round(c.prefill.intensity * 100) / 100 - r.prefill_intensity),
+          Math.abs(Math.round(c.decode.intensity * 1000) / 1000 - r.decode_intensity));
+        n += 2;
+      });
+    });
+    /* and the toy, whose parameter count is counted out of INFER.params */
+    let toyP = 0;
+    (function count(v) {
+      if (typeof v === "number") { toyP++; return; }
+      if (Array.isArray(v)) v.forEach(count);
+    })(Object.keys(I.params).map(function (k) { return I.params[k]; }));
+    const toy = costModel(toyP, META.n_layers, META.n_kv_heads, META.d_head,
+                          META.prompt.length + META.n_new, 1);
+    const toyOk = toy.prefill.flops === I.cost_model.toy.prefill.flops &&
+                  toy.prefill.bytes === I.cost_model.toy.prefill.bytes &&
+                  toy.decode.flops === I.cost_model.toy.decode.flops &&
+                  toy.decode.bytes === I.cost_model.toy.decode.bytes;
+    return { worst: worst, n: n, toyParams: toyP, toy: toy, toyOk: toyOk };
+  })();
+
+  /* ======================================================================
+     1 · GENERATION, WATCHED
+     ====================================================================== */
+  (function buildGen() {
+    const host = NN.$("#genBody");
+    const G = I.generation;
+    const steps = G.steps;
+    const dM = META.d_model;
+    const maxRows = Math.max.apply(null, steps.map(function (s) { return s.n_tokens_processed; }));
+
+    host.appendChild(el("p", { html:
+      "The toy here is a real " + META.n_layers + "-layer transformer with d_model " + dM +
+      ", " + META.n_heads + " heads and a vocabulary of " + META.vocab +
+      ", run autoregressively by <code>code/inference_toy.py</code>. It is small enough that the "
+      + "whole KV cache fits on the screen (" + plink("kvcache", "page 25") + " prints it), and the "
+      + "shape argument it makes is exactly the shape argument a " + pname(MODELS[1].params) +
+      " model makes." }));
+
+    host.appendChild(el("p", { html:
+      "Step through it. The prompt is " + META.prompt.length + " tokens; " + META.n_new +
+      " more get generated. Watch two things: the number of rows entering the matrix multiply, "
+      + "and the weight block, which never changes." }));
+
+    /* ---- token strip ---- */
+    const tokRow = el("div", { class: "tokrow" });
+    const stepNote = el("p", { class: "small", style: { color: "var(--ink-2)", minHeight: "3em" } });
+
+    /* ---- shape diagram ---- */
+    function matBox(rows, cols, cls, kind) {
+      const box = el("div", { class: "matbox" });
+      const rEls = [];
+      for (let r = 0; r < rows; r++) {
+        const row = el("div", { class: "mrow", style: { gridTemplateColumns: "repeat(" + cols + ", 18px)" } });
+        for (let c = 0; c < cols; c++) row.appendChild(el("div", { class: "mcell " + kind }));
+        box.appendChild(row); rEls.push(row);
+      }
+      box.rows = rEls;
+      box.setRows = function (n) {
+        rEls.forEach(function (r, i) { r.classList.toggle("off", i >= n); });
+      };
+      return box;
+    }
+
+    const boxX = matBox(maxRows, dM, "act", "a");
+    const boxW = matBox(dM, dM, "wgt", "w");
+    const boxY = matBox(maxRows, dM, "act", "a");
+    const lblX = el("div", { class: "matlbl" });
+    const lblY = el("div", { class: "matlbl" });
+
+    const shape = el("div", { class: "shapewrap" }, [
+      el("div", { class: "matcol" }, [lblX, boxX]),
+      el("div", { class: "opsym" }, X),
+      el("div", { class: "matcol" }, [
+        el("div", { class: "matlbl" }, "W  (" + dM + X + dM + ")  weight"), boxW]),
+      el("div", { class: "opsym" }, "="),
+      el("div", { class: "matcol" }, [lblY, boxY])
+    ]);
+    const cap = el("div", { class: "shapecap" });
+
+    /* ---- work vs bytes bars ---- */
+    function barRow(label, cls) {
+      const val = el("span", { class: "muted" });
+      const fill = el("div", { class: "fill", style: { background: cls, width: "0%" } });
+      const row = el("div", { class: "row" }, [
+        el("div", { class: "lbl" }, [el("span", {}, label), val]),
+        el("div", { class: "track" }, [fill])
+      ]);
+      row.set = function (w, txt) { fill.style.width = w + "%"; val.textContent = txt; };
+      return row;
+    }
+    const bFlops = barRow("arithmetic this step", "var(--activation)");
+    const bBytes = barRow("bytes read from memory this step", "var(--weight)");
+    const bars = el("div", { class: "bar2" }, [bFlops, bBytes]);
+
+    /* ---- probability strip ---- */
+    const pstrip = el("div", { class: "pstrip" });
+    const pbars = [];
+    for (let v = 0; v < META.vocab; v++) {
+      const b = el("div", { class: "b", style: { height: "0%" } });
+      const pb = el("div", { class: "pbar" }, [b, el("div", { class: "t" }, TOKSTR[v])]);
+      pb.b = b; pstrip.appendChild(pb); pbars.push(pb);
+    }
+
+    const tiles = el("div");
+    const stepMount = el("div");
+
+    host.appendChild(el("div", { class: "grid2" }, [
+      el("div", {}, [
+        el("h4", { style: { fontFamily: "var(--mono)", fontSize: ".7rem", letterSpacing: ".13em",
+                            textTransform: "uppercase", color: "var(--ink-muted)", margin: "0 0 4px" } },
+          "sequence so far"),
+        tokRow, stepNote, pstrip,
+        el("div", { class: "hint", style: { marginTop: "6px" } },
+          "next-token distribution over the " + META.vocab + "-token vocabulary — the same "
+          + "argmax-over-logits picture as page 08")
+      ]),
+      el("div", {}, [shape, cap, bars])
+    ]));
+    host.appendChild(tiles);
+    host.appendChild(stepMount);
+
+    const maxFlops = Math.max.apply(null, steps.map(function (s) { return stepCost(s).flops; }));
+    const maxBytes = Math.max.apply(null, steps.map(function (s) { return stepCost(s).bytes; }));
+
+    function stepCost(s) {
+      /* the toy's own cost, at the cache length this step ends with */
+      const c = costModel(CHECK.toyParams, META.n_layers, META.n_kv_heads, META.d_head,
+                          s.cache_len_after, 1);
+      return s.phase === "prefill"
+        ? { flops: c.prefill.flops, bytes: c.prefill.bytes, intensity: c.prefill.intensity }
+        : { flops: c.decode.flops, bytes: c.decode.bytes, intensity: c.decode.intensity };
+    }
+
+    function render(i) {
+      const s = steps[i];
+      const seq = I.generation.final_sequence.slice(0, s.cache_len_after);
+      const fresh = s.n_tokens_processed;
+
+      tokRow.innerHTML = "";
+      seq.forEach(function (t, k) {
+        tokRow.appendChild(el("span", {
+          class: "tok" + (k >= seq.length - fresh ? " fresh" : "")
+        }, TOKSTR[t]));
+      });
+      tokRow.appendChild(el("span", { class: "opsym", style: { fontSize: ".9rem" } }, ARR));
+      tokRow.appendChild(el("span", { class: "tok ghost" }, [
+        document.createTextNode(TOKSTR[s.chosen]),
+        el("span", { class: "p" }, "p " + NN.fmt(s.probs[s.chosen], 3))
+      ]));
+
+      stepNote.innerHTML = "<b>" + s.phase.toUpperCase() + "</b> — " + s.note;
+
+      boxX.setRows(fresh); boxY.setRows(fresh);
+      lblX.textContent = "X  (" + fresh + X + dM + ")  activations";
+      lblY.textContent = "Y  (" + fresh + X + dM + ")  activations";
+      cap.innerHTML = '<span class="kind">' + (fresh > 1 ? "GEMM" : "GEMV") + "</span> — " +
+        (fresh > 1
+          ? "matrix " + X + " matrix. " + fresh + " rows of work per weight fetch."
+          : "matrix " + X + " <em>vector</em>. One row of work per weight fetch.");
+
+      const c = stepCost(s);
+      bFlops.set(c.flops / maxFlops * 100, NN.count(c.flops) + " FLOP");
+      bBytes.set(c.bytes / maxBytes * 100, NN.count(c.bytes) + " B");
+
+      const pmax = Math.max.apply(null, s.probs);
+      pbars.forEach(function (pb, v) {
+        pb.b.style.height = (s.probs[v] / pmax * 100) + "%";
+        pb.classList.toggle("win", v === s.chosen);
+      });
+
+      tiles.innerHTML = "";
+      tiles.appendChild(NN.tiles([
+        { k: "regime", v: s.phase, cls: s.phase === "prefill" ? null : null },
+        { k: "tokens through the model", v: String(s.n_tokens_processed) },
+        { k: "KV cache rows after", v: String(s.cache_len_after), cls: "activation" },
+        { k: "arithmetic intensity", v: NN.fmt(c.intensity, 2),
+          s: "FLOP per byte", cls: s.phase === "prefill" ? "activation" : null }
+      ]));
+    }
+
+    new NN.Stepper({
+      mount: stepMount, count: steps.length,
+      labels: steps.map(function (s) {
+        return s.phase + " · " + s.n_tokens_processed + " token" +
+               (s.n_tokens_processed > 1 ? "s" : "") + " in";
+      }),
+      onStep: render, autoplayMs: 1800
+    });
+
+    host.appendChild(NN.callout("key", "THE SHAPE IS THE WHOLE STORY",
+      "Prefill hands the GPU a <b>" + META.prompt.length + X + META.d_model + "</b> block of " +
+      "activations to multiply by every weight matrix. Decode hands it a <b>1" + X + META.d_model +
+      "</b> row. The weight matrices are identical, so the bytes read out of memory are identical " +
+      "— " + NN.count(CHECK.toy.weight_bytes) + " B of weights either way in this toy. " +
+      "Only the numerator changed. A GEMM amortises a weight fetch over every row of the block; a " +
+      "GEMV amortises it over one. That ratio is arithmetic intensity, and on real hardware it is " +
+      "the difference between using the machine and waiting for it."));
+  })();
+
+  /* ======================================================================
+     2 · ARITHMETIC INTENSITY + THE ROOFLINE
+     ====================================================================== */
+  (function buildIntensity() {
+    const host = NN.$("#intBody");
+    const toy = I.cost_model.toy;
+
+    host.appendChild(el("p", { html:
+      "A GPU has two budgets and they are spent at completely different rates. It can perform " +
+      "some number of floating-point operations per second, and it can move some number of bytes " +
+      "per second between HBM and the compute units. Every kernel has a ratio that decides which " +
+      "budget runs out first." }));
+
+    host.appendChild(NN.formula({
+      rule: "arithmetic intensity  I  =  FLOPs performed  ÷  bytes moved from memory",
+      sub: "units: FLOP / byte"
+    }));
+
+    host.appendChild(el("p", { html:
+      "<code>" + I.cost_model.flops_note + "</code><br>" +
+      "<code>" + I.cost_model.bytes_note + "</code>" }));
+
+    host.appendChild(el("p", { html:
+      "On the toy above, over the full " + (META.prompt.length + META.n_new) + "-token sequence: " +
+      "prefill does " + NN.count(toy.prefill.flops) + " FLOP for " + NN.count(toy.prefill.bytes) +
+      " bytes moved, and decode does " + NN.count(toy.decode.flops) + " FLOP for the <em>same</em> " +
+      NN.count(toy.decode.bytes) + " bytes." }));
+
+    host.appendChild(NN.tiles([
+      { k: "prefill intensity (toy)", v: NN.fmt(toy.prefill.intensity, 2),
+        s: "FLOP/byte — = the " + (META.prompt.length + META.n_new) + " rows in the block",
+        cls: "activation" },
+      { k: "decode intensity (toy)", v: NN.fmt(toy.decode.intensity, 2),
+        s: "FLOP/byte — one row" },
+      { k: "bytes moved, either way", v: NN.count(toy.decode.bytes) + " B",
+        s: "identical: the weights do not care", cls: "weight" }
+    ]));
+
+    /* ---------------- the roofline ---------------- */
+    host.appendChild(el("h3", {}, "The roofline"));
+    host.appendChild(el("p", { html:
+      "Plot achievable FLOP/s against arithmetic intensity and the machine's ceiling is two " +
+      "straight lines. Below some intensity every byte you fetch is used for too little " +
+      "arithmetic, so the delivered rate is just <code>bandwidth " + X + " intensity</code> — a " +
+      "line of slope 1 on log-log axes. Above it, the fetches keep up and you flatten out at peak " +
+      "FLOP/s. The corner is the <b>ridge point</b>." }));
+
+    const h100 = ROOF.filter(function (g) { return /^H100/.test(g.gpu); })[0];
+    host.appendChild(NN.formula({
+      rule: "ridge  =  peak FLOP/s  ÷  memory bandwidth",
+      sub: tflops(h100.peak_tflops * 1e12) + "  ÷  " + tb(h100.hbm_bw_bytes_per_s) + "/s",
+      result: NN.fmt(h100.ridge_flops_per_byte, 2) + " FLOP/byte   (" + h100.gpu + ")"
+    }));
+
+    host.appendChild(el("p", { html:
+      "That number is a property of the <em>hardware alone</em>. Any kernel whose intensity sits " +
+      "left of the ridge is memory-bound: it cannot reach peak FLOPs, and no amount of better " +
+      "kernel code will change that, because the arithmetic finishes while the bytes are still " +
+      "arriving. The only fixes are to move fewer bytes or to do more arithmetic per byte." }));
+
+    /* controls */
+    const S = { model: 1, gpu: ROOF.map(function (g) { return g.gpu; }).indexOf(h100.gpu), batch: 0 };
+    const BATCHES = ROOF[0].rows.filter(function (r) { return r.model === MODELS[0].name; })
+                    .map(function (r) { return r.batch; });
+
+    const selModel = el("select");
+    MODELS.forEach(function (m, i) {
+      selModel.appendChild(el("option", { value: i, selected: i === S.model ? "selected" : null },
+        m.name + "  (" + pname(m.params) + ", seq " + NN.count(m.seq) + ")"));
+    });
+    const selGpu = el("select");
+    ROOF.forEach(function (g, i) {
+      selGpu.appendChild(el("option", { value: i, selected: i === S.gpu ? "selected" : null },
+        g.gpu + "  (" + g.peak_tflops + " TFLOP/s, " + tb(g.hbm_bw_bytes_per_s, 2) + "/s)"));
+    });
+    const rngBatch = el("input", { type: "range", min: 0, max: BATCHES.length - 1, step: 1, value: S.batch });
+    const batchOut = el("b");
+
+    const ctl = el("div", { class: "ctlgrid" }, [
+      el("div", { class: "panel" }, [
+        el("h4", {}, "model"),
+        el("div", { class: "fld" }, [selModel]),
+        el("div", { class: "hint", id: "mHint" })
+      ]),
+      el("div", { class: "panel" }, [
+        el("h4", {}, "gpu"),
+        el("div", { class: "fld" }, [selGpu]),
+        el("div", { class: "hint", id: "gHint" })
+      ]),
+      el("div", { class: "panel" }, [
+        el("h4", {}, "batch"),
+        el("div", { class: "fld" }, [
+          el("label", {}, [document.createTextNode("sequences in flight"), batchOut]), rngBatch]),
+        el("div", { class: "hint" },
+          "batch sizes as sampled by code/inference_toy.py: " + BATCHES.join(", "))
+      ])
+    ]);
+    host.appendChild(ctl);
+
+    const chartHost = el("div", { class: "roofcard" });
+    host.appendChild(chartHost);
+    host.appendChild(el("div", { class: "legrow" }, [
+      el("span", {}, [el("span", { class: "sw", style: { background: "var(--ink-2)" } }), "roof — what the machine can deliver"]),
+      el("span", {}, [el("span", { class: "sw", style: { background: "var(--accent)" } }), "▲ prefill"]),
+      el("span", {}, [el("span", { class: "sw", style: { background: "var(--critical)" } }), "● decode"]),
+      el("span", { class: "muted" }, "hover the plot for the roof value at any intensity")
+    ]));
+
+    const verdict = el("div");
+    host.appendChild(verdict);
+    const readout = el("div");
+    host.appendChild(readout);
+
+    /* fixed global domain so the axes never jump while you slide */
+    const DOM = (function () {
+      let iLo = Infinity, iHi = 0, yLo = Infinity, yHi = 0;
+      ROOF.forEach(function (g) {
+        g.rows.forEach(function (r) {
+          iLo = Math.min(iLo, r.decode_intensity, r.prefill_intensity);
+          iHi = Math.max(iHi, r.decode_intensity, r.prefill_intensity);
+        });
+        yHi = Math.max(yHi, g.peak_tflops * 1e12);
+      });
+      const xLo = Math.pow(10, Math.floor(Math.log10(iLo)) - 1);
+      const xHi = Math.pow(10, Math.ceil(Math.log10(iHi)));
+      ROOF.forEach(function (g) { yLo = Math.min(yLo, g.hbm_bw_bytes_per_s * xLo); });
+      return {
+        x0: Math.log10(xLo), x1: Math.log10(xHi),
+        y0: Math.floor(Math.log10(yLo)), y1: Math.ceil(Math.log10(yHi))
+      };
+    })();
+
+    const W = 900, H = 430, M = { t: 18, r: 22, b: 46, l: 94 };
+    const iw = W - M.l - M.r, ih = H - M.t - M.b;
+    const PX = function (i) { return M.l + (Math.log10(i) - DOM.x0) / (DOM.x1 - DOM.x0) * iw; };
+    const PY = function (f) { return M.t + ih - (Math.log10(f) - DOM.y0) / (DOM.y1 - DOM.y0) * ih; };
+    const invX = function (px) { return Math.pow(10, DOM.x0 + (px - M.l) / iw * (DOM.x1 - DOM.x0)); };
+
+    function drawRoof() {
+      const g = ROOF[S.gpu];
+      const m = MODELS[S.model];
+      const batch = BATCHES[S.batch];
+      const row = g.rows.filter(function (r) {
+        return r.model === m.name && r.batch === batch;
+      })[0];
+      const peak = g.peak_tflops * 1e12;
+      const bw = g.hbm_bw_bytes_per_s;
+      const ridge = g.ridge_flops_per_byte;
+      const achievable = function (i) { return Math.min(peak, bw * i); };
+
+      const svg = NN.svg("svg", {
+        class: "roof", viewBox: "0 0 " + W + " " + H, width: "100%", height: H, role: "img"
+      });
+
+      /* memory-bound shading */
+      svg.appendChild(NN.svg("rect", {
+        x: M.l, y: M.t, width: PX(ridge) - M.l, height: ih,
+        fill: "var(--critical)", opacity: 0.06
+      }));
+
+      /* grid */
+      for (let d = Math.ceil(DOM.x0); d <= DOM.x1; d++) {
+        const px = PX(Math.pow(10, d));
+        svg.appendChild(NN.svg("line", { class: "gl", x1: px, x2: px, y1: M.t, y2: M.t + ih }));
+        const t = NN.svg("text", { x: px, y: M.t + ih + 17, "text-anchor": "middle" });
+        t.textContent = NN.count(Math.pow(10, d));
+        svg.appendChild(t);
+      }
+      for (let d = DOM.y0; d <= DOM.y1; d++) {
+        const py = PY(Math.pow(10, d));
+        svg.appendChild(NN.svg("line", { class: "gl", x1: M.l, x2: M.l + iw, y1: py, y2: py }));
+        const t = NN.svg("text", { x: M.l - 9, y: py + 4, "text-anchor": "end" });
+        const v = Math.pow(10, d);
+        t.textContent = v >= 1e12 ? NN.count(v / 1e12) + " TF/s" : NN.count(v / 1e9) + " GF/s";
+        svg.appendChild(t);
+      }
+      svg.appendChild(NN.svg("line", { class: "ax", x1: M.l, x2: M.l + iw, y1: M.t + ih, y2: M.t + ih }));
+      svg.appendChild(NN.svg("line", { class: "ax", x1: M.l, x2: M.l, y1: M.t, y2: M.t + ih }));
+
+      let t = NN.svg("text", { x: M.l + iw / 2, y: H - 8, "text-anchor": "middle" });
+      t.textContent = "arithmetic intensity  (FLOP / byte)"; svg.appendChild(t);
+      t = NN.svg("text", { x: -(M.t + ih / 2), y: 14, transform: "rotate(-90)", "text-anchor": "middle" });
+      t.textContent = "achievable rate  (FLOP/s)"; svg.appendChild(t);
+
+      /* the roof itself */
+      const xLoV = Math.pow(10, DOM.x0), xHiV = Math.pow(10, DOM.x1);
+      svg.appendChild(NN.svg("path", {
+        d: "M" + PX(xLoV) + " " + PY(achievable(xLoV)) +
+           " L" + PX(ridge) + " " + PY(peak) +
+           " L" + PX(xHiV) + " " + PY(peak),
+        fill: "none", stroke: "var(--ink-2)", "stroke-width": 2.5, "stroke-linejoin": "round"
+      }));
+
+      /* ridge marker */
+      svg.appendChild(NN.svg("line", {
+        x1: PX(ridge), x2: PX(ridge), y1: M.t, y2: M.t + ih,
+        stroke: "var(--ink-muted)", "stroke-dasharray": "4 4", "stroke-width": 1.4
+      }));
+      t = NN.svg("text", { x: PX(ridge) + 6, y: M.t + 14, class: "strong" });
+      t.textContent = "ridge " + NN.fmt(ridge, 2) + " FLOP/byte"; svg.appendChild(t);
+
+      t = NN.svg("text", { x: PX(ridge) - 8, y: M.t + ih - 10, "text-anchor": "end" });
+      t.textContent = "◀ memory-bound"; svg.appendChild(t);
+      t = NN.svg("text", { x: PX(ridge) + 8, y: M.t + ih - 10 });
+      t.textContent = "compute-bound ▶"; svg.appendChild(t);
+
+      /* faint decode trajectory across the sampled batch sizes */
+      const traj = g.rows.filter(function (r) { return r.model === m.name; });
+      svg.appendChild(NN.svg("path", {
+        d: traj.map(function (r, k) {
+          return (k ? "L" : "M") + PX(r.decode_intensity) + " " + PY(achievable(r.decode_intensity));
+        }).join(" "),
+        fill: "none", stroke: "var(--critical)", "stroke-width": 1.2,
+        "stroke-dasharray": "3 3", opacity: 0.5
+      }));
+      traj.forEach(function (r) {
+        svg.appendChild(NN.svg("circle", {
+          cx: PX(r.decode_intensity), cy: PY(achievable(r.decode_intensity)), r: 2.5,
+          fill: "var(--critical)", opacity: r.batch === batch ? 0 : 0.5
+        }));
+      });
+
+      /* the two points */
+      const pI = row.prefill_intensity, dI = row.decode_intensity;
+      const pY = achievable(pI), dY = achievable(dI);
+
+      /* the unreachable gap, drawn */
+      svg.appendChild(NN.svg("line", {
+        x1: PX(dI), x2: PX(dI), y1: PY(dY), y2: PY(peak),
+        stroke: "var(--critical)", "stroke-width": 1.4, "stroke-dasharray": "2 4", opacity: 0.85
+      }));
+
+      function mark(x, y, kind, label, colour) {
+        const cx = PX(x), cy = PY(y);
+        if (kind === "tri") {
+          svg.appendChild(NN.svg("path", {
+            d: "M" + cx + " " + (cy - 8) + " L" + (cx + 7) + " " + (cy + 5) + " L" + (cx - 7) + " " + (cy + 5) + " Z",
+            fill: colour, stroke: "var(--surface-1)", "stroke-width": 1.5
+          }));
+        } else {
+          svg.appendChild(NN.svg("circle", {
+            cx: cx, cy: cy, r: 7, fill: colour, stroke: "var(--surface-1)", "stroke-width": 2
+          }));
+        }
+        const anchor = cx > M.l + iw * 0.72 ? "end" : "start";
+        const dx = anchor === "end" ? -12 : 12;
+        const tt = NN.svg("text", { x: cx + dx, y: cy - 10, "text-anchor": anchor, class: "strong" });
+        tt.setAttribute("fill", colour);
+        tt.textContent = label;
+        svg.appendChild(tt);
+      }
+      mark(pI, pY, "tri", "prefill  " + pct(Math.min(1, pY / peak), 0) + " of peak", "var(--accent)");
+      mark(dI, dY, "dot", "decode  " + pct(dY / peak) + " of peak", "var(--critical)");
+
+      /* hover crosshair */
+      const cross = NN.svg("line", {
+        y1: M.t, y2: M.t + ih, stroke: "var(--ink-muted)", "stroke-dasharray": "3 3", opacity: 0
+      });
+      svg.appendChild(cross);
+      const hit = NN.svg("rect", { x: M.l, y: M.t, width: iw, height: ih, fill: "transparent" });
+      svg.appendChild(hit);
+      hit.addEventListener("mousemove", function (e) {
+        const r = svg.getBoundingClientRect();
+        const px = (e.clientX - r.left) / r.width * W;
+        const iv = invX(px);
+        const av = achievable(iv);
+        cross.setAttribute("x1", px); cross.setAttribute("x2", px);
+        cross.setAttribute("opacity", 1);
+        NN.tip.show(
+          "<div class='muted'>intensity</div><b>" + NN.fmt(iv, iv < 10 ? 2 : 0) + " FLOP/byte</b>" +
+          "<div class='muted' style='margin-top:4px'>achievable</div><b>" + tflops(av) + "</b>" +
+          "<div class='muted' style='margin-top:4px'>" +
+          (iv < ridge ? "memory-bound — " + pct(av / peak) + " of peak"
+                      : "compute-bound — at peak") + "</div>",
+          e.clientX, e.clientY);
+      });
+      hit.addEventListener("mouseleave", function () {
+        cross.setAttribute("opacity", 0); NN.tip.hide();
+      });
+
+      chartHost.innerHTML = "";
+      chartHost.appendChild(svg);
+
+      /* verdict + readout */
+      verdict.innerHTML = "";
+      verdict.appendChild(el("div", { class: "verdict bad" }, [
+        el("div", { class: "big" }, "decode reaches " + pct(row.decode_flops_utilisation) + " of peak FLOPs"),
+        el("div", { class: "det" },
+          m.name + " · " + g.gpu + " · batch " + batch + " · seq " + NN.count(m.seq) +
+          "  —  intensity " + NN.fmt(dI, 3) + " vs ridge " + NN.fmt(ridge, 2) +
+          " FLOP/byte  (" + row.decode_bound + "-bound)")
+      ]));
+
+      readout.innerHTML = "";
+      readout.appendChild(NN.tiles([
+        { k: "prefill intensity", v: NN.count(Math.round(pI)), s: "FLOP/byte · " + row.prefill_bound + "-bound", cls: "activation" },
+        { k: "decode intensity", v: NN.fmt(dI, 3), s: "FLOP/byte · " + row.decode_bound + "-bound" },
+        { k: "ratio prefill : decode", v: NN.count(Math.round(pI / dI)) + X, s: "same weights, same bytes" },
+        { k: "decode delivers", v: tflops(dY), s: "out of " + tflops(peak) + " installed" }
+      ]));
+
+      NN.$("#mHint").textContent = m.n_layers + " layers, d_model " + m.d_model + ", " +
+        m.n_heads + " heads, " + (m.n_kv_heads || m.n_heads) + " KV heads, " + pname(m.params) + " params";
+      NN.$("#gHint").textContent = "peak " + g.peak_tflops + " TFLOP/s bf16 dense · HBM " +
+        tb(g.hbm_bw_bytes_per_s, 2) + "/s · ridge " + NN.fmt(g.ridge_flops_per_byte, 2) + " FLOP/byte";
+      batchOut.textContent = String(batch);
+    }
+
+    selModel.addEventListener("change", function () { S.model = +selModel.value; drawRoof(); });
+    selGpu.addEventListener("change", function () { S.gpu = +selGpu.value; drawRoof(); });
+    rngBatch.addEventListener("input", function () { S.batch = +rngBatch.value; drawRoof(); });
+    window.addEventListener("nn:theme", drawRoof);
+    drawRoof();
+
+    /* the full table, so nothing is hidden behind the slider */
+    host.appendChild(el("h3", {}, "Every sampled point, on the selected GPU"));
+    const tblHost = el("div", { class: "scrollx" });
+    host.appendChild(tblHost);
+    function drawTable() {
+      const g = ROOF[S.gpu];
+      const tb2 = el("table", { class: "data" });
+      tb2.appendChild(el("thead", {}, [el("tr", {}, [
+        el("th", {}, "model"), el("th", {}, "batch"),
+        el("th", {}, "prefill I"), el("th", {}, "prefill"),
+        el("th", {}, "decode I"), el("th", {}, "decode"),
+        el("th", {}, "% of peak FLOPs")
+      ])]));
+      const body = el("tbody");
+      g.rows.forEach(function (r) {
+        body.appendChild(el("tr", {}, [
+          el("td", {}, r.model), el("td", { class: "n" }, String(r.batch)),
+          el("td", { class: "n" }, NN.count(Math.round(r.prefill_intensity))),
+          el("td", {}, r.prefill_bound),
+          el("td", { class: "n" }, NN.fmt(r.decode_intensity, 3)),
+          el("td", {}, r.decode_bound),
+          el("td", { class: "n", style: { color: "var(--critical)" } },
+            pct(r.decode_flops_utilisation))
+        ]));
+      });
+      tb2.appendChild(body);
+      tblHost.innerHTML = "";
+      tblHost.appendChild(tb2);
+      tblHost.appendChild(el("div", { class: "hint", style: { marginTop: "6px" } },
+        "ridge on " + g.gpu + " is " + NN.fmt(g.ridge_flops_per_byte, 2) +
+        " FLOP/byte. Every decode row above is left of it."));
+    }
+    const _draw = drawRoof;
+    drawRoof = function () { _draw(); drawTable(); };
+    drawTable();
+  })();
+
+  /* ======================================================================
+     3 · WHY DECODE IS BANDWIDTH-BOUND
+     ====================================================================== */
+  (function buildBw() {
+    const host = NN.$("#bwBody");
+    const m = MODELS.filter(function (x2) { return /70B/.test(x2.name); })[0];
+    const g = ROOF.filter(function (x2) { return /^H100/.test(x2.gpu); })[0];
+    const gspec = GPUS.filter(function (x2) { return x2.name === g.gpu; })[0];
+    const c = modelCost(m, m.seq, 1);
+    const dHead = m.d_model / m.n_heads;
+    const kvh = m.n_kv_heads || m.n_heads;
+    const peak = g.peak_tflops * 1e12;
+
+    host.appendChild(el("p", { html:
+      "The mechanism is not subtle. To multiply by a weight you must first <em>read</em> that " +
+      "weight out of HBM. There is no way around it: it is not in a register, it is not in L2, " +
+      "there are " + pname(m.params) + " of them. A decode step reads every one of them and uses " +
+      "each exactly once, for one token." }));
+
+    const tbl = el("table", { class: "arith" });
+    tbl.appendChild(el("thead", {}, [el("tr", {}, [
+      el("th", {}, "term"), el("th", {}, "arithmetic"), el("th", { class: "r" }, "value")
+    ])]));
+    const tb2 = el("tbody");
+    function row(a, b, cVal, cls) {
+      tb2.appendChild(el("tr", cls ? { class: cls } : null, [
+        el("td", {}, a), el("td", { class: "op" }, b), el("td", { class: "r" }, cVal)
+      ]));
+    }
+    row("weights read", pname(m.params) + " params " + X + " 2 B (bf16)", gb(c.weight_bytes, 1));
+    row("KV cache read", "2 " + X + " " + m.n_layers + " layers " + X + " " + NN.count(m.seq) +
+        " seq " + X + " " + kvh + " KV heads " + X + " " + dHead + " " + X + " 2 B",
+        gb(c.kv_bytes, 2));
+    tb2.appendChild(el("tr", { class: "sum" }, [
+      el("td", {}, "bytes moved, one decode step"), el("td", { class: "op" }, "sum"),
+      el("td", { class: "r" }, gb(c.decode.bytes, 2))
+    ]));
+    row("arithmetic, model body", "2 " + X + " " + pname(m.params) + " params " + X + " 1 token",
+        gflop(2 * m.params));
+    row("arithmetic, attention over the cache",
+        "2 " + X + " 2 " + X + " " + m.n_layers + " " + X + " " + kvh + " " + X + " " + dHead +
+        " " + X + " " + NN.count(m.seq), gflop(c.decode.flops - 2 * m.params));
+    tb2.appendChild(el("tr", { class: "sum" }, [
+      el("td", {}, "FLOPs, one decode step"), el("td", { class: "op" }, "sum"),
+      el("td", { class: "r" }, gflop(c.decode.flops))
+    ]));
+    tbl.appendChild(tb2);
+    host.appendChild(el("div", { class: "scrollx" }, [tbl]));
+
+    host.appendChild(NN.formula({
+      rule: "decode intensity  =  FLOPs  ÷  bytes",
+      sub: gflop(c.decode.flops) + "  ÷  " + gb(c.decode.bytes, 2),
+      result: NN.fmt(c.decode.intensity, 3) + " FLOP/byte"
+    }));
+
+    host.appendChild(el("p", { html:
+      "Roughly one FLOP per byte, and it is not a coincidence: a weight is 2 bytes and it is used " +
+      "in one multiply and one add, so the ratio of a weight-bound GEMV is pinned near " +
+      "2 FLOP / 2 B = 1 by construction. Nothing in the model changes it. Now put that against the " +
+      "hardware." }));
+
+    const tMath = c.decode.flops / peak;
+    const tBytes = c.decode.bytes / gspec.hbm_bw_bytes_per_s;
+    host.appendChild(NN.tiles([
+      { k: "time to do the arithmetic", v: secs(tMath), s: gflop(c.decode.flops) + " at " + tflops(peak) },
+      { k: "time to move the bytes", v: secs(tBytes), s: gb(c.decode.bytes, 1) + " at " + tb(gspec.hbm_bw_bytes_per_s, 2) + "/s",
+        cls: "weight" },
+      { k: "the GPU spends", v: NN.fmt(tBytes / tMath, 0) + X + " longer", s: "waiting for memory than computing",
+        cls: null },
+      { k: "FLOP utilisation", v: pct(tMath / tBytes), s: "matches INFER.roofline: " +
+        pct(g.rows.filter(function (r) { return r.model === m.name && r.batch === 1; })[0].decode_flops_utilisation) }
+    ]));
+
+    host.appendChild(el("h3", {}, "The token/second ceiling, from bandwidth alone"));
+    host.appendChild(el("p", { html:
+      "If a decode step must move " + gb(c.decode.bytes, 2) + " and the device moves " +
+      tb(gspec.hbm_bw_bytes_per_s, 2) + " per second, then no scheduler, kernel, or compiler can " +
+      "produce more than one token every " + secs(tBytes) + " at batch 1. That is a hard ceiling " +
+      "derived from two numbers, and real serving stacks land within a small factor of it." }));
+
+    host.appendChild(NN.formula({
+      rule: "tokens/s ceiling  =  memory bandwidth  ÷  bytes read per token",
+      sub: tb(gspec.hbm_bw_bytes_per_s, 2) + "/s  ÷  " + gb(c.decode.bytes, 2),
+      result: NN.fmt(gspec.hbm_bw_bytes_per_s / c.decode.bytes, 1) + " tokens/s   (" +
+              m.name + ", batch 1, " + g.gpu + ")"
+    }));
+
+    /* GPU comparison */
+    const cmpHost = el("div", { class: "scrollx" });
+    const ct = el("table", { class: "data" });
+    ct.appendChild(el("thead", {}, [el("tr", {}, [
+      el("th", {}, "GPU"), el("th", {}, "peak TFLOP/s"), el("th", {}, "HBM TB/s"),
+      el("th", {}, "ridge"), el("th", {}, "decode tok/s ceiling"),
+      el("th", {}, "if compute were the limit")
+    ])]));
+    const cb = el("tbody");
+    const base = ROOF[0];
+    ROOF.forEach(function (gg) {
+      const spec = GPUS.filter(function (x2) { return x2.name === gg.gpu; })[0];
+      const tps = spec.hbm_bw_bytes_per_s / c.decode.bytes;
+      const cps = gg.peak_tflops * 1e12 / c.decode.flops;
+      cb.appendChild(el("tr", {}, [
+        el("td", {}, gg.gpu),
+        el("td", { class: "n" }, String(gg.peak_tflops)),
+        el("td", { class: "n" }, NN.fmt(spec.hbm_bw_bytes_per_s / 1e12, 2)),
+        el("td", { class: "n" }, NN.fmt(gg.ridge_flops_per_byte, 2)),
+        el("td", { class: "n", style: { color: "var(--weight)", fontWeight: "700" } }, NN.fmt(tps, 1)),
+        el("td", { class: "n", style: { color: "var(--ink-muted)" } }, NN.count(Math.round(cps)))
+      ]));
+    });
+    ct.appendChild(cb);
+    cmpHost.appendChild(ct);
+    host.appendChild(el("h3", {}, "The same model on four devices"));
+    host.appendChild(cmpHost);
+
+    const h100r = ROOF.filter(function (x2) { return /^H100/.test(x2.gpu); })[0];
+    const h200r = ROOF.filter(function (x2) { return /^H200/.test(x2.gpu); })[0];
+    const b200r = ROOF.filter(function (x2) { return /^B200/.test(x2.gpu); })[0];
+    const h100s = GPUS.filter(function (x2) { return x2.name === h100r.gpu; })[0];
+    const h200s = GPUS.filter(function (x2) { return x2.name === h200r.gpu; })[0];
+    const b200s = GPUS.filter(function (x2) { return x2.name === b200r.gpu; })[0];
+
+    host.appendChild(NN.callout("key", "WHY H200 EXISTS",
+      "<b>" + h200r.gpu + " has exactly the same compute as " + h100r.gpu + "</b> — both " +
+      h100r.peak_tflops + " TFLOP/s bf16 dense — and " +
+      NN.fmt(h200s.hbm_bw_bytes_per_s / h100s.hbm_bw_bytes_per_s, 2) + X +
+      " the memory bandwidth (" + tb(h200s.hbm_bw_bytes_per_s, 2) + "/s vs " +
+      tb(h100s.hbm_bw_bytes_per_s, 2) + "/s). On a compute-bound job that is worth nothing. " +
+      "On batch-1 decode it is worth the whole " +
+      NN.fmt(h200s.hbm_bw_bytes_per_s / h100s.hbm_bw_bytes_per_s, 2) + X + ": " +
+      NN.fmt(h100s.hbm_bw_bytes_per_s / c.decode.bytes, 1) + " tok/s becomes " +
+      NN.fmt(h200s.hbm_bw_bytes_per_s / c.decode.bytes, 1) + " tok/s. " +
+      "Read the ridge column the same way: more bandwidth <em>lowers</em> the ridge (" +
+      NN.fmt(h100r.ridge_flops_per_byte, 2) + " " + ARR + " " + NN.fmt(h200r.ridge_flops_per_byte, 2) +
+      " FLOP/byte), which is the only thing that moves a memory-bound kernel closer to peak. " +
+      b200r.gpu + " goes the other way: " +
+      NN.fmt(b200r.peak_tflops / h100r.peak_tflops, 1) + X + " the FLOPs but only " +
+      NN.fmt(b200s.hbm_bw_bytes_per_s / h100s.hbm_bw_bytes_per_s, 2) + X + " the bandwidth, so its " +
+      "ridge <em>rises</em> to " + NN.fmt(b200r.ridge_flops_per_byte, 2) + " and batch-1 decode " +
+      "improves by the bandwidth ratio and not one bit more. " +
+      "<b>An inference GPU is bought on bytes per second.</b>"));
+
+    host.appendChild(NN.callout("why", "PREFILL IS THE OPPOSITE PROBLEM",
+      "The same table says prefill on " + m.name + " at batch 1 sits at " +
+      NN.count(Math.round(g.rows.filter(function (r) { return r.model === m.name && r.batch === 1; })[0].prefill_intensity)) +
+      " FLOP/byte — " +
+      NN.count(Math.round(g.rows.filter(function (r) { return r.model === m.name && r.batch === 1; })[0].prefill_intensity / g.ridge_flops_per_byte)) + X +
+      " past the ridge. Prefill is a training-shaped workload: it is compute-bound, it scales with " +
+      "FLOPs, and it benefits from every trick in Part II and III. That is why serving stacks end " +
+      "up wanting to run the two phases on <em>different</em> hardware, or at least in different " +
+      "batches — " + plink("serving") + " comes back to this."));
+  })();
+
+  /* ======================================================================
+     4 · FORWARD MAP
+     ====================================================================== */
+  (function buildMap() {
+    const host = NN.$("#mapBody");
+    const m = MODELS.filter(function (x2) { return /70B/.test(x2.name); })[0];
+    const g = ROOF.filter(function (x2) { return /^H100/.test(x2.gpu); })[0];
+    const row1 = g.rows.filter(function (r) { return r.model === m.name && r.batch === 1; })[0];
+    const rowN = g.rows.filter(function (r) { return r.model === m.name; }).slice(-1)[0];
+    const bt = I.batching;
+    const btLast = bt.by_seq[0].rows.slice(-1)[0];
+    const DTB = T.memory.dtype_bytes;
+    const ADAM = T.memory.recipes.filter(function (r) {
+      const cc = r.components || {};
+      return cc.weight === DTB.bf16 && cc.gradient === DTB.bf16 &&
+             cc.optimizer === DTB.fp32 * 3;
+    })[0];
+
+    host.appendChild(el("p", { html:
+      "Decode intensity is " + NN.fmt(row1.decode_intensity, 2) + " and the ridge is " +
+      NN.fmt(g.ridge_flops_per_byte, 2) + ". Every remaining page in Part IV is an attempt to " +
+      "close that gap, and there are only three levers, because there are only three terms in the " +
+      "fraction: raise the FLOPs per step, cut the bytes per step, or get more useful tokens out " +
+      "of one pass." }));
+
+    const li = function (pgId, lever, body) {
+      return el("li", {}, [
+        el("div", { class: "pg", html: plink(pgId) + "<br><span class='muted'>" + lever + "</span>" }),
+        el("div", { class: "bd", html: body })
+      ]);
+    };
+
+    host.appendChild(el("ul", { class: "maplist" }, [
+      li("kvcache", "the other bytes",
+        "The KV cache is the second thing being read on every decode step — " +
+        gb(modelCost(m, m.seq, 1).kv_bytes, 2) + " of it here, next to " +
+        gb(m.params * 2, 1) + " of weights. It is exact memoisation, and at 128k context it is " +
+        "larger than a third of the model. Page 25 proves it exact and then prices it."),
+      li("batching", "more FLOPs per byte",
+        "Weights are read once per step no matter how many sequences are in flight. Batch " +
+        rowN.batch + " raises decode intensity from " + NN.fmt(row1.decode_intensity, 2) + " to " +
+        NN.fmt(rowN.decode_intensity, 2) + " FLOP/byte and utilisation from " +
+        pct(row1.decode_flops_utilisation) + " to " + pct(rowN.decode_flops_utilisation) +
+        ". It stops working when the KV term takes over: at batch " + btLast.batch + " the cache is " +
+        pct(btLast.kv_share, 0) + " of the bytes moved."),
+      li("paged", "packing the bytes",
+        "Once the KV cache is the binding constraint, wasting it to fragmentation is wasting " +
+        "batch size, and batch size is the only lever that was working."),
+      li("quant", "fewer bytes per weight",
+        "Intensity is FLOPs over bytes. Halving the bytes of a weight doubles the intensity of a " +
+        "memory-bound kernel for free. That is why weight-only quantisation helps decode far more " +
+        "than it helps prefill — prefill was never waiting on the fetch."),
+      li("specdec", "more tokens per pass",
+        "If one weight-read can be made to verify k candidate tokens instead of producing one, " +
+        "the FLOPs per byte go up by k. It is a bandwidth trick wearing a probability costume."),
+      li("infpar", "splitting the bytes",
+        "Tensor parallel over N GPUs divides the weight bytes each device must read by N, so it " +
+        "cuts decode latency — the reverse of the training argument, where TP was a memory " +
+        "measure paid for in communication.")
+    ]));
+
+    host.appendChild(NN.callout("mem", "THE SAME CENSUS, WITH ONE CLASS LEFT",
+      "Training kept four classes of tensor live: " +
+      NN.chip("weight").outerHTML + " " + NN.chip("gradient").outerHTML + " " +
+      NN.chip("activation").outerHTML + " " + NN.chip("optimizer").outerHTML +
+      ". Inference has no backward pass, so gradients and optimizer state are gone: the " +
+      ADAM.bytes_per_param + " bytes per parameter of the <em>" + ADAM.name + "</em> recipe on " +
+      plink("memory", "page 01") + " collapse to the " + ADAM.components.weight +
+      " weight bytes alone. What replaces them is not a new class — it is the same " +
+      NN.chip("activation").outerHTML + " class, made persistent: the KV cache is an activation " +
+      "that has to stay alive for the whole request. The " + T.memory.n_params +
+      "-parameter model on page 01 had " + T.memory.by_class.activation.tensors +
+      " activation tensors living from forward to backward. A " + pname(m.params) +
+      " decode step has one that lives from the first token to the last, grows every step, and is " +
+      "streamed through the ALU every step."));
+
+    host.appendChild(el("p", { class: "hint", style: { marginTop: "18px" } },
+      "JS cost model checked against " + CHECK.n + " stored intensities in INFER.roofline: worst " +
+      "disagreement " + CHECK.worst.toExponential(1) + " (rounding only). Toy cost model " +
+      (CHECK.toyOk ? "reproduces" : "DISAGREES WITH") + " INFER.cost_model.toy exactly from the " +
+      CHECK.toyParams + " parameters counted out of INFER.params."));
+  })();
+
+  NN.page("regimes");
+})();
+</script>
+</body>
+</html>

@@ -960,6 +960,17 @@ function netSVG(o) {
 const SLIDES = [];
 function S(o) { SLIDES.push(o); }
 
+/* Cross-references by slide NUMBER go stale the moment anything is inserted,
+   so nothing types one. This looks a slide up by a distinctive fragment of
+   its `plain` line. It can only be called from inside build() or render(),
+   which run after every slide has been pushed. */
+function slideNumberByPlain(needle) {
+  for (let i = 0; i < SLIDES.length; i++) {
+    if (SLIDES[i].plain && SLIDES[i].plain.indexOf(needle) >= 0) return i + 1;
+  }
+  return null;
+}
+
 /* ==================================================== section separators */
 /* A full-bleed signpost before every part and every topic run, so a viewer
    can see at a glance — paging through, or scanning the overview grid —
@@ -1025,7 +1036,8 @@ const SECTIONS = [
       "opens by deriving the chain rule rather than invoking it — the path " +
       "from one weight to the loss, a nudge pushed along it, and the five " +
       "local derivatives worked out one at a time from the equations the " +
-      "forward pass already wrote down. Only then do we walk the eight steps. " +
+      "forward pass already wrote down. Only then do we walk the " +
+      T.backward.steps.length + " steps. " +
       "Ask the room to watch the READS line on every step: some need only the " +
       "gradient flowing in from the right, and some have to re-read a tensor " +
       "the forward pass produced. The second kind is the entire reason " +
@@ -1102,8 +1114,11 @@ const SECTIONS = [
       "causal attention head at seq " + (_FAMETA.seq || 8) + ", tiled " +
       (_FAMETA.Br || 4) + "×" + (_FAMETA.Bc || 2) + ", every score on the " +
       "screen. Set two expectations before you start. The centre of the run " +
-      "is online softmax in ONE dimension — no attention, six numbers, four " +
-      "slides — and if that lands, everything after it is bookkeeping. And " +
+      "is online softmax in ONE dimension — no attention, " +
+      ((window.FLASH && window.FLASH.online_softmax_demo.xs.length) || 6) +
+      " numbers, " +
+      ((window.FLASH && window.FLASH.online_softmax_demo.steps.length + 2) || 5) +
+      " slides — and if that lands, everything after it is bookkeeping. And " +
       "the punchline is that FlashAttention is EXACT: it is not an " +
       "approximation, not a sparsity pattern, and the deck proves it rather " +
       "than saying it. Ask who in the room thinks it trades accuracy for " +
@@ -1113,8 +1128,8 @@ const SECTIONS = [
     q: "Add up every byte a real training step needs. Does it fit on anything?",
     toy: TOY_REAL,
     say: "This is the slide run that motivates the whole of part three, so " +
-      "let it land. The arithmetic is not subtle - weights, gradients, the " +
-      "fp32 master copy, Adam's two moments, then activations on top - but " +
+      "let it land. The arithmetic is not subtle — weights, gradients, the " +
+      "fp32 master copy, Adam's two moments, then activations on top — but " +
       "the total is, and people consistently guess low. Ask for a guess " +
       "before you show the number. The gap between it and one device is the " +
       "reason every technique that follows exists." },
@@ -1182,7 +1197,7 @@ const SECTIONS = [
 
   { id: "pp", part: 3, title: "Pipeline Parallel", cls: "activation",
     q: "What if the layers do not fit — and how much of the time is anybody idle?",
-    toy: TOY_PAR, toyNew: true,
+    toy: TOY_PAR, toyBack: true,
     say: "Split by depth instead of by width. The bubble is the whole story: " +
       "derive it, watch micro-batching shrink it, then GPipe against 1F1B, " +
       "which have the same bubble and very different activation memory. Good " +
@@ -1190,7 +1205,7 @@ const SECTIONS = [
 
   { id: "partitioning", part: 3, title: "Partitioning a Block", cls: "weight",
     q: "Where exactly does the knife go through a real transformer block?",
-    toy: TOY_TF2, toyNew: true,
+    toy: TOY_TF2, toyBack: true,
     say: "Back to the two-layer transformer, and this is where part two and " +
       "part three meet. Every parameter tensor in the block, one at a time, " +
       "with the cut drawn on the actual numbers: which are column-parallel, " +
@@ -1225,8 +1240,13 @@ function sepCard(s) {
         " · " + (s.cls === "accent" ? "neutral" : s.cls) })]),
     d("sepchip", [el("span", { html:
       "slides <b>" + s.first + "–" + s.last + "</b> of " + SEP_END })]),
+    /* three states, not two: a run can introduce a toy, return to one the
+       deck has already used, or carry on with the current one. Saying "new
+       model" for a return is the kind of thing that survives a reorder and
+       quietly misleads. */
     d("sepchip", [el("span", { html:
-      (s.toyNew ? "new model · " : "model · ") + "<b>" + s.toy + "</b>" })])
+      (s.toyNew ? "new model · " : s.toyBack ? "back to · " : "model · ") +
+      "<b>" + s.toy + "</b>" })])
   ];
 
   /* One tick per topic section. On a topic card the current section is lit
@@ -1345,7 +1365,7 @@ S({
         d("stack", [
           frag(say("The network will produce a guess. The guess will be wrong. " +
             "The <b>size and direction</b> of that wrongness is the only signal " +
-            "we have, and every byte of machinery in the next forty slides " +
+            "we have, and every byte of machinery in the whole of part one " +
             "exists to turn it into a better set of numbers."), "f-right"),
           frag(NN.callout("key", "One example, one step",
             "Real training uses batches of thousands and millions of steps. " +
@@ -3535,8 +3555,10 @@ S({
         NN.callout("mem", "Memory cost of SGD: zero extra",
           "Plain SGD keeps no state between steps. Weights " + BY(B_W) +
           " and gradients " + BY(B_G) + " and nothing else — " + R_SGD.bytes_per_param +
-          " bytes per parameter in fp32 (" + R_SGD.name + "). Every optimizer after this one buys " +
-          "faster convergence with memory.")
+          " bytes per parameter in fp32 (" + R_SGD.name + "). Every optimizer " +
+          "after this one spends memory to make the update <em>smarter</em>; " +
+          "whether that also makes it faster depends on the problem, and on " +
+          "this " + NPARAM + "-parameter one it does not.")
       ]), "f-fade")
     ];
   },
@@ -3640,7 +3662,19 @@ S({
         frag(d("panel acc", [ph("loss · " + HP.n_steps + " steps, same start"), chart,
           chartKey([{ name: "SGD", color: "var(--accent)" },
                     { name: "momentum", color: "var(--warning)" },
-                    { name: "Adam", color: "var(--critical)" }])]), "f-right"),
+                    { name: "Adam", color: "var(--critical)" }]),
+          h("small muted", "Read this honestly: after " + HP.n_steps +
+            " steps the losses are SGD " + f(T.runs.sgd.history[T.runs.sgd.history.length - 1].loss, 4) +
+            ", momentum " + f(T.runs.momentum.history[T.runs.momentum.history.length - 1].loss, 4) +
+            ", Adam " + f(T.runs.adam.history[T.runs.adam.history.length - 1].loss, 4) +
+            " — <b>Adam is last</b>. That is not a bug in Adam, it is what " +
+            "happens when one learning rate (" + HP.lr + ") is used for all " +
+            "three on a " + NPARAM + "-parameter problem: the next slide shows " +
+            "Adam's first step is ±lr regardless of gradient size, which is far " +
+            "too large here. Adam earns its memory on models where the " +
+            "gradients differ by orders of magnitude between tensors, and this " +
+            "one has " + NPARAM + " parameters of one kind. The memory " +
+            "arithmetic below is the point of the slide; the curve is not.")]), "f-right"),
         frag(NN.callout("mem", "The bill for adaptivity",
           "m and v are each " + NPARAM + " numbers here and <em>n_params</em> " +
           "numbers in any real model, held in fp32 for the whole run. " +
@@ -3969,8 +4003,10 @@ S({
         "saying out loud because the usual diagram shows the peak at the " +
         "forward/backward boundary. With " + NPARAM + " parameters the " +
         "parameter gradients (" + G(B_G, 0).replace("+", "") + " bytes) are " +
-        "exactly as big as everything the forward pass saved (" +
-        BYCLS.activation.bytes_fp32 + " bytes), so the gradients fill faster " +
+        "exactly as big as every activation the forward pass produced (" +
+        BYCLS.activation.bytes_fp32 + " bytes across " +
+        BYCLS.activation.tensors + " tensors, of which " + SAVED_KEYS.length +
+        " are actually held for backward), so the gradients fill faster " +
         "than the activations drain. Once activations outweigh gradients the " +
         "textbook shape returns, and in a real transformer they do so " +
         "immediately: " + MODEL.name + " at " + CFG.seq + " tokens saves " +
@@ -3982,7 +4018,8 @@ S({
         NN.callout("key", "Lever 1 — shrink the transient",
           "Activation checkpointing keeps only the inputs of each block and " +
           "recomputes the rest during backward. You pay roughly one extra " +
-          "forward pass — about 30% more compute — and the activation term " +
+          "forward pass — a third more compute, derived at the end of the " +
+          "scaling run — and the activation term " +
           "collapses from per-layer to per-checkpoint."),
         NN.callout("mem", "Lever 2 — shrink the floor",
           "The floor here is " + BY(FLOOR) + " for " + NPARAM + " parameters. " +
@@ -5657,8 +5694,13 @@ S({
     "compute a partial contribution to every output channel, and no output " +
     "channel completely. Also worth saying: the MLP is " +
     f((DM * DFF + DFF * DM) / (NP2 / NL) * 100, 0) + "% of this block's " +
-    "parameters at a " + (DFF / DM) + "× expansion, and at the 4× real models " +
-    "use it is about two thirds.",
+    "parameters at a " + (DFF / DM) + "× expansion. Be careful quoting the " +
+    "grown-up figure, because it depends on which architecture you mean: a " +
+    "classic 2-matrix MLP at 4× expansion puts the MLP at " +
+    f(8 / 12 * 100, 0) + "% of the block's matrices, while " + MODEL.name +
+    ", which uses SwiGLU's three matrices, puts it at " +
+    (XR ? f(XR.exact.mlp_share_of_layer * 100, 0) : "over 80") +
+    "% — the number the scaling run quotes.",
   build: function (ctx) {
     ctx.g = am("GELU(U)", FL[0].mlp.G, SQ + "×" + DFF, 2);
     ctx.w = wm("W_down", PRM["L0.W2"], DFF + "×" + DM, 2);
@@ -5682,7 +5724,13 @@ S({
           " parameters; the MLP is " + (DM * DFF) + " + " + (DFF * DM) + " = " +
           (2 * DM * DFF) + ". At this " + (DFF / DM) + "× expansion the MLP is " +
           f(2 * DM * DFF / (4 * DM * DM + 2 * DM * DFF) * 100, 0) +
-          "% of the matrices; at the 4× real models use it is 67%.")
+          "% of the matrices. A classic 4× two-matrix MLP is " +
+          f(8 / 12 * 100, 0) + "% (8d² against 4d²); " + MODEL.name +
+          "'s SwiGLU has <em>three</em> matrices and grouped-query attention, " +
+          "which takes it to " +
+          (XR ? f(XR.exact.mlp_share_of_layer * 100, 0) : "over 80") +
+          "%. Same argument, three different numbers — quote the architecture " +
+          "with the figure.")
       ]), "f-fade")
     ];
   },
@@ -5922,10 +5970,12 @@ S({
     "the stream through a LayerNorm, computes something, and WRITES back " +
     "through an addition. Read-through-a-norm, write-through-an-add. That is " +
     "the entire structure of a transformer. Two payoffs, one now and one in " +
-    "ten slides. Now: it explains why the width is constant and why blocks " +
-    "compose. In ten slides: because the write is an addition and addition has " +
+    "the backward run. Now: it explains why the width is constant and why " +
+    "blocks compose. Then: because the write is an addition and addition has " +
     "derivative one, the gradient runs down that spine from the top of the " +
-    "stack to the bottom without being multiplied by anything at all.",
+    "stack to the bottom without being multiplied by anything at all — and we " +
+    "measure it happening on the real numbers a few slides into the backward " +
+    "half.",
   build: function (ctx) {
     /* Built from plain elements rather than SVG: the stage already scales,
        and a percentage grid keeps every branch under its own junction at
@@ -5998,9 +6048,14 @@ S({
       frag(NN.callout("key", "Hold this diagram for the backward half",
         "Because each write is an addition, the derivative along the spine is " +
         "exactly 1 at every junction. The gradient at the output reaches the " +
-        "input having been multiplied by nothing whatsoever. Ten slides from " +
-        "now we watch that happen on real numbers, and it is the reason " +
-        CFG.layers + "-layer stacks train at all."), "f-fade")
+        "input having been multiplied by nothing whatsoever. " +
+        (function () {
+          const n = slideNumberByPlain("residual path never shrinks the gradient");
+          return n ? "Slide <b>" + n + "</b> watches that happen on real " +
+                     "numbers, and it is the reason "
+                   : "The backward run watches that happen on real numbers, " +
+                     "and it is the reason ";
+        })() + CFG.layers + "-layer stacks train at all."), "f-fade")
     ];
   }
 });
@@ -6282,13 +6337,12 @@ S({
     return [
       kicker("Backward · block 1 · MLP"),
       title("Same rule as any linear layer: gradient × saved input", true),
+      /* one chain, not two stacked ones: dD → dG → dU reads left to right */
       frag(d("rowflex top", [
         gm("dL/dD · arriving", B.dD, "", 5),
         h("ar", "× W_downᵀ ="),
-        gm("dL/dG", B.dG, SQ + "×" + DFF, 4)
-      ]), "f-fade"),
-      frag(d("rowflex top", [
-        gm("dL/dG", B.dG, "", 4), h("ar", "⊙ GELU′(U) ="),
+        gm("dL/dG", B.dG, SQ + "×" + DFF, 4),
+        h("ar", "⊙ GELU′(U) ="),
         gm("dL/dU", B.dU, "the gate", 4)
       ]), "f-fade"),
       frag(d("cols3", [
@@ -6302,23 +6356,25 @@ S({
           sub: "reads the SAVED LayerNorm output",
           result: DM + "×" + DFF, cls: "gradient" })
       ]), "f-pop"),
-      frag(d("rowflex top", [
-        gm("dL/dW_up", GR2["L1.W1"], DM + "×" + DFF, 4),
-        gm("dL/dW_down", GR2["L1.W2"], DFF + "×" + DM, 4)
-      ]), "f-fade"),
-      frag(d("cols", [
-        NN.callout("mem", "Three saved tensors for one sub-layer",
-          "<span class='mono'>LN2(h)</span> (" + (SQ * DM) + " elements), " +
-          "<span class='mono'>U</span> (" + (SQ * DFF) + ") and " +
-          "<span class='mono'>GELU(U)</span> (" + (SQ * DFF) + "). None of " +
-          "them can be freed when the forward pass ends. That is activation " +
-          "memory, and it scales with batch and sequence, not with the model."),
-        NN.callout("key", "Checked, not asserted",
-          "TF2 ships <span class='mono'>dW_up</span>, " +
-          "<span class='mono'>dW_down</span> and the gradient leaving this " +
-          "sub-layer. The deck re-derives all three from first principles in " +
-          "JavaScript and compares: max disagreement <span class='mono'>" +
-          f(XCHK, 1) + "</span> across every block.")
+      frag(d("cols wide-l", [
+        d("rowflex top", [
+          gm("dL/dW_up", GR2["L1.W1"], DM + "×" + DFF, 4),
+          gm("dL/dW_down", GR2["L1.W2"], DFF + "×" + DM, 4)
+        ]),
+        d("stack", [
+          NN.callout("mem", "Three saved tensors for one sub-layer",
+            "<span class='mono'>LN2(h)</span> (" + (SQ * DM) + " elements), " +
+            "<span class='mono'>U</span> (" + (SQ * DFF) + ") and " +
+            "<span class='mono'>GELU(U)</span> (" + (SQ * DFF) + "). None can " +
+            "be freed when the forward pass ends — that is activation memory, " +
+            "and it scales with batch and sequence, not with the model."),
+          NN.callout("key", "Checked, not asserted",
+            "TF2 ships <span class='mono'>dW_up</span>, " +
+            "<span class='mono'>dW_down</span> and the gradient leaving this " +
+            "sub-layer. The deck re-derives all three from first principles in " +
+            "JavaScript and compares: max disagreement <span class='mono'>" +
+            f(XCHK, 1) + "</span> across every block.")
+        ])
       ]), "f-fade")
     ];
   }
@@ -7006,15 +7062,16 @@ S({
     return [
       kicker("Backward · block 1 · Q, K and V converge"),
       title("One saved tensor, three consumers, one summed gradient", true),
+      /* the whole claim is one equation, so it gets one row */
       frag(d("rowflex top", [
-        gm("from the Q path", B.fromQ, "dQ · W_qᵀ", 6),
+        gm("from the Q path", B.fromQ, "dQ · W_qᵀ", 5),
         h("ar", "+"),
-        gm("from the K path", B.fromK, "dK · W_kᵀ", 6),
+        gm("from the K path", B.fromK, "dK · W_kᵀ", 5),
         h("ar", "+"),
-        gm("from the V path", B.fromV, "dV · W_vᵀ", 6)
+        gm("from the V path", B.fromV, "dV · W_vᵀ", 5),
+        h("ar", "="),
+        gm("dL/dn₁", B.dn1, "the sum, not any one", 5)
       ]), "f-fade"),
-      frag(d("panel g", [ph("= dL/d(LN1 output) · the sum, not any one of them"),
-        gm("dL/dn₁", B.dn1, "", 6)]), "f-pop"),
       frag(d("cols3", [
         NN.tiles([{ k: "Q path contributes", v: f(mag(B.fromQ), 5),
                     s: "max |contribution|", cls: "gradient" }]),
@@ -7022,19 +7079,21 @@ S({
                     s: "max |contribution|", cls: "gradient" }]),
         NN.tiles([{ k: "V path contributes", v: f(mag(B.fromV), 5),
                     s: "max |contribution|", cls: "gradient" }])
-      ]), "f-fade"),
-      frag(d("rowflex top", [
-        gm("dL/dW_q", GR2["L1.Wq"], "", 5),
-        gm("dL/dW_k", GR2["L1.Wk"], "", 5),
-        gm("dL/dW_v", GR2["L1.Wv"], "", 5)
-      ]), "f-fade"),
-      frag(NN.callout("key", "Fan-out forward means fan-in backward",
-        "A tensor read by k consumers receives k gradients and its own " +
-        "gradient is their sum. That is the general rule and it is why " +
-        "autograd engines keep a reference count: a node's backward cannot " +
-        "run until every consumer has reported. Here k = 3, and the three " +
-        "weight gradients are three outer products against one saved " +
-        "activation."), "f-fade")
+      ]), "f-pop"),
+      frag(d("cols wide-l", [
+        d("rowflex top", [
+          gm("dL/dW_q", GR2["L1.Wq"], "", 5),
+          gm("dL/dW_k", GR2["L1.Wk"], "", 5),
+          gm("dL/dW_v", GR2["L1.Wv"], "", 5)
+        ]),
+        NN.callout("key", "Fan-out forward means fan-in backward",
+          "A tensor read by k consumers receives k gradients and its own " +
+          "gradient is their sum. That is the general rule and it is why " +
+          "autograd engines keep a reference count: a node's backward cannot " +
+          "run until every consumer has reported. Here k = 3, and the three " +
+          "weight gradients beside this are three outer products against one " +
+          "saved activation.")
+      ]), "f-fade")
     ];
   }
 });
@@ -7389,76 +7448,122 @@ SEP("cost");
 /*  arguing towards. Same edit that was made to site/09-transformer-cost.    */
 /* ======================================================================== */
 
-if (XF) {
-/* ------------------------------------------- A11. what one block must keep */
+/* --------------------------- A11. where the two coefficients come from ------
+   The next slide multiplies by 34 and by 5 and the slide after that by 10, 24
+   and 34, and until now the deck has never said where any of them came from.
+   They are not magic: they are tensor COUNTS times a dtype width, and
+   transformer.js ships the count for every term. So derive them here, check
+   the total against the coefficient the rest of the deck uses, and hand the
+   next slide two numbers it has earned. This replaces a second activation
+   census; the census itself is the slide two before this one, on the model
+   the audience actually walked. */
+const CK_BYTES = function (t) {
+  return t.dtype === "mask" ? 1
+       : t.dtype === "fp32" ? FP32B
+       : (ACTC ? ACTC.act_bytes : BF16B);
+};
+const CK_SUM = function (list) {
+  return list.reduce(function (a, t) { return a + t.elems * CK_BYTES(t); }, 0);
+};
+
+if (XA) {
 S({
-  chapter: "Scale · the activation census", plain: "What one block has to keep, tensor by tensor",
-  notes: "The census. " + XACT.per_tensor.length + " tensors, " +
-    XACT.total_elements + " elements, all of them alive from the moment the " +
-    "forward pass writes them until the backward pass has consumed them. " +
-    "Split them by how they scale and the whole memory story of transformers " +
-    "falls out: " + XACT.linear_elements + " elements grow linearly in " +
-    "sequence length and " + XACT.quadratic_elements + " grow with its " +
-    "square. At this toy size the quadratic part is only " +
-    f(XACT.quadratic_share * 100, 0) + "% of the total, which is exactly why " +
-    "the toy is misleading and the next slide exists — at " + CFG.seq +
-    " tokens the same two terms have swapped places. Also worth noting: the " +
-    "parameters split " + f(XPAR.attn_share * 100, 0) + "% attention, " +
-    f(XPAR.mlp_share * 100, 0) + "% MLP, " + f(XPAR.ln_share * 100, 0) +
-    "% norms, and at a realistic 4× expansion the MLP takes " +
-    f(XPAR.if_4x_expansion.mlp_share * 100, 0) + "%.",
+  chapter: "Scale · the coefficients",
+  plain: "Where 34 and 5 come from: tensor counts times a dtype width",
+  notes: "Two numbers are about to do a lot of work — every activation figure " +
+    "in the rest of this deck, and the sequence-parallel table right at the " +
+    "end of part three, is one of them times a shape. So do not let them " +
+    "arrive as constants. " + XA.source + " The accounting is: bytes per layer " +
+    "= " + XA.formula + ". The 34 and the 5 are not measured and not fitted. " +
+    "They are counts. Read the left table: the linear terms are " +
+    XA.linear_terms.filter(function (t) { return t.dtype !== "mask"; })
+      .reduce(function (a, t) { return a + t.elems; }, 0) +
+    " tensors of seq × d at " + (ACTC ? ACTC.act_bytes : BF16B) +
+    " bytes plus " +
+    XA.linear_terms.filter(function (t) { return t.dtype === "mask"; })
+      .reduce(function (a, t) { return a + t.elems; }, 0) +
+    " dropout masks at 1 byte, which is " + CK_SUM(XA.linear_terms) +
+    ". The quadratic terms are the softmax output, its dropout mask and the " +
+    "dropout output — three objects of the same heads × seq² shape — which " +
+    "is " + CK_SUM(XA.quad_terms) + ". The check on screen is computed in the " +
+    "browser against the coefficient the data ships. Two things to point at " +
+    "while it is up. The GELU input and the second linear's input are FOUR " +
+    "units each because they are d_ff wide at a 4× expansion — eight of the " +
+    "thirty-four bytes are the MLP being wide, which is why the MLP dominates " +
+    "activation memory as well as parameters. And the masks are one byte, not " +
+    "two, which is the only place in this accounting where a tensor's dtype " +
+    "differs from the model's — a detail that changes the answer by " +
+    f(2 / CK_SUM(XA.linear_terms) * 100, 0) + "% if you get it wrong.",
   build: function () {
-    const subs = ["layernorm", "attention", "residual", "mlp"];
-    const half = Math.ceil(XACT.per_tensor.length / 2);
-    const table = function (list) {
+    const tbl = function (list, hue) {
       return el("table", { class: "data" }, [
         el("thead", {}, el("tr", {}, [
           el("th", { style: { textAlign: "left" } }, "tensor"),
-          el("th", {}, "shape"), el("th", {}, "elems"), el("th", {}, "scales as")])),
+          el("th", {}, "×"), el("th", {}, "B ea"), el("th", {}, "B")])),
         el("tbody", {}, list.map(function (t) {
-          const q = t.scales.indexOf("^2") >= 0;
           return el("tr", {}, [
             el("td", { style: { textAlign: "left" },
-              html: "<span class='v-activation'>" + t.name + "</span>" }),
-            el("td", { class: "n" }, t.shape.join("×")),
-            el("td", { class: "n" }, String(t.elements)),
-            el("td", { class: "n", html: q
-              ? "<span class='v-gradient mono'>" + t.scales + "</span>"
-              : "<span class='muted mono'>" + t.scales + "</span>" })
+              html: "<span class='v-" + hue + "'>" + t.name + "</span>" }),
+            el("td", { class: "n" }, String(t.elems)),
+            el("td", { class: "n mono muted" }, String(CK_BYTES(t))),
+            el("td", { class: "n v-" + hue }, String(t.elems * CK_BYTES(t)))
           ]);
         }))
       ]);
     };
+    const half = Math.ceil(XA.linear_terms.length / 2);
+    const linOK  = !ACTC || CK_SUM(XA.linear_terms) === ACTC.linear;
+    const quadOK = !ACTC || CK_SUM(XA.quad_terms) === ACTC.quad;
     return [
-      kicker("Transformer · activation census"),
-      title(XACT.per_tensor.length + " tensors, " + XACT.total_elements +
-            " elements, none of them free before backward", true),
-      frag(d("panel a", [ph("every activation one block keeps · batch 1 · " +
-        "quadratic terms in orange"),
-        d("cols", [table(XACT.per_tensor.slice(0, half)),
-                   table(XACT.per_tensor.slice(half))])]), "f-fade"),
-      frag(NN.tiles(subs.map(function (s) {
-        return { k: s, v: String(XACT.by_submodule[s]), s: "elements", cls: "activation" };
-      })), "f-fade"),
-      frag(d("cols wide-l", [
-        NN.callout("warn", "This ratio is a lie at scale",
-          "Here the quadratic term is " + f(XACT.quadratic_share * 100, 0) +
-          "% of the activations, because " + XMETA.seq_len + " tokens is " +
-          "nothing. The linear term grows like <span class='mono'>seq</span> " +
-          "and the quadratic like <span class='mono'>seq²</span>, so at " +
-          CFG.seq + " tokens the order reverses completely."),
-        d("panel a tight", [ph("linear in seq  vs  quadratic in seq"),
-          NN.memstrip([
-            { cls: "activation", bytes: XACT.linear_elements,
-              label: "linear " + XACT.linear_elements },
-            { cls: "gradient", bytes: XACT.quadratic_elements,
-              label: "seq² " + XACT.quadratic_elements }
-          ], XACT.total_elements)])
+      kicker("Transformer · the activation coefficients, derived"),
+      title("<span class='mono'>" + XA.formula + "</span>", true),
+      d("cols wide-l", [
+        frag(d("panel a", [ph("the LINEAR term · one unit = one seq × d tensor · " +
+          "“B ea” is the dtype width, 1 for a dropout mask"),
+          d("cols", [tbl(XA.linear_terms.slice(0, half), "activation"),
+                     tbl(XA.linear_terms.slice(half), "activation")]),
+          vbox(linOK, "counted <b class='v-activation'>" +
+            CK_SUM(XA.linear_terms) + "</b> &nbsp;·&nbsp; " +
+            "<span class='muted'>the coefficient the deck uses is</span> <b>" +
+            (ACTC ? ACTC.linear : "—") + "</b>")]), "f-left"),
+        frag(d("panel g", [ph("the QUADRATIC term · one unit = one heads × seq² tensor"),
+          tbl(XA.quad_terms, "gradient"),
+          vbox(quadOK, "counted <b class='v-gradient'>" +
+            CK_SUM(XA.quad_terms) + "</b> &nbsp;·&nbsp; " +
+            "<span class='muted'>the coefficient the deck uses is</span> <b>" +
+            (ACTC ? ACTC.quad : "—") + "</b>"),
+          h("small muted", "Three objects of one shape: the softmax output, " +
+            "the mask applied to it, and the result. All " +
+            "<span class='mono'>heads × seq²</span>, all read again during " +
+            "backward."),
+          h("gap8", ""),
+          h("small muted", "<b>Source</b> — " + XA.source + " " + XA.assumes)
+        ]), "f-right")
+      ]),
+      frag(d("cols", [
+        NN.callout("key", "The coefficients follow the dtype, because they are counts",
+          "Halve the activation dtype and you halve the terms that are " +
+          "tensors, but not the ones that are 1-byte masks. Which is why the " +
+          "data ships a coefficient per dtype rather than one number: fp32 " +
+          (ACTC ? XA.coeff_by_dtype.fp32.linear + " / " +
+                  XA.coeff_by_dtype.fp32.quad : "66 / 9") +
+          ", bf16 " + (ACTC ? ACTC.linear + " / " + ACTC.quad : "34 / 5") +
+          ", fp8 " + (ACTC ? XA.coeff_by_dtype.fp8.linear + " / " +
+                             XA.coeff_by_dtype.fp8.quad : "18 / 3") +
+          " — and none is exactly half of the one above it."),
+        NN.callout("why", "And FlashAttention deletes the whole right-hand column",
+          "Under FlashAttention the quadratic list is <b>empty</b> — " +
+          XA.flash.quad_terms.length + " terms — replaced by one per-row " +
+          "statistic at " + (ACTC ? ACTC.flash_extra : 4) +
+          " bytes scaling like <span class='mono'>" +
+          XA.flash.extra_terms[0].scales + "</span>. That one substitution is " +
+          "what the next run is about, and it proves it changes no output.")
       ]), "f-fade")
     ];
   }
 });
-}  /* end if (XF) — the one-block activation census */
+}  /* end if (XA) — the coefficient derivation */
+
 
 /* ---------------------------------------------------------- A13. seq² */
 S({
@@ -9358,12 +9463,16 @@ S({
           cls: "activation" })
       ]), "f-fade"),
       frag(d("cols", [
-        NN.callout("key", "Compare with the other recomputation lever",
-          "Activation checkpointing re-runs a whole block's forward pass during " +
-          "backward — roughly 30% more compute across the <em>entire</em> " +
-          "model, to keep only block inputs. FlashAttention re-runs one matmul " +
-          "inside attention and removes the single largest activation tensor " +
-          "there is. Same currency, very different exchange rate."),
+        NN.callout("key", "Two recomputation levers, and their denominators differ",
+          "FlashAttention's " + FPCTS + " is <b>" + FPCT +
+          "% of <em>attention's</em> FLOPs</b>, and attention is a minority of " +
+          "a block's arithmetic — so the whole-model cost is a couple of per " +
+          "cent. Activation checkpointing's roughly one third is <b>one extra " +
+          "forward pass across the <em>entire</em> model</b>, and the last " +
+          "slide of the scaling run derives it. Two similar-looking " +
+          "percentages, an order of magnitude apart in what you actually pay — " +
+          "and FlashAttention removes the single largest activation tensor " +
+          "there is, which checkpointing only defers."),
         NN.callout("warn", "And the FLOPs were never the binding constraint",
           "Half the matrix was already being computed and thrown away by naive " +
           "kernels; tile skipping hands some of that back. What actually " +
@@ -9746,7 +9855,7 @@ S({
     " of gradients and is comparable to the whole persistent bill. That is " +
     "why the peak in a real transformer is at the forward/backward boundary " +
     "and not, as in our toy model, at the end of backward. Two levers: " +
-    "activation checkpointing, which trades roughly 30% more compute for " +
+    "activation checkpointing, which trades about a third more compute for " +
     "keeping only block inputs; and splitting the batch across GPUs, which is " +
     "the first parallelism strategy and the subject of the whole of Part III.",
   build: function (ctx) {
@@ -9775,7 +9884,9 @@ S({
           "Activation checkpointing keeps only the input of each block and " +
           "re-runs the block's forward during backward. The activation term " +
           "collapses from per-layer to per-checkpoint; you pay roughly one " +
-          "extra forward pass, about 30% more compute."),
+          "extra forward pass — the slide after this one derives that as " +
+          "exactly one extra forward on top of the three a step already " +
+          "costs."),
         NN.callout("mem", "Lever 2 — put fewer sequences on each GPU",
           "Activations are the only one of the four classes that shrinks when " +
           "you add GPUs with no sharding cleverness at all: give each GPU a " +
@@ -9805,6 +9916,149 @@ S({
     ctx.note.innerHTML = "batch <b>" + b + "</b> — activations are " +
       f(CFG.actPerSeq * b / CFG.stateB * 100, 0) + "% of the persistent state, " +
       "and " + f(CFG.actPerSeq * b / CFG.gradB, 1) + "× the gradient buffer.";
+  }
+});
+
+/* ------------------------------------- B5. activation checkpointing, derived
+   The deck quotes "about 30% more compute" as the price of activation
+   checkpointing on four separate slides and has never shown where it comes
+   from, nor what it buys. Both are arithmetic on quantities already on the
+   table: a step costs one forward plus a backward worth two forwards, and the
+   recomputation adds exactly one more forward however many segments you cut
+   the stack into — which is why the segment count is a free memory knob. */
+const CKPT = (function () {
+  const A_LAYER = CFG.actFlashSeq / CFG.layers;          /* one layer, one seq */
+  const BOUND   = CFG.seq * CFG.d * BF16B;               /* one segment input  */
+  const at = function (k) { return k * BOUND + (CFG.layers / k) * A_LAYER; };
+  /* d/dk [ k·BOUND + L·A/k ] = 0  →  k = sqrt(L·A/BOUND) */
+  const kStar = Math.max(1, Math.min(CFG.layers,
+    Math.round(Math.sqrt(CFG.layers * A_LAYER / BOUND))));
+  return { A_LAYER: A_LAYER, BOUND: BOUND, at: at, kStar: kStar,
+           none: CFG.actFlashSeq, every: at(CFG.layers), best: at(kStar) };
+})();
+/* forward = 1 unit of matmul work, backward = 2 (one for dW, one for dInput);
+   recomputation adds exactly one more forward, whatever k is */
+const CKPT_FWD = 1, CKPT_BWD = 2;
+const CKPT_OVERHEAD = CKPT_FWD / (CKPT_FWD + CKPT_BWD);
+
+S({
+  chapter: "Scale · checkpointing", plain: "Activation checkpointing: where the " +
+    f(CKPT_OVERHEAD * 100, 0) + "% comes from, and what it buys",
+  notes: "The deck has now said “about a third more compute” three " +
+    "times without showing the arithmetic, so here it is, and it is two lines. " +
+    "A training step costs one forward pass plus a backward pass, and a " +
+    "backward pass is worth about two forwards because every matmul has to be " +
+    "differentiated twice — once against its weights and once against its " +
+    "input. So a step is " + (CKPT_FWD + CKPT_BWD) + " units. Activation " +
+    "checkpointing throws the interior of each segment away and re-runs it " +
+    "during backward, which adds exactly ONE more forward pass — and here is " +
+    "the part people miss: exactly one, no matter how many segments you cut " +
+    "the stack into, because every segment is recomputed precisely once. " +
+    "That is " + f(CKPT_OVERHEAD * 100, 0) + "% more compute, and it is a " +
+    "constant. Which makes the segment count a free knob, and the curve on " +
+    "the right is what it buys. Keep everything and " + MODEL.name +
+    " costs " + BY(CKPT.none) + " a sequence. Checkpoint every block and it " +
+    "is " + BY(CKPT.every) + " — " + f(CKPT.none / CKPT.every, 1) +
+    "× less for the same " + f(CKPT_OVERHEAD * 100, 0) + "%. The true " +
+    "minimum is at k = √(L·A/boundary) ≈ " + CKPT.kStar + " segments and " +
+    BY(CKPT.best) + ", which is barely better than the simple answer, which " +
+    "is why frameworks just checkpoint every block and stop thinking about " +
+    "it. Step the build and walk the curve.",
+  build: function (ctx) {
+    ctx.ks = [1, 2, 4, 8, 20, CKPT.kStar, CFG.layers]
+      .filter(function (k, i, a) { return a.indexOf(k) === i; })
+      .sort(function (a, b) { return a - b; });
+    ctx.host = el("div", { style: { minHeight: "250px" } });
+    ctx.lab  = h("phaselabel", "");
+    ctx.note = h("say", "");
+    return [
+      kicker("Scale · the recomputation lever, priced"),
+      title("One extra forward pass — however many segments you cut", true),
+      d("cols wide-r", [
+        d("stack", [
+          frag(derivPanel("what a step costs, in units of one forward pass", [
+            drow("forward &nbsp;=&nbsp; <span class='v-activation'>" + CKPT_FWD +
+                 "</span>", "every matmul, once"),
+            drow("backward &nbsp;=&nbsp; <span class='v-gradient'>" + CKPT_BWD +
+                 "</span>", "dW = inputᵀ·dOut <em>and</em> dIn = dOut·Wᵀ"),
+            drow("a step &nbsp;=&nbsp; " + (CKPT_FWD + CKPT_BWD),
+                 "which is where 6·N·D comes from"),
+            drow("+ recompute &nbsp;=&nbsp; " + CKPT_FWD +
+                 " &nbsp;⟹&nbsp; <span class='v-gradient'>+" +
+                 f(CKPT_OVERHEAD * 100, 0) + "%</span>",
+                 "each segment recomputed exactly once", true)
+          ], "g"), "f-left"),
+          frag(NN.callout("key", "The overhead does not depend on the segment count",
+            "Cut the stack into 2 segments or into " + CFG.layers +
+            ", and backward still recomputes each of them exactly once — one " +
+            "full forward pass either way. The compute price is fixed at " +
+            f(CKPT_OVERHEAD * 100, 0) + "%; the memory saving is not. So the " +
+            "segment count is a knob you get for free, and you should turn it " +
+            "all the way up."), "f-left"),
+          ctx.note
+        ]),
+        d("stack", [
+          d("panel a", [ph("activation bytes for one sequence of " + MODEL.name +
+            " · " + CFG.seq + " tokens · FlashAttention on"), ctx.host, ctx.lab])
+        ])
+      ]),
+      frag(d("cols", [
+        NN.callout("mem", "What the two terms are",
+          "Cutting the stack into <span class='mono'>k</span> segments keeps " +
+          "<span class='mono'>k</span> boundary tensors of " +
+          "<span class='mono'>seq × d</span> — " + BY(CKPT.BOUND) +
+          " each — and materialises one segment's interior during backward, " +
+          "which is <span class='mono'>L/k</span> layers at " +
+          BY(CKPT.A_LAYER) + " apiece. One term rises with k and the other " +
+          "falls, so there is a minimum, at <span class='mono'>k = √(L·A / " +
+          "boundary)</span> ≈ " + CKPT.kStar + "."),
+        NN.callout("warn", "What checkpointing does not touch",
+          "Not the weights, not the gradients, not the optimizer state — the " +
+          BY(CFG.stateB) + " of persistent state is exactly as big as it was. " +
+          "Checkpointing is an <span class='v-activation'>activation</span> " +
+          "lever and only an activation lever, which is why it composes with " +
+          "everything in part three and substitutes for none of it.")
+      ]), "f-fade")
+    ];
+  },
+  render: function (n, ctx) {
+    const i = NN.clamp(n, 0, ctx.ks.length - 1);
+    const k = ctx.ks[i];
+    const pts = [];
+    for (let q = 1; q <= CFG.layers; q++) {
+      if (CFG.layers % q === 0 || q <= 8 || q === CKPT.kStar) {
+        pts.push([q, CKPT.at(q) / GBD]);
+      }
+    }
+    ctx.host.innerHTML = "";
+    ctx.host.appendChild(NN.chart.line({
+      series: [
+        { name: "activation bytes", color: "var(--activation)",
+          points: pts, dots: false },
+        { name: "this k", color: "var(--warning)", points: [[k, CKPT.at(k) / GBD]] }
+      ],
+      width: 520, height: 240, xlabel: "checkpoint segments k",
+      ylabel: "GB per sequence", logY: true,
+      margin: { t: 14, r: 16, b: 34, l: 64 }
+    }));
+    ctx.lab.textContent = "k = " + k + " · " + BY(CKPT.at(k)) + " · " +
+      f(CKPT.none / CKPT.at(k), 1) + "× less than keeping everything";
+    ctx.note.innerHTML = k === 1
+      ? "<b>k = 1</b> — no checkpointing. Every layer's activations survive " +
+        "from forward to backward: " + BY(CKPT.none) + " for one sequence."
+      : k === CFG.layers
+        ? "<b>k = " + CFG.layers + "</b> — checkpoint every block, which is " +
+          "what frameworks do. " + BY(CKPT.every) + ", a " +
+          f(CKPT.none / CKPT.every, 1) + "× saving, for the same " +
+          f(CKPT_OVERHEAD * 100, 0) + "% compute."
+        : k === CKPT.kStar
+          ? "<b>k = " + CKPT.kStar + "</b> — the arithmetic minimum, " +
+            BY(CKPT.best) + ". Only " +
+            f(CKPT.every / CKPT.best, 2) + "× better than the simple answer, " +
+            "which is why nobody bothers."
+          : "<b>k = " + k + "</b> — " + BY(CKPT.at(k)) + " a sequence. The " +
+            "compute penalty is still exactly " +
+            f(CKPT_OVERHEAD * 100, 0) + "%.";
   }
 });
 
@@ -10271,7 +10525,7 @@ S({
     "at the ring factors: reduce_scatter is " + byOp("reduce_scatter").ring_factor +
     ", all_gather is " + byOp("all_gather").ring_factor + ", and their sum is " +
     byOp("all_reduce").ring_factor + ". Exactly. Now hold the thought that will " +
-    "come back in twenty slides: if a rank only ever needs its own shard, the " +
+    "come back when we get to ZeRO: if a rank only ever needs its own shard, the " +
     "second half is pure waste. Skipping it costs nothing and saves half the " +
     "traffic — and it is the whole of ZeRO stage 2.",
   build: function (ctx) {
@@ -10327,7 +10581,7 @@ S({
         "other shard. If a rank is only ever going to update its own shard of " +
         "the parameters, that second half is " +
         f(agF / arF * 100, 0) + "% of the traffic spent on data it will throw " +
-        "away. Twenty slides from now that observation is called ZeRO-2."), "f-fade")
+        "away. Two sections from now that observation is called ZeRO-2."), "f-fade")
     ];
   },
   render: function (n, ctx) {
@@ -11970,14 +12224,8 @@ function spStream() {
 }
 function spOwner(i)  { return Math.floor(i / SPPER); }
 
-/* Which slide established all_reduce = reduce_scatter + all_gather. Looked
-   up rather than typed, so the link survives slides being inserted. */
-function slideNumberByPlain(needle) {
-  for (let i = 0; i < SLIDES.length; i++) {
-    if (SLIDES[i].plain && SLIDES[i].plain.indexOf(needle) >= 0) return i + 1;
-  }
-  return null;
-}
+/* Which slide established all_reduce = reduce_scatter + all_gather is looked
+   up with the deck-wide helper, so the link survives slides being inserted. */
 const SEC_COLL = SECTIONS.filter(function (x) { return x.id === "collectives"; })[0];
 
 /* ---- LayerNorm statistics, derived from what SEQPAR ships --------------
@@ -12377,18 +12625,20 @@ S({
                 "rank 0 owns rows 0–" + (SPPER - 1), 3);
     ctx.act = am("MLP hidden · " + SPSEQ + " × " + SPFF, SPBASE.act,
                  "rank 0 owns cols 0–" + (SPFPR - 1), 2);
+    ctx.cap = h("phaselabel", "");
     return [
       kicker("Distributed · sequence parallel · the two axes"),
       title("Cut one tensor by row and the next by column", true),
+      ctx.cap,
       d("cols", [
-        d("panel a", [ph("SP region · sharded by SEQUENCE · rank 0's rows lit"),
+        frag(d("panel a", [ph("SP region · sharded by SEQUENCE · rank 0's rows"),
           ctx.ln,
           h("small muted", SPPER + " tokens × " + SPDM + " channels = " +
-            (SPPER * SPDM) + " elements per rank")]),
-        d("panel a", [ph("TP region · sharded by HIDDEN · rank 0's columns lit"),
+            (SPPER * SPDM) + " elements per rank")]), "f-left"),
+        frag(d("panel a", [ph("TP region · sharded by HIDDEN · rank 0's columns"),
           ctx.act,
           h("small muted", SPSEQ + " tokens × " + SPFPR + " neurons = " +
-            (SPSEQ * SPFPR) + " elements per rank")])
+            (SPSEQ * SPFPR) + " elements per rank")]), "f-right")
       ]),
       frag(d("cols", [
         NN.callout("key", "Nothing is replicated any more",
@@ -12402,9 +12652,24 @@ S({
       ]), "f-fade")
     ];
   },
+  /* The point of the slide is that the SAME rank owns a horizontal slab of
+     one tensor and a vertical slab of the next, so the two cuts land one at a
+     time rather than arriving together. */
   render: function (n, ctx) {
-    ctx.ln.highlight(grid2(SPPER, SPDM, function (i, j) { return [i, j]; }), true);
-    ctx.act.highlight(grid2(SPSEQ, SPFPR, function (i, j) { return [i, j]; }), true);
+    ctx.ln.highlight(n >= 1
+      ? grid2(SPPER, SPDM, function (i, j) { return [i, j]; }) : null, n >= 1);
+    ctx.act.highlight(n >= 2
+      ? grid2(SPSEQ, SPFPR, function (i, j) { return [i, j]; }) : null, n >= 2);
+    ctx.cap.innerHTML =
+      n >= 3 ? "Two tensors, two axes, <b>one rank</b> — and between them the " +
+               "region is covered with nothing left over."
+    : n >= 2 ? "…and rank 0 owns <b>columns 0–" + (SPFPR - 1) +
+               "</b> of the MLP hidden state: every token, its own neurons."
+    : n >= 1 ? "Rank 0 owns <b>rows 0–" + (SPPER - 1) +
+               "</b> of the LayerNorm output — “" + SPTOK[0] + "” and “" +
+               SPTOK[1] + "”, all " + SPDM + " channels of each."
+    : "Two tensors from the same region, both " + SPSEQ + " rows tall. " +
+      "Press → to cut them.";
   }
 });
 
@@ -12819,6 +13084,23 @@ S({
 });
 
 /* ----------------------------------------------------- SP12. at scale, the table */
+/* The paper's coefficient is bytes per token per layer PER HIDDEN DIMENSION —
+   its formula is s·b·h·(A + B/t), so h is a factor and must not be dropped.
+   Every "one sequence, per rank" figure on this slide goes through here, and
+   the t = 1 row is checked against the activation figure the cost run quoted
+   for the same model, which is the same accounting arrived at independently. */
+function spSeqBytes(bytesPerTokenPerLayer) {
+  return bytesPerTokenPerLayer * CFG.seq * CFG.layers * CFG.d;
+}
+const SP_T1_CROSS = Math.abs(spSeqBytes(SP_T1.bytes_per_token_per_layer_tp_only) -
+                             CFG.actFlashSeq) / CFG.actFlashSeq;
+if (SP_T1_CROSS > 0.01) {
+  console.warn("nn-internals slides: Korthikanti at t=1 disagrees with the deck's " +
+               "own activation accounting by " + (SP_T1_CROSS * 100) + "%");
+}
+const SP_DIFF_T8 = spSeqBytes(SP_T8.bytes_per_token_per_layer_tp_only -
+                              SP_T8.bytes_per_token_per_layer_tp_sp);
+
 S({
   chapter: "Sequence parallel · at scale",
   plain: "At t = " + SP_T8.tp + ": " +
@@ -12827,18 +13109,28 @@ S({
   notes: "The same numbers as a table, and then what they mean for a real run. " +
     "Read the saving column: it starts at zero at t = 1, because there is " +
     "nothing to save on one GPU, and climbs past two thirds by t = " +
-    SP_T8.tp + ". Then put the model on it. " + MODEL.name + " has " +
-    CFG.layers + " layers and runs at " + CFG.seq + " tokens, so at t = " +
-    SP_T8.tp + " one sequence's activations in this accounting are " +
-    BY(SP_T8.bytes_per_token_per_layer_tp_only * CFG.seq * CFG.layers) +
-    " under tensor parallelism alone and " +
-    BY(SP_T8.bytes_per_token_per_layer_tp_sp * CFG.seq * CFG.layers) +
-    " with sequence parallelism, per rank. That difference is bigger than the " +
-    "whole gradient buffer of a 70B model in bf16, which the cost run put at " +
-    BY(CFG.gradB) + ". It is also, in practice, the difference between " +
-    "needing full activation recomputation and not — which is exactly the " +
-    "argument the Korthikanti paper is making, since its title is about " +
-    "reducing activation recomputation rather than about parallelism at all.",
+    SP_T8.tp + ". Then put the model on it, and read the formula carefully " +
+    "first: the coefficient is bytes per token per layer <em>per hidden " +
+    "dimension</em>, because the paper's expression is s·b·h·(A + B/t). So the " +
+    "figure for one sequence is the coefficient times " + CFG.seq +
+    " tokens times " + CFG.layers + " layers times d = " + CFG.d + ". At t = " +
+    SP_T8.tp + " that is " +
+    BY(spSeqBytes(SP_T8.bytes_per_token_per_layer_tp_only)) +
+    " under tensor parallelism alone against " +
+    BY(spSeqBytes(SP_T8.bytes_per_token_per_layer_tp_sp)) +
+    " with sequence parallelism, per rank — a saving of " +
+    BY(SP_DIFF_T8) + ", which is " +
+    f(SP_DIFF_T8 / CFG.gradB * 100, 0) + "% of the entire bf16 gradient " +
+    "buffer the cost run priced at " + BY(CFG.gradB) + ". The cross-check " +
+    "worth reading out is the t = 1 row: " +
+    BY(spSeqBytes(SP_T1.bytes_per_token_per_layer_tp_only)) +
+    " for one sequence on one GPU, which is the same " + BY(CFG.actPerSeq) +
+    " the cost run quoted for " + MODEL.name +
+    " with FlashAttention on — two independent accountings landing on the same " +
+    "number. And in practice this is the difference between needing full " +
+    "activation recomputation and not, which is exactly the argument the " +
+    "Korthikanti paper is making, since its title is about reducing activation " +
+    "recomputation rather than about parallelism at all.",
   build: function () {
     const rows = SPSCL.table.map(function (r) {
       const hot = r.tp === SP_T8.tp;
@@ -12851,18 +13143,18 @@ S({
            f(r.bytes_per_token_per_layer_tp_sp, 3)),
         el("td", { class: "n" }, f(r.saving_pct, 1) + "%"),
         el("td", { class: "n" },
-           BY(r.bytes_per_token_per_layer_tp_only * CFG.seq * CFG.layers)),
+           BY(spSeqBytes(r.bytes_per_token_per_layer_tp_only))),
         el("td", { class: "n v-activation" },
-           BY(r.bytes_per_token_per_layer_tp_sp * CFG.seq * CFG.layers))
+           BY(spSeqBytes(r.bytes_per_token_per_layer_tp_sp)))
       ]);
     });
     return [
       kicker("Distributed · sequence parallel · the table"),
       title("What it is worth on a real model", true),
       d("cols wide-l", [
-        d("panel a", [ph("bytes per token per layer, and then × " + CFG.seq +
-          " tokens × " + CFG.layers + " layers for " + MODEL.name +
-          " — one sequence, per rank"),
+        d("panel a", [ph("bytes per token per layer per hidden dim, then × " +
+          CFG.seq + " tokens × " + CFG.layers + " layers × d " + CFG.d +
+          " for " + MODEL.name + " — one sequence, per rank"),
           el("table", { class: "data" }, [
             el("thead", {}, el("tr", {}, [
               el("th", {}, "t"), el("th", {}, "TP only"),
@@ -12870,24 +13162,36 @@ S({
               el("th", {}, "TP only, one seq"), el("th", {}, "TP + SP, one seq")])),
             el("tbody", {}, rows)
           ]),
-          h("small muted", SPSCL._source)]),
+          h("small muted", SPSCL._source + " The coefficient is per token " +
+            "per layer <b>per hidden dimension</b> — the paper's expression is " +
+            "<span class='mono'>s·b·h·(A + B/t)</span>, so the last two " +
+            "columns carry the <span class='mono'>× d " + CFG.d +
+            "</span> factor as well.")]),
         d("stack", [
+          frag(d("vbox", [
+            el("span", { class: "mark" }, "✓"),
+            el("span", { html: "<b>cross-check at t = " + SP_T1.tp + "</b> — " +
+              BY(spSeqBytes(SP_T1.bytes_per_token_per_layer_tp_only)) +
+              " for one sequence, against the <b>" + BY(CFG.actPerSeq) +
+              "</b> the cost run derived for " + MODEL.name +
+              " from its own tensor census. Two accountings, same number." })
+          ]), "f-right"),
           frag(NN.tiles([
             { k: "at t = " + SP_T8.tp + ", TP only",
-              v: BY(SP_T8.bytes_per_token_per_layer_tp_only * CFG.seq * CFG.layers),
+              v: BY(spSeqBytes(SP_T8.bytes_per_token_per_layer_tp_only)),
               s: "per rank, one sequence" },
             { k: "at t = " + SP_T8.tp + ", TP + SP",
-              v: BY(SP_T8.bytes_per_token_per_layer_tp_sp * CFG.seq * CFG.layers),
+              v: BY(spSeqBytes(SP_T8.bytes_per_token_per_layer_tp_sp)),
               s: f(SP_T8.saving_pct, 1) + "% less", cls: "activation" },
-            { k: "difference", v: BY((SP_T8.bytes_per_token_per_layer_tp_only -
-                 SP_T8.bytes_per_token_per_layer_tp_sp) * CFG.seq * CFG.layers),
-              s: "against " + BY(CFG.gradB) + " of bf16 gradients",
+            { k: "difference", v: BY(SP_DIFF_T8),
+              s: f(SP_DIFF_T8 / CFG.gradB * 100, 0) + "% of the " +
+                 BY(CFG.gradB) + " gradient buffer",
               cls: "activation" }
           ]), "f-right"),
           frag(NN.callout("mem", "What that buys, concretely",
             "Activation memory is the term you trade for throughput: it is what " +
             "sets the micro-batch size and it is what activation recomputation " +
-            "is spending 30% of your compute to avoid. Cutting it by " +
+            "is spending " + f(CKPT_OVERHEAD * 100, 0) + "% of your compute to avoid. Cutting it by " +
             f(SP_T8.saving_pct, 0) + "% at no communication cost is why the " +
             "paper this table comes from is titled after recomputation rather " +
             "than after parallelism."), "f-right"),
@@ -13056,17 +13360,31 @@ S({
         return NN.gpu.commCard(c); })), "f-fade"),
       frag(d("cols", [
         NN.tiles([
-          { k: "per-GPU model state", v: memTot(PP) + " elems",
+          { k: "per-GPU model state · AVERAGE", v: memTot(PP) + " elems",
             s: "of " + memTot(DDP) + " on one GPU", cls: "optimizer" },
+          { k: "actual, per stage",
+            v: PP.stages.map(function (s) { return s.params; }).join(" / "),
+            s: "parameters — no stage holds the average", cls: "weight" },
           { k: "message size", v: PP.schedule[0].elements + " elems",
-            s: "one micro-batch of activations", cls: "activation" },
-          { k: "ranks per message", v: "2", s: "point-to-point, not collective" }
+            s: "one micro-batch of activations", cls: "activation" }
         ]),
-        NN.callout("key", "The cheapest communication in the deck",
-          "A stage boundary moves one micro-batch of activations between two " +
-          "adjacent ranks. No collective, no ring, no all-to-all. That is why " +
-          "PP is the axis you stretch across slow links — and why it is the " +
-          "outermost dimension of almost every real 3D configuration.")
+        NN.callout("warn", "The average is not a stage — and it is the largest stage that has to fit",
+          "The per-GPU figure above is what the data calls it: an " +
+          "<b>average</b>. The real stages hold " +
+          PP.stages.map(function (s) { return s.params; }).join(", ") +
+          " parameters, against an average of " + PP.memory_per_gpu.weights +
+          ". The biggest is <b>" +
+          f(Math.max.apply(null, PP.stages.map(function (s) { return s.params; })) /
+            PP.memory_per_gpu.weights, 1) +
+          "×</b> the average, and it is the one that decides whether the job " +
+          "starts. Balancing the stages — by layer count, and by keeping the " +
+          "embedding and the output head off the same end — is real " +
+          "engineering, not a detail. Pipeline parallelism is the only axis in " +
+          "this deck that does not divide evenly by construction. The " +
+          "point-to-point message, by contrast, is the cheapest communication " +
+          "anywhere in the deck: two ranks, one activation tensor, no " +
+          "collective — which is why PP is the axis you stretch across slow " +
+          "links.")
       ]), "f-fade")
     ];
   }
@@ -13149,7 +13467,7 @@ S({
           "Each one that has been forwarded but not yet backwarded is holding " +
           "its own activations on every stage it has passed through. That is " +
           "the trade: more micro-batches means less bubble and more live " +
-          "activation. Two slides from now that tension has a name.")
+          "activation. Two slides on, that tension has a name: GPipe against 1F1B.")
       ]), "f-fade")
     ];
   }
@@ -13486,8 +13804,13 @@ S({
       frag(h("small muted", "The ZeRO-3 column is a <b>range</b>, not a size: " +
         "<span class='mono'>TF2.flat_sharding</span> lays all " +
         FS.total_elements + " parameters end to end and cuts <em>that</em>. " +
-        "Three slides from now we watch a shard boundary land in the middle " +
-        "of a weight matrix."))
+        (function () {
+          const n = slideNumberByPlain("boundaries land inside matrices");
+          return n ? "Slide <b>" + n + "</b> watches a shard boundary land in " +
+                     "the middle of a weight matrix."
+                   : "Later in this run we watch a shard boundary land in the " +
+                     "middle of a weight matrix.";
+        })()))
     ];
   }
 });
@@ -14846,11 +15169,21 @@ S({
           "and <span class='v-gradient'>gradients</span>. Four classes, three " +
           "axes, and the four-class table at the end of this deck is how you " +
           "choose."),
-        NN.callout("why", "Why they compose cleanly",
-          "Because each one is a statement about a different index. TP splits " +
-          "the hidden dimension, PP splits the layer index, DP splits the " +
-          "batch index. Nothing overlaps, so the memory savings multiply " +
-          "rather than compete.")
+        /* the previous slide already made the orthogonality argument on the
+           real block; what this run adds is that the factorisation is the
+           easy half and the MAPPING is the hard one — which is the handoff
+           into the next two slides */
+        NN.callout("why", "The factorisation is the easy half",
+          "Any three factors of " + REC.gpus + " compose: the memory savings " +
+          "multiply because each axis splits a different index, which the " +
+          "partitioning run just showed on a real block. What they do " +
+          "<em>not</em> do is cost the same. The collectives add rather than " +
+          "multiply, and they add at wildly different prices depending on " +
+          "which wire they land on — <span class='mono'>" + REC.tp + " × " +
+          REC.pp + " × " + REC.dp + "</span> and <span class='mono'>" +
+          REC.dp + " × " + REC.pp + " × " + REC.tp + "</span> are the same " +
+          "factorisation and can differ by more than 2× in throughput. The " +
+          "next two slides are about that difference and nothing else.")
       ]), "f-fade")
     ];
   }
@@ -15032,11 +15365,20 @@ S({
         ])
       ]),
       frag(NN.callout("key", "This is where the micro-batch size comes from",
-        "You do not choose it and hope. You compute the persistent state, " +
-        "subtract it from the card, and divide what is left by the " +
-        "per-sequence activation cost — " + BY(CFG.actPerSeq) + " at " +
-        CFG.seq + " tokens with FlashAttention, further divided by TP because " +
-        "tensor parallelism shards activations too."), "f-fade"),
+        "You do not choose it and hope. Start from " + BY(CFG.actPerSeq) +
+        " a sequence at " + CFG.seq + " tokens with FlashAttention on. Divide " +
+        "by TP = " + REC.tp + ", because tensor parallelism shards the " +
+        "activations inside a layer. Divide by PP = " + REC.pp + ", because a " +
+        "stage only holds its own " + REC.layersPerStage + " layers. Multiply " +
+        "back up by the micro-batches in flight — with 1F1B that is at most P, " +
+        "not M. That gives " + BY(CFG.actPerSeq / (REC.tp * REC.pp)) +
+        " per sequence per card, against " + BY(GPU_B - REC.stateB) +
+        " of headroom, so roughly <b>" +
+        Math.max(1, Math.floor((GPU_B - REC.stateB) /
+          (CFG.actPerSeq / (REC.tp * REC.pp)))) +
+        "</b> live micro-batches before checkpointing — and the checkpointing " +
+        "slide at the end of the scaling run is what you reach for when that " +
+        "number comes out below P."), "f-fade"),
       frag(h("small muted",
         "The degrees here are a <b>scenario</b>, not a property of the model. " +
         "Every quantity is derived from <span class='mono'>T.reference_configs</span> " +
@@ -15222,7 +15564,7 @@ S({
       frag(d("cols3", [
         panel("a tight", [ph("recompute instead of remember"),
           h("small", "Activation checkpointing: keep block inputs, re-run the " +
-            "forward during backward. About 30% more compute for a large " +
+            "forward during backward. " + f(CKPT_OVERHEAD * 100, 0) + "% more compute for a large " +
             "constant-factor saving.")]),
         panel("a tight", [ph("never materialise it"),
           h("small", "FlashAttention keeps per-row softmax statistics instead " +

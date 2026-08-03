@@ -1,0 +1,1239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 31 Serving at Scale</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* page-local layout only; every colour is a design.css custom property */
+.panel { background: var(--surface-2); border: 1px solid var(--hairline);
+         border-radius: 8px; padding: 12px 14px; }
+.panel h4 { margin: 0 0 10px; font-family: var(--mono); font-size: .7rem; letter-spacing: .13em;
+            text-transform: uppercase; color: var(--ink-muted); font-weight: 700; }
+.ctlgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+           gap: 13px; margin: 16px 0; }
+.ctlgrid > *, .grid2 > *, .grid3 > * { min-width: 0; }
+.fld { margin: 0 0 11px; }
+.fld:last-child { margin-bottom: 0; }
+.fld > label { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+               font-family: var(--mono); font-size: .74rem; color: var(--ink-2); margin-bottom: 3px; }
+.fld .rv { color: var(--ink); font-weight: 700; font-variant-numeric: tabular-nums; }
+.fld input[type="range"], .fld select { width: 100%; }
+.fld select { background: var(--surface-3); color: var(--ink); border: 1px solid var(--hairline);
+              border-radius: 6px; padding: 5px 7px; font-family: var(--mono); font-size: .8rem; }
+.fld .chk { display: flex; align-items: center; gap: 8px; font-family: var(--mono);
+            font-size: .74rem; color: var(--ink-2); }
+.hint { font-size: .68rem; color: var(--ink-muted); font-family: var(--mono); line-height: 1.55; }
+
+.arith { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .8rem;
+         font-variant-numeric: tabular-nums; margin: 6px 0 0; }
+.arith td { padding: 5px 8px; border-bottom: 1px solid var(--hairline-2); white-space: nowrap; }
+.arith td.r { text-align: right; }
+.arith td.term { color: var(--ink-2); white-space: normal; }
+.arith tr.sum td { border-top: 1px solid var(--hairline); border-bottom: none;
+                   font-weight: 700; color: var(--ink); padding-top: 8px; }
+.arith tr.gap td { height: 9px; border: none; padding: 0; }
+
+.verdict { border-radius: 8px; padding: 15px 20px; margin: 16px 0; border: 1px solid var(--hairline);
+           background: var(--surface-2); display: flex; flex-wrap: wrap;
+           align-items: baseline; gap: 8px 22px; }
+.verdict .big { font-size: 1.5rem; font-weight: 800; letter-spacing: -.02em; line-height: 1.15; }
+.verdict .det { font-family: var(--mono); font-size: .84rem; color: var(--ink-2); }
+.verdict.ok  { border-left: 4px solid var(--good); }
+.verdict.ok .big { color: var(--good); }
+.verdict.bad { border-left: 4px solid var(--critical); }
+.verdict.bad .big { color: var(--critical); }
+.verdict.pend { border-left: 4px solid var(--accent); }
+.verdict.pend .big { color: var(--ink-2); }
+
+table.data td.wrap, table.data th.wrap { white-space: normal; max-width: 320px; text-align: left; }
+table.data tr.hi { background: var(--surface-3); }
+table.data td.bad { color: var(--critical); }
+table.data td.good { color: var(--good); }
+
+/* two-pool diagram */
+.pools { display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; align-items: center;
+         margin: 16px 0; }
+.pool { border-radius: 9px; border: 1px solid var(--hairline); background: var(--surface-2);
+        padding: 12px 14px; }
+.pool.pre { border-left: 3px solid var(--weight); }
+.pool.dec { border-left: 3px solid var(--activation); }
+.pool h5 { margin: 0 0 7px; font-family: var(--mono); font-size: .72rem; letter-spacing: .1em;
+           text-transform: uppercase; color: var(--ink-muted); }
+.pool .line { font-family: var(--mono); font-size: .74rem; color: var(--ink-2); line-height: 1.7; }
+.pool .line b { color: var(--ink); }
+.xfer { text-align: center; font-family: var(--mono); font-size: .72rem;
+        color: var(--activation); padding: 0 4px; }
+.xfer .big { font-size: 1.15rem; font-weight: 800; display: block; }
+.xfer .arrow { font-size: 1.5rem; line-height: 1; display: block; }
+@media (max-width: 860px) {
+  .pools { grid-template-columns: 1fr; }
+  .grid2 { grid-template-columns: 1fr; }
+}
+
+/* prefix-cache block strip */
+.blocks { display: flex; flex-wrap: wrap; gap: 3px; margin: 12px 0; }
+.blk { width: 20px; height: 20px; border-radius: 3px; background: var(--surface-3);
+       border: 1px solid var(--hairline-2); }
+.blk.shared { background: var(--activation); }
+.blk.own    { background: color-mix(in srgb, var(--activation) 32%, var(--surface-3)); }
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 31</div>
+    <h1>Serving at Scale</h1>
+    <p class="lede">A serving system is a scheduler. Everything the previous seven pages built —
+      the KV cache, paged blocks, continuous batching, quantisation, speculation, the
+      parallelism layout — is a knob it turns, and it turns them against each other, because
+      time-to-first-token, inter-token latency and throughput cannot all be maximised at once.
+      This page prices the tradeoff: what a prefill costs the decodes running beside it, what it
+      costs to move a KV cache to a different machine instead, and what happens when the cache
+      is full and something has to give.</p>
+    <noscript><p class="callout warn">This page derives every number in the browser from
+      <code>assets/data/trace.js</code>, <code>assets/data/parallel.js</code> and
+      <code>assets/data/infer.js</code>. With JavaScript disabled you will see an empty shell.</p></noscript>
+  </div>
+
+  <section class="block" id="metrics">
+    <h2>1 · Four metrics that fight, and the scheduler in the middle</h2>
+    <div id="metricsBody"></div>
+  </section>
+
+  <section class="block" id="disagg">
+    <h2>2 · Disaggregated prefill and decode</h2>
+    <div id="disaggBody"></div>
+  </section>
+
+  <section class="block" id="xfer">
+    <h2>3 · The bill: moving the KV cache between pools</h2>
+    <div id="xferBody"></div>
+  </section>
+
+  <section class="block" id="sched">
+    <h2>4 · Scheduling: admission, preemption, and a full cache</h2>
+    <div id="schedBody"></div>
+  </section>
+
+  <section class="block" id="prefix">
+    <h2>5 · Prefix caching across requests</h2>
+    <div id="prefixBody"></div>
+  </section>
+
+  <section class="block" id="limits">
+    <h2>6 · The honest limits</h2>
+    <div id="limitsBody"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/parallel.js"></script>
+<script src="../assets/data/infer.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T   = NN.T;
+  const P   = NN.P;
+  const INF = window.INFER;
+  const el  = NN.el;
+  const fmt = NN.fmt;
+
+  function p(html) { return el("p", { html: html }); }
+  function h3(t)   { return el("h3", { text: t }); }
+  function code(t) { return "<code>" + t + "</code>"; }
+  function ms(s)   { return fmt(s * 1e3, s * 1e3 < 10 ? 2 : 1) + " ms"; }
+  function secs(s) { return s >= 1 ? fmt(s, 2) + " s" : ms(s); }
+  function pct(v)  { return fmt(v * 100, 1) + "%"; }
+  const x = "×";
+
+  /* ====================================================================== */
+  /*  CANONICAL INPUTS                                                      */
+  /* ====================================================================== */
+  const RC   = T.reference_configs;
+  const COST = P.cost_model;
+  const BF16 = T.memory.dtype_bytes.bf16;
+
+  function linkByName(re) {
+    return P.interconnects.links.filter(function (l) { return re.test(l.name); })[0];
+  }
+  const NVL = linkByName(/NVLink 4/);
+  const NDR = linkByName(/NDR/);
+  const PCI = linkByName(/PCIe/);
+  const PER_NODE = 8;                       /* stated, as on pages 23 and 30 */
+  const MFU = 0.45;                         /* stated, per RC.mfu_note */
+
+  const ARC = P.collectives.filter(function (c) { return c.op === "all_reduce"; })[0];
+  function ringFactor(N) {
+    const v = ARC.ring_factor_at_world[String(N)];
+    return v === undefined ? (N > 1 ? 2 * (N - 1) / N : 0) : v;
+  }
+
+  const MODELS = RC.models.filter(function (m) { return m.n_layers && m.n_heads; })
+                          .map(function (m) {
+    const nkv = m.n_kv_heads || m.n_heads;
+    return { name: m.name, params: m.params, d_model: m.d_model, n_layers: m.n_layers,
+             n_heads: m.n_heads, n_kv_heads: nkv, d_head: m.d_model / m.n_heads, seq: m.seq };
+  });
+  const GPUS = RC.gpus;
+  const DEF_MODEL = MODELS.filter(function (m) { return m.name === RC.default_model; })[0];
+  const DEF_GPU   = GPUS.filter(function (g) { return g.name === RC.default_gpu; })[0];
+
+  function kvBytes(m, seq, dtype) {
+    return 2 * m.n_layers * seq * m.n_kv_heads * m.d_head * (dtype === undefined ? BF16 : dtype);
+  }
+  function weightBytes(m, dtype) { return m.params * (dtype === undefined ? BF16 : dtype); }
+
+  const KV_CHECK = (function () {
+    let worst = 0, n = 0;
+    INF.kv_cache.rows.forEach(function (r) {
+      const m = MODELS.filter(function (mm) { return mm.name === r.model; })[0];
+      if (!m) return;
+      worst = Math.max(worst, Math.abs(kvBytes(m, r.seq) - r.bytes_per_sequence));
+      n++;
+    });
+    return { rows: n, maxAbsErr: worst, ok: worst === 0 };
+  })();
+
+  const SEQS = (function () {
+    const s = {};
+    INF.kv_cache.rows.forEach(function (r) { s[r.seq] = 1; });
+    return Object.keys(s).map(Number).sort(function (a, b) { return a - b; });
+  })();
+
+  /* ---- the decode / prefill cost model, same as page 30 ---------------- */
+  function alphaOf(N) {
+    return (N > PER_NODE ? COST.latency_us.inter_node : COST.latency_us.intra_node) * 1e-6;
+  }
+  function linkOf(N) { return N > PER_NODE ? NDR : NVL; }
+
+  /** One decode step: bytes read / HBM bandwidth, plus TP's collectives. */
+  function decodeStep(m, gpu, tp, batch, seq) {
+    const w = weightBytes(m), kv = kvBytes(m, seq) * batch;
+    const perGpu = (w + kv) / tp;
+    const tMem = perGpu / gpu.hbm_bw_bytes_per_s;
+    const payload = batch * m.d_model * BF16;
+    const ar = alphaOf(tp) * (tp > 1 ? 2 * (tp - 1) : 0) +
+               (tp > 1 ? ringFactor(tp) * payload /
+                 (linkOf(tp).per_dir_GBps * 1e9 * COST.achieved_fraction) : 0);
+    const comm = 2 * m.n_layers * ar;
+    return { tMem: tMem, comm: comm, itl: tMem + comm, perGpu: perGpu, kvAll: kv, wBytes: w };
+  }
+  /** One prefill: 2 x params x tokens FLOPs at a stated MFU. */
+  function prefillTime(m, gpu, tp, tokens) {
+    return 2 * m.params * tokens / tp / (gpu.bf16_dense_tflops * 1e12 * MFU);
+  }
+
+  /* ====================================================================== */
+  /*  1 · THE METRICS                                                       */
+  /* ====================================================================== */
+  (function () {
+    const host = NN.$("#metricsBody");
+
+    host.appendChild(p(
+      "<a href='30-inference-parallelism.html'>Page 30</a> introduced TTFT and ITL as two " +
+      "different things called &ldquo;latency&rdquo;. A serving system has to hold four " +
+      "numbers at once, and the fourth is the one that actually gets paid for."
+    ));
+
+    const tbl = el("table", { class: "data" });
+    tbl.innerHTML =
+      "<thead><tr><th>metric</th><th class='wrap'>definition</th>" +
+      "<th class='wrap'>the scheduler raises it by…</th>" +
+      "<th class='wrap'>…which costs</th></tr></thead><tbody>" +
+      "<tr><td>TTFT</td><td class='wrap'>request arrival → first token</td>" +
+        "<td class='wrap'>admitting the request sooner; prioritising prefill over decode</td>" +
+        "<td class='wrap'>every in-flight decode stalls behind that prefill</td></tr>" +
+      "<tr><td>ITL</td><td class='wrap'>token <i>t</i> → token <i>t</i>+1, once streaming starts</td>" +
+        "<td class='wrap'>a smaller decode batch; never interrupting decode with prefill</td>" +
+        "<td class='wrap'>throughput, directly — decode batching is nearly free otherwise</td></tr>" +
+      "<tr><td>throughput</td><td class='wrap'>tokens/s over the whole fleet</td>" +
+        "<td class='wrap'>a larger decode batch; more sequences resident in the KV cache</td>" +
+        "<td class='wrap'>ITL, and memory that runs out</td></tr>" +
+      "<tr><td>goodput</td><td class='wrap'>throughput counting only requests that met their " +
+        "TTFT and ITL targets</td>" +
+        "<td class='wrap'>nothing directly — it is the score, not a knob</td>" +
+        "<td class='wrap'>—</td></tr>" +
+      "</tbody>";
+    host.appendChild(el("div", { class: "scrollx" }, tbl));
+
+    host.appendChild(p(
+      "Goodput is the point. A pool running at 100% utilisation with every request three " +
+      "seconds late is producing tokens nobody accepted. A pool at 20% utilisation with " +
+      "perfect latency is producing an invoice. The scheduler's job is to sit between the two, " +
+      "continuously, per step — and the reason it is <em>continuous</em> is that the choice " +
+      "is remade at every decode step, not per request (" +
+      "<a href='26-batching.html'>page 26</a>)."
+    ));
+
+    /* ---- the interactive ------------------------------------------------
+       MODEL. One colocated pool, TP = PER_NODE, running continuous batching.
+       Closed form, derived in the prose below the controls:
+         ITL_eff = ITL_decode + B x t_prefill / output_len
+       because in steady state the pool must prefill one request for every
+       `output_len` decode tokens it emits per sequence.                     */
+    const S = {
+      model: DEF_MODEL, gpu: DEF_GPU, tp: PER_NODE,
+      batch: 32, prompt: 8192, out: 256,
+      ttftSlo: 2.0, itlSlo: 50
+    };
+
+    function sim(st, batch, disagg) {
+      const m = st.model, g = st.gpu;
+      const d = decodeStep(m, g, st.tp, batch, st.prompt + st.out / 2);
+      const tp = prefillTime(m, g, st.tp, st.prompt);
+      /* colocated: prefill work steals decode time. disaggregated: it does not. */
+      const interference = disagg ? 0 : batch * tp / st.out;
+      const itl = d.itl + interference;
+      const ttft = tp + itl;                       /* one step of head-of-line blocking */
+      const tput = batch / itl;
+      const ok = ttft <= st.ttftSlo && itl * 1e3 <= st.itlSlo;
+      return { d: d, tPrefill: tp, interference: interference, itl: itl, ttft: ttft,
+               tput: tput, ok: ok, goodput: ok ? tput : 0,
+               kvNeeded: kvBytes(m, st.prompt + st.out) * batch,
+               kvCap: (g.hbm_bytes - weightBytes(m) / st.tp) * st.tp };
+    }
+
+    const out = el("div");
+
+    function listSlider(key, list, label, fmtv) {
+      const idx = Math.max(0, list.indexOf(S[key]));
+      const rv = el("span", { class: "rv" }, fmtv(S[key]));
+      const inp = el("input", { type: "range", min: 0, max: list.length - 1, step: 1, value: idx });
+      inp.addEventListener("input", function () {
+        S[key] = list[+inp.value]; rv.textContent = fmtv(S[key]); render();
+      });
+      return el("div", { class: "fld" }, [el("label", {}, [el("span", {}, label), rv]), inp]);
+    }
+    function rangeSlider(key, min, max, step, label, fmtv) {
+      const rv = el("span", { class: "rv" }, fmtv(S[key]));
+      const inp = el("input", { type: "range", min: min, max: max, step: step, value: S[key] });
+      inp.addEventListener("input", function () {
+        S[key] = +inp.value; rv.textContent = fmtv(S[key]); render();
+      });
+      return el("div", { class: "fld" }, [el("label", {}, [el("span", {}, label), rv]), inp]);
+    }
+
+    const BATCHES = [1, 2, 4, 8, 16, 32, 64, 128, 256];
+    const OUTS    = [32, 64, 128, 256, 512, 1024, 2048];
+
+    host.appendChild(el("div", { class: "ctlgrid" }, [
+      el("div", { class: "panel" }, [
+        el("h4", {}, "workload"),
+        listSlider("batch", BATCHES, "concurrent sequences", String),
+        listSlider("prompt", SEQS, "prompt tokens", NN.count),
+        listSlider("out", OUTS, "output tokens per request", NN.count),
+        el("div", { class: "hint" },
+          "Prompt length drives prefill cost and KV size; output length is what the prefill " +
+          "cost gets amortised over.")
+      ]),
+      el("div", { class: "panel" }, [
+        el("h4", {}, "service level objectives"),
+        rangeSlider("ttftSlo", 0.2, 10, 0.1, "TTFT target", function (v) { return fmt(v, 1) + " s"; }),
+        rangeSlider("itlSlo", 5, 200, 5, "ITL target", function (v) { return v + " ms"; }),
+        el("div", { class: "hint" },
+          "An ITL of 50 ms is 20 tokens/s, roughly reading speed. Below about 30 ms the user " +
+          "cannot tell the difference; above 100 ms the stream visibly stutters.")
+      ]),
+      el("div", { class: "panel" }, [
+        el("h4", {}, "deployment"),
+        el("div", { class: "hint" },
+          S.model.name + " on " + S.gpu.name + ", TP = " + PER_NODE +
+          " inside one node — page 30's recipe. Weights " +
+          NN.bytes(weightBytes(S.model)) + ", " +
+          NN.bytes(weightBytes(S.model) / PER_NODE) + " per GPU, leaving " +
+          NN.bytes(S.gpu.hbm_bytes - weightBytes(S.model) / PER_NODE) + " per GPU for KV.")
+      ])
+    ]));
+    host.appendChild(out);
+
+    function render() {
+      out.innerHTML = "";
+      const co = sim(S, S.batch, false);
+      const di = sim(S, S.batch, true);
+
+      out.appendChild(el("div", { class: "verdict " + (co.ok ? "ok" : "bad") }, [
+        el("div", { class: "big" }, co.ok
+          ? "meets both SLOs · goodput " + fmt(co.goodput, 0) + " tok/s"
+          : "misses " + (co.ttft > S.ttftSlo && co.itl * 1e3 > S.itlSlo ? "both SLOs"
+              : co.ttft > S.ttftSlo ? "the TTFT SLO" : "the ITL SLO") + " · goodput 0"),
+        el("div", { class: "det" }, "TTFT " + secs(co.ttft) + " / " + fmt(S.ttftSlo, 1) +
+          " s   ·   ITL " + ms(co.itl) + " / " + S.itlSlo + " ms   ·   throughput " +
+          fmt(co.tput, 0) + " tok/s"),
+        el("div", { class: "det" }, co.kvNeeded > co.kvCap
+          ? "and it does not fit: " + NN.bytes(co.kvNeeded) + " of KV against " +
+            NN.bytes(co.kvCap) + " of capacity"
+          : "KV " + NN.bytes(co.kvNeeded) + " of " + NN.bytes(co.kvCap) + " capacity (" +
+            pct(co.kvNeeded / co.kvCap) + ")")
+      ]));
+
+      /* --- where the ITL goes ------------------------------------------ */
+      out.appendChild(el("div", { class: "hint", style: { margin: "8px 0 2px" } },
+        "One decode step, decomposed. The third bar is not decode work at all — it is the " +
+        "share of the pool's time that prefills of newly admitted requests take away from it."));
+      out.appendChild(NN.chart.bars({
+        items: [
+          { label: "HBM read: weights + KV, per GPU", value: co.d.tMem * 1e3,
+            color: "var(--weight)", sub: "· " + NN.bytes(co.d.perGpu) },
+          { label: "TP collectives, " + (2 * S.model.n_layers) + " per token",
+            value: co.d.comm * 1e3, color: "var(--gradient)",
+            sub: "· page 30's latency term" },
+          { label: "prefill interference: B " + x + " t_prefill ÷ output length",
+            value: co.interference * 1e3, color: "var(--activation)",
+            sub: "· " + pct(co.interference / co.itl) + " of the step" }
+        ],
+        unit: "ms per token"
+      }));
+      out.appendChild(NN.legend(["weight", "gradient", "activation"]));
+
+      /* --- goodput vs batch -------------------------------------------- */
+      const gp = [], tp = [];
+      BATCHES.forEach(function (b) {
+        const r = sim(S, b, false);
+        gp.push([b, r.goodput]);
+        tp.push([b, r.tput]);
+      });
+      out.appendChild(h3("Throughput climbs. Goodput does not."));
+      out.appendChild(el("div", { class: "hint", html:
+        "Both lines are tokens per second at the same configuration, so both are drawn in the " +
+        "accent neutral and distinguished by stroke: <b>dashed = raw throughput</b>, " +
+        "<b>solid = goodput</b>. Goodput drops to zero the moment the configuration misses " +
+        "either SLO — in a deterministic model every request in a given configuration " +
+        "succeeds or every one fails, which is a caricature of a percentile but puts the cliff " +
+        "in the right place." }));
+      out.appendChild(NN.chart.line({
+        series: [
+          { name: "throughput (dashed)", color: "var(--accent)", points: tp, dash: "6 4", dots: false },
+          { name: "goodput (solid)", color: "var(--accent)", points: gp, dots: false }
+        ],
+        width: 660, height: 250, xlabel: "concurrent sequences", ylabel: "tokens / s"
+      }));
+
+      /* --- the arithmetic ---------------------------------------------- */
+      const t = el("table", { class: "arith" });
+      function row(term, val, cls) {
+        t.appendChild(el("tr", { class: cls || "" }, [
+          el("td", { class: "term", html: term }), el("td", { class: "r", html: val })]));
+      }
+      out.appendChild(h3("The arithmetic"));
+      row("decode step: (" + NN.bytes(co.d.wBytes) + " weights + " + NN.bytes(co.d.kvAll) +
+        " KV) ÷ TP " + S.tp, NN.bytes(co.d.perGpu) + " per GPU");
+      row("÷ " + S.gpu.name + " HBM " + fmt(S.gpu.hbm_bw_bytes_per_s / 1e12, 2) + " TB/s", ms(co.d.tMem));
+      row("+ TP collectives", ms(co.d.comm));
+      row("ITL if nothing else ran", ms(co.d.itl), "sum");
+      t.appendChild(el("tr", { class: "gap" }, [el("td", { colspan: 2 })]));
+      row("one prefill: 2 " + x + " " + NN.count(S.model.params) + " params " + x + " " +
+        NN.count(S.prompt) + " tokens ÷ TP " + S.tp + " ÷ " +
+        fmt(S.gpu.bf16_dense_tflops * MFU, 0) + " TFLOP/s", secs(co.tPrefill));
+      row("steady state needs one prefill per " + NN.count(S.out) +
+        " decode tokens, " + S.batch + " sequences deep", "");
+      row("→ per-token prefill interference = " + S.batch + " " + x + " " + secs(co.tPrefill) +
+        " ÷ " + NN.count(S.out), ms(co.interference), "sum");
+      t.appendChild(el("tr", { class: "gap" }, [el("td", { colspan: 2 })]));
+      row("<b>ITL, colocated</b>", "<b>" + ms(co.itl) + "</b>", "sum");
+      row("ITL if prefill ran somewhere else", ms(di.itl) + "  (" +
+        fmt(co.itl / di.itl, 2) + x + " better)");
+      out.appendChild(el("div", { class: "scrollx" }, t));
+
+      out.appendChild(el("p", { class: "small muted", html:
+        "<b>MODEL, NOT MEASUREMENT.</b> " + code("PARALLEL.cost_model._status") + ": " +
+        COST._status + " The interference term is this page's own closed form and it is " +
+        "deliberately crude: it charges prefill work to decode at full rate and assumes " +
+        "perfect steady state, no queueing, and no chunking. Chunked prefill " +
+        "(<a href='26-batching.html'>page 26</a>) is exactly the technique that softens this " +
+        "term without eliminating it — it slices the prefill so no single decode step absorbs " +
+        "all of it, which fixes the <em>spike</em> but not the <em>total</em>. Section 6 lists " +
+        "the rest." }));
+    }
+    render();
+
+    host.appendChild(NN.callout("key", "THE TENSION, IN ONE TERM",
+      "The whole of section 1 reduces to <code>B " + x + " t_prefill ÷ output_length</code>. " +
+      "Raising the decode batch B raises throughput almost for free — " + INF.batching.why +
+      " — but it also means more requests arriving per second, and every one of them needs a " +
+      "prefill that the same GPUs have to run. Prefill is compute-bound and enormous; decode is " +
+      "bandwidth-bound and tiny. Putting them on the same GPUs means the big one interrupts " +
+      "the small one, over and over. That is what the next section removes."));
+  })();
+
+  /* ====================================================================== */
+  /*  2 · DISAGGREGATION                                                    */
+  /* ====================================================================== */
+  (function () {
+    const host = NN.$("#disaggBody");
+    const M = DEF_MODEL;
+
+    host.appendChild(p(
+      "The two regimes do not want the same machine. This is not a scheduling preference; it is " +
+      "visible directly in <code>INFER.roofline</code>, which reports each regime's arithmetic " +
+      "intensity against each GPU's ridge point — the FLOPs-per-byte at which that device stops " +
+      "being bandwidth-limited and starts being compute-limited."
+    ));
+
+    /* pull the roofline rows for the default model */
+    const rl = INF.roofline.filter(function (r) { return r.gpu === DEF_GPU.name; })[0];
+    const rows = rl.rows.filter(function (r) { return r.model === M.name; });
+    const t1 = el("table", { class: "data" });
+    let h = "<thead><tr><th>batch</th><th>prefill intensity</th><th>decode intensity</th>" +
+            "<th>" + DEF_GPU.name + " ridge</th><th>prefill is</th><th>decode is</th>" +
+            "<th class='wrap'>decode's share of peak FLOPs</th></tr></thead><tbody>";
+    rows.forEach(function (r) {
+      h += "<tr><td>" + r.batch + "</td><td class='n'>" + NN.count(r.prefill_intensity) +
+        "</td><td class='n'>" + fmt(r.decode_intensity, 2) + "</td><td class='n'>" +
+        fmt(rl.ridge_flops_per_byte, 2) + "</td>" +
+        "<td class='n " + (r.prefill_bound === "compute" ? "good" : "bad") + "'>" +
+        r.prefill_bound + "-bound</td>" +
+        "<td class='n " + (r.decode_bound === "compute" ? "good" : "bad") + "'>" +
+        r.decode_bound + "-bound</td>" +
+        "<td class='n'>" + pct(r.decode_flops_utilisation) + "</td></tr>";
+    });
+    h += "</tbody>";
+    t1.innerHTML = h;
+    host.appendChild(el("div", { class: "scrollx" }, t1));
+
+    host.appendChild(p(
+      "Prefill sits three to five orders of magnitude above the ridge; decode sits below it at " +
+      "every batch in the table. A GPU sized for one is the wrong GPU for the other, and no " +
+      "amount of scheduling fixes a hardware mismatch. Look at what the four devices in " +
+      code("INFER.roofline") + " actually differ by:"
+    ));
+
+    const t2 = el("table", { class: "data" });
+    let h2 = "<thead><tr><th>GPU</th><th>dense bf16</th><th>HBM bandwidth</th>" +
+             "<th>ridge FLOPs/byte</th><th class='wrap'>better suited to</th></tr></thead><tbody>";
+    const sorted = INF.roofline.slice().sort(function (a, b) {
+      return a.ridge_flops_per_byte - b.ridge_flops_per_byte;
+    });
+    sorted.forEach(function (r, i) {
+      h2 += "<tr" + (i === 0 || i === sorted.length - 1 ? " class='hi'" : "") + "><td>" + r.gpu +
+        "</td><td class='n'>" + r.peak_tflops + " TFLOP/s</td>" +
+        "<td class='n'>" + fmt(r.hbm_bw_bytes_per_s / 1e12, 2) + " TB/s</td>" +
+        "<td class='n'>" + fmt(r.ridge_flops_per_byte, 2) + "</td>" +
+        "<td class='wrap'>" + (i === 0 ? "<b>decode</b> — the most bandwidth per unit of compute here"
+          : i === sorted.length - 1 ? "<b>prefill</b> — the most compute per unit of bandwidth here"
+          : "neither end") + "</td></tr>";
+    });
+    h2 += "</tbody>";
+    t2.innerHTML = h2;
+    host.appendChild(el("div", { class: "scrollx" }, t2));
+
+    host.appendChild(el("div", { class: "hint", html:
+      "Ridge point = peak FLOP/s ÷ HBM bytes/s. A low ridge means the device reaches its " +
+      "compute peak at a low arithmetic intensity, i.e. it is bandwidth-rich — which is what a " +
+      "decode pool wants, because decode's intensity is stuck near " +
+      fmt(rows[0].decode_intensity, 0) + ". A high ridge means the device is compute-rich, " +
+      "which is what a prefill pool wants. Same generation, opposite ends. GPU figures from " +
+      code("T.reference_configs.gpus") + " (" + RC._source + ")." }));
+
+    host.appendChild(NN.callout("why", "ONE POOL MEANS ONE OF THEM IS ALWAYS WRONG",
+      "A colocated pool has to pick a single GPU type, a single TP degree and a single batch " +
+      "policy for two workloads that disagree about all three. Prefill wants a big TP degree " +
+      "(it is compute-bound, so splitting the FLOPs helps and its all-reduce payload is large " +
+      "enough to be bandwidth-efficient). Decode wants a TP degree chosen against the latency " +
+      "cliff of <a href='30-inference-parallelism.html'>page 30</a>. Prefill wants to run one " +
+      "request at a time to finish it fast; decode wants as many resident sequences as memory " +
+      "allows. Splitting them into two pools makes each of those an independent decision — " +
+      "which is the entire argument for disaggregation, and it is a good one."));
+
+    host.appendChild(h3("What the split actually buys, and what it costs"));
+    const pools = el("div", { class: "pools" });
+    pools.appendChild(el("div", { class: "pool pre" }, [
+      el("h5", {}, "prefill pool"),
+      el("div", { class: "line", html:
+        "sized on <b>FLOPs</b><br>" +
+        "compute-bound at intensity " + NN.count(rows[0].prefill_intensity) + "<br>" +
+        "wants the high-ridge device<br>" +
+        "large TP, one request at a time<br>" +
+        "small KV footprint — it holds a cache only until it hands it off" })
+    ]));
+    pools.appendChild(el("div", { class: "xfer" }, [
+      el("span", { class: "arrow" }, "→"),
+      el("span", { class: "big" }, NN.bytes(kvBytes(M, M.seq))),
+      el("span", {}, "of KV cache, per request,"),
+      el("span", {}, "at " + NN.count(M.seq) + " tokens")
+    ]));
+    pools.appendChild(el("div", { class: "pool dec" }, [
+      el("h5", {}, "decode pool"),
+      el("div", { class: "line", html:
+        "sized on <b>HBM bandwidth and capacity</b><br>" +
+        "memory-bound at intensity " + fmt(rows[0].decode_intensity, 0) + "<br>" +
+        "wants the low-ridge device<br>" +
+        "TP chosen against the latency cliff<br>" +
+        "the KV cache is nearly all of its memory" })
+    ]));
+    host.appendChild(pools);
+    host.appendChild(NN.legend(["weight", "activation"]));
+    host.appendChild(el("div", { class: "hint" },
+      "The prefill pool is drawn in the weight hue because what it is bound by is reading and " +
+      "multiplying weights; the decode pool and the arrow are in the activation hue because " +
+      "what dominates them is the KV cache, which is stored activations. The arrow is the bill."));
+
+    host.appendChild(NN.callout("warn", "AND THERE IS NO WAY TO AVOID PAYING IT",
+      "Prefill's entire output — beyond the first token — is the KV cache. If decode happens " +
+      "on different hardware, that cache has to get there. It is not metadata and it is not " +
+      "small: " + INF.kv_cache.formula + " for " + M.name + " at " + NN.count(M.seq) +
+      " tokens is <b>" + NN.bytes(kvBytes(M, M.seq)) + " per request</b>. The alternative is " +
+      "to recompute the prefill on the decode pool, which throws away the reason you built a " +
+      "prefill pool. The next section does the arithmetic on the transfer, because that " +
+      "arithmetic is the whole feasibility question."));
+  })();
+
+  /* ====================================================================== */
+  /*  3 · THE KV TRANSFER CALCULATOR                                        */
+  /* ====================================================================== */
+  (function () {
+    const host = NN.$("#xferBody");
+
+    const LINKS = P.interconnects.links.slice();
+    const S = {
+      model: DEF_MODEL, gpu: DEF_GPU, seq: DEF_MODEL.seq, dtype: BF16,
+      link: (LINKS.filter(function (l) { return /NDR/.test(l.name); })[0] || LINKS[0]).name,
+      tp: PER_NODE, sharded: true, eff: COST.achieved_fraction
+    };
+
+    host.appendChild(p(
+      "Every quantity below comes from " + code("INFER.kv_cache.formula") + " — " +
+      code(INF.kv_cache.formula) + " — and from " +
+      code("PARALLEL.interconnects.links[].per_dir_GBps") + ". Two things about the bandwidth " +
+      "numbers, because both are routinely got wrong. NVLink is quoted <em>bidirectionally</em> " +
+      "(" + NVL.name + " headlines " + NVL.bidir_GBps + " GB/s, which is " + NVL.per_dir_GBps +
+      " GB/s each way, and a one-way bulk copy gets the latter). Network links are quoted in " +
+      "<em>gigabits</em>: " + NDR.name + " is " + NDR.per_dir_GBps + " GB/s per direction — " +
+      (NDR.note || "") + "."
+    ));
+
+    const out = el("div");
+
+    function listSlider(key, list, label, fmtv) {
+      const idx = Math.max(0, list.indexOf(S[key]));
+      const rv = el("span", { class: "rv" }, fmtv(S[key]));
+      const inp = el("input", { type: "range", min: 0, max: list.length - 1, step: 1, value: idx });
+      inp.addEventListener("input", function () {
+        S[key] = list[+inp.value]; rv.textContent = fmtv(S[key]); render();
+      });
+      return el("div", { class: "fld" }, [el("label", {}, [el("span", {}, label), rv]), inp]);
+    }
+    function pick(label, options, current, onPick, hint) {
+      const sel = el("select", {}, options.map(function (o) {
+        return el("option", { value: o.k }, o.label);
+      }));
+      sel.value = current;
+      sel.addEventListener("change", function () { onPick(sel.value); render(); });
+      return el("div", { class: "fld" }, [
+        el("label", {}, [el("span", {}, label)]), sel,
+        hint ? el("div", { class: "hint" }, hint) : null
+      ]);
+    }
+    function checkbox(label, current, onSet, hint) {
+      const inp = el("input", { type: "checkbox" });
+      inp.checked = current;
+      inp.addEventListener("change", function () { onSet(inp.checked); render(); });
+      return el("div", { class: "fld" }, [
+        el("label", { class: "chk" }, [inp, el("span", {}, label)]),
+        hint ? el("div", { class: "hint" }, hint) : null
+      ]);
+    }
+
+    const DTYPES = Object.keys(T.memory.dtype_bytes).map(function (k) {
+      return { k: k, b: T.memory.dtype_bytes[k] };
+    });
+
+    host.appendChild(el("div", { class: "ctlgrid" }, [
+      el("div", { class: "panel" }, [
+        el("h4", {}, "what is being moved"),
+        pick("model", MODELS.map(function (m) { return { k: m.name, label: m.name }; }),
+          S.model.name, function (v) {
+            S.model = MODELS.filter(function (m) { return m.name === v; })[0];
+          }),
+        listSlider("seq", SEQS, "prompt length at handoff", NN.count),
+        pick("dtype", DTYPES.map(function (d) {
+          return { k: String(d.b), label: d.k + " — " + d.b + " B/element" };
+        }), String(S.dtype), function (v) { S.dtype = +v; },
+          "KV cache quantisation is the cheapest way to shrink this transfer; " +
+          "page 28 is what it costs in accuracy.")
+      ]),
+      el("div", { class: "panel" }, [
+        el("h4", {}, "the wire"),
+        pick("link", LINKS.map(function (l) {
+          return { k: l.name, label: l.name + " — " + l.per_dir_GBps + " GB/s/dir" };
+        }), S.link, function (v) { S.link = v; }),
+        pick("tp", [2, 4, 8, 16].map(function (n) { return { k: String(n), label: "TP = " + n }; }),
+          String(S.tp), function (v) { S.tp = +v; },
+          "Both pools run the same TP degree, so rank r of the prefill pool sends only its own " +
+          "heads' KV to rank r of the decode pool."),
+        checkbox("transfer runs on all " + "TP" + " links in parallel", S.sharded,
+          function (v) { S.sharded = v; },
+          "On if the two pools' ranks are paired one-to-one and each has its own NIC or port. " +
+          "Off models a single link doing the whole thing — the pessimistic case, and the one " +
+          "you get if the pools' TP degrees do not match.")
+      ])
+    ]));
+    host.appendChild(out);
+
+    function render() {
+      out.innerHTML = "";
+      const M = S.model, G = S.gpu;
+      const link = LINKS.filter(function (l) { return l.name === S.link; })[0];
+      const total = kvBytes(M, S.seq, S.dtype);
+      const lanes = S.sharded ? S.tp : 1;
+      const perLane = total / lanes;
+      const bw = link.per_dir_GBps * 1e9 * S.eff;
+      const alpha = (link.scope === "intra-node" ? COST.latency_us.intra_node
+                                                 : COST.latency_us.inter_node) * 1e-6;
+      const tWire = perLane / bw;
+      const tXfer = alpha + tWire;
+
+      const tPre = prefillTime(M, G, S.tp, S.seq);
+      const dstep = decodeStep(M, G, S.tp, 32, S.seq);
+      const rate = lanes * bw / total;                 /* requests per second the fabric sustains */
+
+      const share = tXfer / (tPre + tXfer);
+      out.appendChild(el("div", { class: "verdict " + (share < 0.15 ? "ok" : share < 0.4 ? "pend" : "bad") }, [
+        el("div", { class: "big" }, NN.bytes(total) + " per request → " + ms(tXfer)),
+        el("div", { class: "det" }, "on " + link.name + " at " + link.per_dir_GBps +
+          " GB/s per direction " + x + " " + Math.round(S.eff * 100) + "%" +
+          (lanes > 1 ? ", split across " + lanes + " parallel links" : ", on one link")),
+        el("div", { class: "det" }, "that is " + pct(share) + " added to a TTFT whose prefill " +
+          "already takes " + secs(tPre) + ", and it must be beaten by the ITL improvement " +
+          "disaggregation buys"),
+        el("div", { class: "det" }, "the fabric sustains " + fmt(rate, 1) +
+          " handoffs/s at this size before the transfer itself becomes the bottleneck")
+      ]));
+
+      const t = el("table", { class: "arith" });
+      function row(term, val, cls) {
+        t.appendChild(el("tr", { class: cls || "" }, [
+          el("td", { class: "term", html: term }), el("td", { class: "r", html: val })]));
+      }
+      row(code(INF.kv_cache.formula), "");
+      row("2 " + x + " " + M.n_layers + " layers " + x + " " + NN.count(S.seq) + " tokens " + x + " " +
+        M.n_kv_heads + " KV heads " + x + " " + M.d_head + " d_head " + x + " " + S.dtype + " B",
+        NN.bytes(total), "sum");
+      row("÷ " + lanes + " parallel link" + (lanes === 1 ? "" : "s") +
+        (S.sharded ? " (TP-sharded, rank to matching rank)" : ""), NN.bytes(perLane));
+      row("÷ " + link.name + " " + link.per_dir_GBps + " GB/s per direction " + x + " " +
+        Math.round(S.eff * 100) + " %", ms(tWire));
+      row("+ " + (link.scope === "intra-node" ? COST.latency_us.intra_node
+                                              : COST.latency_us.inter_node) +
+        " µs of " + link.scope + " latency", ms(alpha));
+      row("<b>KV handoff</b>", "<b>" + ms(tXfer) + "</b>", "sum");
+      t.appendChild(el("tr", { class: "gap" }, [el("td", { colspan: 2 })]));
+      row("for comparison — prefill of the same prompt at TP " + S.tp +
+        " (2 " + x + " params " + x + " tokens ÷ " + fmt(G.bf16_dense_tflops * MFU, 0) +
+        " TFLOP/s)", secs(tPre));
+      row("for comparison — one decode step at batch 32", ms(dstep.itl));
+      row("handoff as a fraction of prefill", pct(tXfer / tPre));
+      row("handoffs/s the fabric sustains", fmt(rate, 1) + " req/s");
+      out.appendChild(el("div", { class: "scrollx" }, t));
+
+      out.appendChild(NN.chart.bars({
+        items: [
+          { label: "prefill compute", value: tPre * 1e3, color: "var(--weight)",
+            sub: "· " + pct(tPre / (tPre + tXfer)) + " of the handoff-inclusive TTFT" },
+          { label: "KV handoff over " + link.name, value: tXfer * 1e3, color: "var(--activation)",
+            sub: "· " + pct(share) },
+          { label: "one decode step, for scale", value: dstep.itl * 1e3, color: "var(--accent)",
+            sub: "· the handoff costs " + fmt(tXfer / dstep.itl, 1) + " decode steps" }
+        ],
+        unit: "ms"
+      }));
+      out.appendChild(NN.legend(["weight", "activation"]));
+
+      /* sweep across the links, at the current payload */
+      out.appendChild(h3("The same payload on every link in the table"));
+      out.appendChild(NN.chart.bars({
+        items: LINKS.map(function (l) {
+          const b = l.per_dir_GBps * 1e9 * S.eff;
+          const a = (l.scope === "intra-node" ? COST.latency_us.intra_node
+                                              : COST.latency_us.inter_node) * 1e-6;
+          return {
+            label: l.name + "  (" + l.scope + ", " + l.per_dir_GBps + " GB/s/dir)",
+            value: (a + perLane / b) * 1e3,
+            color: l.name === link.name ? "var(--activation)" : "var(--accent)",
+            sub: "· vendors quote " + l.bidir_GBps + " GB/s bidirectional"
+          };
+        }),
+        unit: "ms"
+      }));
+      out.appendChild(el("div", { class: "hint", html:
+        "Every bar uses <code>per_dir_GBps</code>, because this is a one-way bulk copy: the " +
+        "prefill rank sends and the decode rank receives, and nothing comes back. Halving a " +
+        "vendor's bidirectional headline is not pessimism, it is the correct number. " +
+        "Source: " + P.interconnects._source + "." }));
+
+      out.appendChild(el("p", { class: "small muted", html:
+        "<b>MODEL, NOT MEASUREMENT.</b> " + COST._status + " This transfer is priced with " +
+        code(COST.time_bytes) + " at " + code("achieved_fraction") + " = " +
+        COST.achieved_fraction + " (" + COST.achieved_note + ") plus one link latency. It " +
+        "assumes the copy is one contiguous stream that overlaps nothing. Real " +
+        "implementations pipeline it <em>per layer</em>: layer 0's KV can start moving while " +
+        "layer 1 is still being computed, which hides most of this behind the prefill itself " +
+        "and is the single most important optimisation the model does not capture. It also " +
+        "ignores the receiving GPU's HBM write bandwidth and any staging through host memory." }));
+    }
+    render();
+
+    host.appendChild(NN.callout("key", "THE NUMBER TO REMEMBER, AND HOW TO SHRINK IT",
+      (function () {
+        const M = DEF_MODEL;
+        const tot = kvBytes(M, M.seq);
+        const bw = NDR.per_dir_GBps * 1e9 * COST.achieved_fraction;
+        const one = COST.latency_us.inter_node * 1e-6 + tot / bw;
+        const eight = COST.latency_us.inter_node * 1e-6 + tot / PER_NODE / bw;
+        return M.name + " at " + NN.count(M.seq) + " tokens is <b>" + NN.bytes(tot) +
+          "</b> of KV cache per request. Over one " + NDR.name + " link at " +
+          NDR.per_dir_GBps + " GB/s per direction and " + COST.achieved_fraction +
+          " achieved, that is <b class='num'>" + ms(one) + "</b>. Split across " + PER_NODE +
+          " TP-matched links it is <b class='num'>" + ms(eight) + "</b>. Three levers move it, " +
+          "in descending order of how much they help: <b>shard the transfer</b> across the TP " +
+          "links you already have (" + PER_NODE + x + "), <b>pipeline it per layer</b> so it " +
+          "hides behind the prefill that is still running (most of the rest), and " +
+          "<b>quantise the cache</b> — fp8 halves it outright (" +
+          "<a href='28-quantisation.html'>page 28</a>). What does not help is a faster link " +
+          "alone: at " + NDR.per_dir_GBps + " GB/s you are already bandwidth-bound, so the " +
+          "gain is exactly proportional and nothing more.";
+      })()));
+
+    host.appendChild(el("div", { class: "hint", html:
+      "KV formula checked against <code>INFER.kv_cache.rows</code>: " + KV_CHECK.rows +
+      " rows, max absolute error " + KV_CHECK.maxAbsErr + " bytes " +
+      (KV_CHECK.ok ? "✓" : "✗ MISMATCH — do not trust the figures above") + "." }));
+  })();
+
+  /* ====================================================================== */
+  /*  4 · SCHEDULING                                                        */
+  /* ====================================================================== */
+  (function () {
+    const host = NN.$("#schedBody");
+    const M = DEF_MODEL, G = DEF_GPU;
+
+    host.appendChild(p(
+      "Continuous batching (<a href='26-batching.html'>page 26</a>) gives the scheduler a " +
+      "decision point at every decode step: which sequences advance, and does anything new get " +
+      "admitted. Paged blocks (<a href='27-paged-attention.html'>page 27</a>) give it the " +
+      "allocator to do it with. What remains is policy, and there are exactly three questions."
+    ));
+
+    host.appendChild(h3("Admission control: does this request fit?"));
+    const kvCapPerGpu = G.hbm_bytes - weightBytes(M) / PER_NODE;
+    const kvCap = kvCapPerGpu * PER_NODE;
+    host.appendChild(p(
+      "A request cannot be admitted on the promise that it will fit — it has to fit for its " +
+      "whole life, and its life grows one token at a time. At TP " + PER_NODE + " on " +
+      G.name + ", a group holds " + NN.bytes(kvCap) + " of KV after the weights " +
+      "(" + NN.bytes(weightBytes(M)) + " ÷ " + PER_NODE + " = " +
+      NN.bytes(weightBytes(M) / PER_NODE) + " per GPU). A schedule admits against the " +
+      "<em>projected</em> footprint, not the current one:"
+    ));
+
+    const admTbl = el("table", { class: "data" });
+    let ah = "<thead><tr><th>context at completion</th><th>KV per sequence</th>" +
+             "<th>concurrent sequences the group holds</th>" +
+             "<th class='wrap'>what the scheduler does about it</th></tr></thead><tbody>";
+    SEQS.forEach(function (s) {
+      const k = kvBytes(M, s);
+      const n = kvCap / k;
+      ah += "<tr" + (s === M.seq ? " class='hi'" : "") + "><td>" + NN.count(s) + "</td>" +
+        "<td class='n'>" + NN.bytes(k) + "</td>" +
+        "<td class='n " + (n >= 8 ? "good" : "bad") + "'>" + fmt(n, n < 10 ? 1 : 0) + "</td>" +
+        "<td class='wrap'>" + (n >= 32 ? "admit freely; the batch is limited by throughput policy, not memory"
+          : n >= 8 ? "admit with a reserve; a long tail of requests can still evict each other"
+          : "admit one at a time and expect preemption — the cache is the binding constraint") +
+        "</td></tr>";
+    });
+    ah += "</tbody>";
+    admTbl.innerHTML = ah;
+    host.appendChild(el("div", { class: "scrollx" }, admTbl));
+    host.appendChild(el("div", { class: "hint", html:
+      "Capacity is <code>NN.gibytes</code>-based device memory (" + G.name + " = " +
+      NN.gibytes(G.hbm_bytes) + " = " + NN.bytes(G.hbm_bytes) + " decimal) minus the weight " +
+      "shard, both sides of the subtraction in decimal bytes. The count ignores activations, " +
+      "the allocator's own overhead, and CUDA-graph and workspace reservations, all of which " +
+      "are real and all of which make the true number smaller." }));
+
+    host.appendChild(NN.callout("warn", "THE ADMISSION DECISION IS A BET ON AN UNKNOWN LENGTH",
+      "The scheduler does not know how many tokens a request will generate. It admits against " +
+      "a guess — the max_tokens the client asked for, a learned predictor, or nothing at all — " +
+      "and if the guess is low, the KV cache fills and something already streaming has to be " +
+      "interrupted. Being conservative wastes capacity permanently; being optimistic causes " +
+      "preemptions, which are visible to users as stalls. There is no setting that avoids both."));
+
+    host.appendChild(h3("Preemption: recompute or swap?"));
+    host.appendChild(p(
+      "When the cache fills, the scheduler evicts a victim sequence. Its KV cache goes away and " +
+      "must come back when the sequence is rescheduled. There are two ways, and they are not " +
+      "close in cost."
+    ));
+
+    const preState = { seq: M.seq, tp: PER_NODE, sharded: true };
+    const preOut = el("div");
+    (function () {
+      const rv = el("span", { class: "rv" }, NN.count(preState.seq));
+      const idx = Math.max(0, SEQS.indexOf(preState.seq));
+      const inp = el("input", { type: "range", min: 0, max: SEQS.length - 1, step: 1, value: idx });
+      inp.addEventListener("input", function () {
+        preState.seq = SEQS[+inp.value]; rv.textContent = NN.count(preState.seq); draw();
+      });
+      const chk = el("input", { type: "checkbox" });
+      chk.checked = preState.sharded;
+      chk.addEventListener("change", function () { preState.sharded = chk.checked; draw(); });
+
+      host.appendChild(el("div", { class: "ctlgrid" }, [
+        el("div", { class: "panel" }, [
+          el("h4", {}, "the victim"),
+          el("div", { class: "fld" }, [
+            el("label", {}, [el("span", {}, "tokens already generated"), rv]), inp
+          ]),
+          el("div", { class: "fld" }, [
+            el("label", { class: "chk" }, [chk, el("span", {}, "swap uses all " + PER_NODE +
+              " ranks' PCIe links in parallel")])
+          ]),
+          el("div", { class: "hint" },
+            "Recompute cost grows with the tokens to redo; swap cost grows with the bytes to " +
+            "move. They are the same quantity measured two ways, and they scale differently.")
+        ])
+      ]));
+      host.appendChild(preOut);
+
+      function draw() {
+        preOut.innerHTML = "";
+        const s = preState.seq;
+        const kv = kvBytes(M, s);
+        const lanes = preState.sharded ? PER_NODE : 1;
+        const swapBw = PCI.per_dir_GBps * 1e9 * COST.achieved_fraction;
+        const tOut = kv / lanes / swapBw;
+        const tIn  = tOut;
+        const tSwap = tOut + tIn;
+        const tRecomp = prefillTime(M, G, PER_NODE, s);
+
+        preOut.appendChild(NN.chart.bars({
+          items: [
+            { label: "recompute: rerun prefill for " + NN.count(s) + " tokens",
+              value: tRecomp * 1e3, color: "var(--weight)",
+              sub: "· " + NN.count(2 * M.params * s) + " FLOP ÷ TP " + PER_NODE },
+            { label: "swap: " + NN.bytes(kv) + " out to host and back over " + PCI.name,
+              value: tSwap * 1e3, color: "var(--activation)",
+              sub: "· " + (lanes > 1 ? lanes + " links in parallel" : "one link") }
+          ],
+          unit: "ms"
+        }));
+        preOut.appendChild(NN.legend(["weight", "activation"]));
+
+        const cheaper = tSwap < tRecomp ? "swap" : "recompute";
+        preOut.appendChild(el("div", { class: "verdict pend" }, [
+          el("div", { class: "big" }, cheaper + " is " +
+            fmt(Math.max(tSwap, tRecomp) / Math.min(tSwap, tRecomp), 1) + x + " cheaper here"),
+          el("div", { class: "det" }, "recompute " + secs(tRecomp) + "  ·  swap " +
+            secs(tSwap) + " (" + secs(tOut) + " out + " + secs(tIn) + " back)"),
+          el("div", { class: "det" }, "both are added to the victim's ITL as one long stall, " +
+            "and both are pure waste — the sequence makes no progress during either")
+        ]));
+
+        const tt = el("table", { class: "data" });
+        tt.innerHTML =
+          "<thead><tr><th>option</th><th class='wrap'>what it costs</th>" +
+          "<th class='wrap'>what else it consumes</th><th class='wrap'>when it wins</th>" +
+          "</tr></thead><tbody>" +
+          "<tr><td>recompute</td>" +
+          "<td class='wrap'>a full prefill of the tokens so far: " +
+            NN.count(2 * M.params * s) + " FLOP, " + secs(tRecomp) + " at TP " + PER_NODE + "</td>" +
+          "<td class='wrap'>GPU compute that other requests wanted — it competes with the " +
+            "prefills of new arrivals</td>" +
+          "<td class='wrap'>short sequences, and any deployment where host bandwidth or host " +
+            "memory is scarce. Needs no extra memory anywhere.</td></tr>" +
+          "<tr><td>swap to host</td>" +
+          "<td class='wrap'>" + NN.bytes(kv) + " out and the same back: " + secs(tSwap) +
+            " over " + PCI.name + " at " + PCI.per_dir_GBps + " GB/s per direction</td>" +
+          "<td class='wrap'>host RAM, pinned, per swapped sequence — and PCIe, which is also " +
+            "the path weights and inputs use</td>" +
+          "<td class='wrap'>long sequences, where recompute's cost grows with tokens while " +
+            "the transfer is already bandwidth-bound</td></tr>" +
+          "<tr><td>neither — don't admit</td>" +
+          "<td class='wrap'>the request queues instead, adding to its TTFT</td>" +
+          "<td class='wrap'>nothing; it is the only option that costs no GPU time</td>" +
+          "<td class='wrap'>whenever the TTFT budget can absorb it. The cheapest preemption is " +
+            "the one that never happens, which is why admission control matters more than " +
+            "eviction policy.</td></tr>" +
+          "</tbody>";
+        preOut.appendChild(el("div", { class: "scrollx" }, tt));
+      }
+      draw();
+    })();
+
+    host.appendChild(NN.callout("mem", "WHY THE CROSSOVER MOVES",
+      "Recompute is <code>2 " + x + " params " + x + " tokens</code> of arithmetic; swapping is " +
+      "<code>2 " + x + " layers " + x + " tokens " + x + " n_kv_heads " + x + " d_head " + x +
+      " dtype</code> of bytes. Both are linear in the token count, so the winner does not " +
+      "change with sequence length for a fixed model — it changes with the <em>ratio</em> of " +
+      "the model's FLOPs per token to its KV bytes per token, and with how many links you can " +
+      "put behind the swap. GQA (<a href='12-attention-variants.html'>page 12</a>) shrank the " +
+      "KV side by " + fmt(M.n_heads / M.n_kv_heads, 0) + x + " for " + M.name +
+      " and so moved this crossover a long way toward swapping. Turn off the parallel-links " +
+      "checkbox to see how much of swapping's advantage is the fabric rather than the idea."));
+  })();
+
+  /* ====================================================================== */
+  /*  5 · PREFIX CACHING                                                    */
+  /* ====================================================================== */
+  (function () {
+    const host = NN.$("#prefixBody");
+    const M = DEF_MODEL, G = DEF_GPU;
+
+    host.appendChild(p(
+      "Almost every production request begins with the same few thousand tokens: a system " +
+      "prompt, a tool schema, a retrieved document shared across a session, a few-shot block. " +
+      "Attention is causal, so the K and V of position <i>i</i> depend only on positions ≤ " +
+      "<i>i</i>. If two requests share a prefix, their KV caches for that prefix are not merely " +
+      "similar — they are <b>bit-identical</b>. Computing them twice is computing the same " +
+      "function of the same input twice."
+    ));
+
+    host.appendChild(NN.callout("why", "THIS IS THE SAME OBSERVATION AS THE KV CACHE ITSELF",
+      "<a href='25-kv-cache.html'>Page 25</a> justified the KV cache by proving that decoding " +
+      "with it gives bit-for-bit the same logits as recomputing the prefix each step — " +
+      code("INFER.generation.cache_equivalence") + " reports max absolute error " +
+      INF.generation.cache_equivalence.max_abs_err + " over " +
+      INF.generation.cache_equivalence.per_step.length + " steps, " +
+      (INF.generation.cache_equivalence.passed ? "passed" : "FAILED") + ". Prefix caching is " +
+      "that argument applied <em>across</em> requests instead of within one. Same exactness, " +
+      "same reasoning, wider scope."));
+
+    host.appendChild(p(
+      "<a href='27-paged-attention.html'>Page 27</a> supplies the mechanism. Once the KV cache " +
+      "lives in fixed-size blocks behind an indirection table, two sequences can point at the " +
+      "same physical block. The shared prefix is stored once and referenced many times; when a " +
+      "sequence diverges it copies just the block it is writing into. Copy-on-write, exactly as " +
+      "an operating system does it, and for exactly the same reason."
+    ));
+
+    const st = { sys: 1024, user: 1024, conc: 16 };
+    const out = el("div");
+    (function () {
+      const SYS = [0, 128, 256, 512, 1024, 2048, 4096, 8192];
+      const USER = [128, 256, 512, 1024, 2048, 4096];
+      const CONC = [1, 2, 4, 8, 16, 32, 64, 128];
+      function sl(key, list, label, fmtv) {
+        const rv = el("span", { class: "rv" }, fmtv(st[key]));
+        const idx = Math.max(0, list.indexOf(st[key]));
+        const inp = el("input", { type: "range", min: 0, max: list.length - 1, step: 1, value: idx });
+        inp.addEventListener("input", function () {
+          st[key] = list[+inp.value]; rv.textContent = fmtv(st[key]); draw();
+        });
+        return el("div", { class: "fld" }, [el("label", {}, [el("span", {}, label), rv]), inp]);
+      }
+      host.appendChild(el("div", { class: "ctlgrid" }, [
+        el("div", { class: "panel" }, [
+          el("h4", {}, "the shared prefix"),
+          sl("sys", SYS, "shared prefix tokens", NN.count),
+          sl("user", USER, "per-request tokens after it", NN.count),
+          sl("conc", CONC, "requests sharing the prefix", String),
+          el("div", { class: "hint" },
+            "A system prompt plus a tool schema is commonly 1–4k tokens. The prefix is " +
+            "computed once for the first request and read from cache by every one after it.")
+        ])
+      ]));
+      host.appendChild(out);
+
+      function draw() {
+        out.innerHTML = "";
+        const totalTok = st.sys + st.user;
+        const tFull = prefillTime(M, G, PER_NODE, totalTok);
+        const tHit  = prefillTime(M, G, PER_NODE, st.user);
+        const saved = tFull - tHit;
+
+        const kvShared = kvBytes(M, st.sys);
+        const kvOwn    = kvBytes(M, st.user);
+        const naive    = st.conc * (kvShared + kvOwn);
+        const shared   = kvShared + st.conc * kvOwn;
+
+        out.appendChild(NN.tiles([
+          { k: "TTFT, cold", v: secs(tFull), s: NN.count(totalTok) + " tokens prefilled" },
+          { k: "TTFT, prefix hit", v: secs(tHit),
+            s: "only the " + NN.count(st.user) + " new tokens", cls: "weight" },
+          { k: "saved per request", v: secs(saved),
+            s: totalTok > 0 ? pct(saved / tFull) + " of the prefill" : "–" },
+          { k: "KV without sharing", v: NN.bytes(naive), s: st.conc + " full copies", cls: "activation" },
+          { k: "KV with COW blocks", v: NN.bytes(shared),
+            s: "one shared prefix + " + st.conc + " tails", cls: "activation" },
+          { k: "memory saved", v: naive > 0 ? fmt(naive / shared, 2) + x : "–",
+            s: NN.bytes(naive - shared) + " freed for more concurrency" }
+        ]));
+
+        /* block picture */
+        const BLOCK_TOK = 16;      /* a stated block size, page 27's unit */
+        const sysBlocks = Math.min(48, Math.ceil(st.sys / BLOCK_TOK));
+        const ownBlocks = Math.min(24, Math.ceil(st.user / BLOCK_TOK));
+        const strip = el("div");
+        for (let r = 0; r < Math.min(4, st.conc); r++) {
+          const row = el("div", { class: "blocks" });
+          for (let i = 0; i < sysBlocks; i++) row.appendChild(el("div", { class: "blk shared" }));
+          for (let i = 0; i < ownBlocks; i++) row.appendChild(el("div", { class: "blk own" }));
+          strip.appendChild(el("div", {}, [
+            el("div", { class: "hint" }, "request " + r + ": " + sysBlocks +
+              " shared blocks (one physical copy) + " + ownBlocks + " private blocks"),
+            row
+          ]));
+        }
+        out.appendChild(strip);
+        out.appendChild(el("div", { class: "hint" },
+          "Solid activation-hue blocks are the shared prefix: every row's table entries point " +
+          "at the same physical pages, so the memory is charged once no matter how many rows " +
+          "there are. Faded blocks are private. Block size drawn at " + BLOCK_TOK +
+          " tokens, a stated illustration; page 27 is where the real allocator lives. Rows " +
+          "capped at 4 and columns capped for legibility."));
+        out.appendChild(NN.legend(["weight", "activation"]));
+
+        const rows = [];
+        SYS.filter(function (s) { return s > 0; }).forEach(function (s) {
+          const tf = prefillTime(M, G, PER_NODE, s + st.user);
+          const th = prefillTime(M, G, PER_NODE, st.user);
+          rows.push([s, (tf - th) * 1e3]);
+        });
+        out.appendChild(NN.chart.line({
+          series: [{ name: "TTFT saved", color: "var(--weight)", points: rows, dots: false }],
+          width: 660, height: 230, xlabel: "shared prefix tokens", ylabel: "ms of TTFT saved"
+        }));
+        out.appendChild(el("div", { class: "hint" },
+          "Linear, because prefill FLOPs are linear in tokens under " +
+          INF.cost_model.flops_note + ". The O(seq²) attention term would bend this upward for " +
+          "long prefixes; it is not modelled here, so the line understates the saving."));
+      }
+      draw();
+    })();
+
+    host.appendChild(NN.callout("key", "PREFIX CACHING IS THE HIGHEST-LEVERAGE THING IN THIS PAGE",
+      "It removes work rather than rearranging it. Disaggregation moves prefill somewhere " +
+      "else; chunking spreads it out; scheduling decides who waits. A prefix hit means the " +
+      "arithmetic is <em>never performed</em>, and it is exact — no approximation, no accuracy " +
+      "argument to make. In deployments with a large shared system prompt it is routinely the " +
+      "single biggest TTFT win available, and it composes with everything else here. The costs " +
+      "are real but small: a hash table over block contents, a reference count per block, and " +
+      "an eviction policy for cached prefixes that are no longer hot."));
+  })();
+
+  /* ====================================================================== */
+  /*  6 · LIMITS                                                            */
+  /* ====================================================================== */
+  (function () {
+    const host = NN.$("#limitsBody");
+
+    host.appendChild(el("div", { class: "verdict pend" }, [
+      el("div", { class: "big" }, "MODEL, NOT MEASUREMENT"),
+      el("div", { class: "det" }, code("PARALLEL.cost_model._status") + ": " + COST._status)
+    ]));
+
+    host.appendChild(h3("Modelled versus measured"));
+    const t = el("table", { class: "data" });
+    t.innerHTML =
+      "<thead><tr><th class='wrap'>quantity</th><th>status</th><th class='wrap'>source</th></tr></thead>" +
+      "<tbody>" +
+      "<tr><td class='wrap'>KV cache size for a given model and length</td>" +
+        "<td class='good'>exact</td>" +
+        "<td class='wrap'>a closed form, <code>INFER.kv_cache.formula</code>, cross-checked " +
+        "against all " + KV_CHECK.rows + " shipped rows to " + KV_CHECK.maxAbsErr +
+        " bytes of error</td></tr>" +
+      "<tr><td class='wrap'>which regime is compute- or memory-bound</td>" +
+        "<td class='good'>derived</td>" +
+        "<td class='wrap'>arithmetic intensity against each GPU's ridge, " +
+        "<code>INFER.roofline</code></td></tr>" +
+      "<tr><td class='wrap'>model and device specifications</td>" +
+        "<td>quoted</td><td class='wrap'><code>T.reference_configs</code> — " + RC._source +
+        "</td></tr>" +
+      "<tr><td class='wrap'>link bandwidths</td>" +
+        "<td>quoted</td><td class='wrap'><code>PARALLEL.interconnects</code> — " +
+        P.interconnects._source + "</td></tr>" +
+      "<tr><td class='wrap'>every time in milliseconds on this page</td>" +
+        "<td class='bad'>modelled</td>" +
+        "<td class='wrap'>bytes ÷ bandwidth and FLOPs ÷ (peak " + x + " a stated " +
+        Math.round(MFU * 100) + "% utilisation), with <code>cost_model.achieved_fraction</code> = " +
+        COST.achieved_fraction + " on every wire. No profile was taken. " + RC.mfu_note +
+        "</td></tr>" +
+      "<tr><td class='wrap'>the prefill-interference term in section 1</td>" +
+        "<td class='bad'>invented here</td>" +
+        "<td class='wrap'>a closed-form steady-state approximation written for this page. It " +
+        "is directionally right and quantitatively rough.</td></tr>" +
+      "<tr><td class='wrap'>goodput as a step function</td>" +
+        "<td class='bad'>caricature</td>" +
+        "<td class='wrap'>real goodput is a percentile over a distribution of arrivals and " +
+        "lengths. A deterministic model has no distribution, so it has no percentile.</td></tr>" +
+      "</tbody>";
+    host.appendChild(el("div", { class: "scrollx" }, t));
+
+    host.appendChild(p("And what " + code("PARALLEL.cost_model") + " itself declares it ignores:"));
+    host.appendChild(el("ul", { class: "small muted" },
+      COST.ignores.map(function (s) { return el("li", {}, s); })));
+
+    host.appendChild(h3("What a real serving system has that this does not"));
+    const ul = el("ul", { class: "small" });
+    [
+      "<b>Speculative decoding interacting with continuous batching.</b> " +
+      "<a href='29-speculative.html'>Page 29</a> treats speculation in isolation. In a real " +
+      "scheduler the draft-and-verify step changes the batch shape every iteration, the " +
+      "acceptance rate varies per request, and a speculative step that is rejected has burned " +
+      "capacity that a non-speculative request could have used. Speculation helps most exactly " +
+      "when the batch is small — which is when the pool is least busy and cares least.",
+
+      "<b>Multi-LoRA serving.</b> Dozens of adapters over one base model, batched together, " +
+      "with per-request adapter selection inside a single kernel. It changes the memory " +
+      "accounting (base weights shared, adapters per request), the batching rules, and the " +
+      "admission decision. None of it is modelled here.",
+
+      "<b>Structured output constraints.</b> Grammar- and JSON-constrained decoding masks the " +
+      "logits at every step. The mask has to be computed on CPU from a parser state, per " +
+      "request, in the gap between steps — a per-token CPU cost that this page's model, which " +
+      "has no CPU in it at all, cannot see.",
+
+      "<b>Tokenizer and detokenizer overhead.</b> Incremental detokenisation runs per token per " +
+      "request on the host. At a few thousand tokens per second across a pool it is a real " +
+      "fraction of a core and a real source of latency jitter, and it is invisible to every " +
+      "bytes-over-bandwidth model including this one.",
+
+      "<b>Everything about the tail.</b> Queueing under bursty arrivals, head-of-line blocking " +
+      "behind a long prompt, fairness between tenants, retries, cancellation mid-stream. The " +
+      "p99 is what an SLO is actually written against and it is a property of a distribution " +
+      "this page does not have.",
+
+      "<b>Failure.</b> A GPU falls out of a TP group and the whole group is down. A decode pool " +
+      "loses a node holding thousands of live KV caches. Recovery, draining and rebalancing are " +
+      "a large part of what production serving code is, and none of it is arithmetic."
+    ].forEach(function (s) { ul.appendChild(el("li", { html: s })); });
+    host.appendChild(ul);
+
+    host.appendChild(h3("Where the real systems are"));
+    host.appendChild(p(
+      "This page is a model of why serving systems are shaped the way they are, not a guide to " +
+      "any of them. Three are worth naming as pointers rather than as covered material: " +
+      "<b>vLLM</b>, which introduced PagedAttention and is where the block allocator of " +
+      "<a href='27-paged-attention.html'>page 27</a> comes from; <b>TensorRT-LLM</b>, which " +
+      "pairs a compiled-kernel backend with an in-flight batching scheduler; and " +
+      "<b>SGLang</b>, whose RadixAttention generalises section 5's prefix cache from a shared " +
+      "prefix to a tree of them. All three implement disaggregated prefill/decode, prefix " +
+      "caching, chunked prefill and preemption; all three make different choices about the " +
+      "policy questions in section 4; and all three will disagree with the millisecond figures " +
+      "on this page, because those figures are arithmetic and theirs are measurements."
+    ));
+
+    host.appendChild(NN.callout("key", "WHAT SURVIVES CONTACT WITH A REAL SYSTEM",
+      "The constants here are wrong and the structure is not. Prefill and decode have opposite " +
+      "bottlenecks, so sharing a pool between them means something is always mismatched. The " +
+      "KV cache is the scarce resource and every scheduling decision is really a decision about " +
+      "it. Moving a KV cache costs " + NN.bytes(kvBytes(DEF_MODEL, DEF_MODEL.seq)) +
+      " per request at " + NN.count(DEF_MODEL.seq) + " tokens and that is a number you have to " +
+      "beat, not a rounding error. And work you can avoid entirely — a prefix hit — beats any " +
+      "amount of cleverness about work you still have to do."));
+  })();
+
+  NN.page("serving");
+})();
+</script>
+</body>
+</html>

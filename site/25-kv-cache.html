@@ -1,0 +1,990 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 25 The KV Cache</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* page-local layout only; every colour comes from design.css custom properties */
+.ctlgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 13px; margin: 16px 0; }
+.panel { background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 8px; padding: 12px 14px; }
+.panel h4 { margin: 0 0 10px; font-family: var(--mono); font-size: .7rem; letter-spacing: .13em;
+            text-transform: uppercase; color: var(--ink-muted); font-weight: 700; }
+.fld { margin: 0 0 11px; } .fld:last-child { margin-bottom: 0; }
+.fld > label { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+               font-family: var(--mono); font-size: .74rem; color: var(--ink-2); margin-bottom: 4px; }
+.fld > label b { color: var(--ink); font-weight: 700; }
+.fld select, .fld input[type="range"] { width: 100%; }
+.fld select { background: var(--surface-3); color: var(--ink); border: 1px solid var(--hairline);
+              border-radius: 6px; padding: 5px 7px; font-family: var(--mono); font-size: .8rem; }
+.fld input[type="range"] { accent-color: var(--activation); }
+.hint { font-size: .68rem; color: var(--ink-muted); font-family: var(--mono); line-height: 1.5; }
+
+.verdict { border-radius: 8px; padding: 13px 17px; margin: 15px 0; border: 1px solid var(--hairline);
+           background: var(--surface-2); display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 22px; }
+.verdict .big { font-size: 1.5rem; font-weight: 800; letter-spacing: -.02em; line-height: 1.15; }
+.verdict .det { font-family: var(--mono); font-size: .82rem; color: var(--ink-2); }
+.verdict.ok  { border-left: 4px solid var(--good); }      .verdict.ok .big  { color: var(--good); }
+.verdict.bad { border-left: 4px solid var(--critical); }  .verdict.bad .big { color: var(--critical); }
+
+.arith { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .78rem;
+         font-variant-numeric: tabular-nums; margin: 6px 0 0; }
+.arith td, .arith th { padding: 5px 8px; border-bottom: 1px solid var(--hairline-2); text-align: left; }
+.arith th { font-size: .64rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-muted); }
+.arith td.r, .arith th.r { text-align: right; white-space: nowrap; }
+.arith td.op { color: var(--ink-muted); }
+.arith tr.sum td { border-top: 1px solid var(--hairline); border-bottom: none; font-weight: 700;
+                   color: var(--ink); padding-top: 8px; }
+
+/* ---- the wasted-recompute triangle ---- */
+.tri { display: flex; flex-direction: column; gap: 4px; margin: 14px 0 6px; }
+.trirow { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.trirow .lb { font-family: var(--mono); font-size: .66rem; color: var(--ink-muted);
+              width: 128px; flex: none; }
+.rcell { font-family: var(--mono); font-size: .7rem; padding: 3px 8px; border-radius: 5px;
+         border: 1px solid var(--hairline); background: var(--surface-2); color: var(--ink-muted); }
+.rcell.used { background: var(--activation-w); border-color: var(--activation);
+              color: var(--activation); font-weight: 700; }
+.rcell.waste { opacity: .55; text-decoration: line-through; }
+
+/* ---- kv cache dump ---- */
+.kvcols { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+          gap: 12px; margin-top: 10px; align-items: start; }
+.kvlayer { border: 1px solid var(--hairline); border-radius: 8px; padding: 10px 12px 2px;
+           background: var(--surface-2); }
+.kvlayer .lh { font-family: var(--mono); font-size: .66rem; letter-spacing: .1em;
+               text-transform: uppercase; color: var(--ink-muted); font-weight: 700; margin-bottom: 6px; }
+.qbox { border: 1px dashed var(--critical); border-radius: 8px; padding: 10px 12px 2px;
+        background: var(--surface-2); }
+.qbox .lh { font-family: var(--mono); font-size: .66rem; letter-spacing: .1em; text-transform: uppercase;
+            color: var(--critical); font-weight: 700; margin-bottom: 6px; }
+
+/* ---- proof ---- */
+.claim { border-left: 3px solid var(--good); background: var(--surface-2); border-radius: 0 8px 8px 0;
+         padding: 12px 16px; margin: 14px 0; font-size: .95rem; color: var(--ink-2); line-height: 1.65; }
+.claim q { color: var(--ink); font-style: italic; }
+.checkline { font-family: var(--mono); font-size: .8rem; padding: 5px 0; border-bottom: 1px solid var(--hairline-2);
+             display: flex; flex-wrap: wrap; gap: 4px 18px; }
+.checkline .ok { color: var(--good); font-weight: 700; }
+.checkline .bad { color: var(--critical); font-weight: 700; }
+
+/* ---- byte strips ---- */
+.striprow { display: grid; grid-template-columns: 96px 1fr 190px; gap: 10px; align-items: center; margin: 7px 0; }
+.striprow .bl { font-family: var(--mono); font-size: .74rem; color: var(--ink-2); }
+.striprow .br { font-family: var(--mono); font-size: .72rem; color: var(--ink-muted); text-align: right; }
+.striprow .memstrip { margin: 0; }
+
+.scrollx { overflow-x: auto; }
+@media (max-width: 860px) {
+  .verdict .big { font-size: 1.25rem; }
+  .striprow { grid-template-columns: 80px 1fr; }
+  .striprow .br { grid-column: 1 / -1; text-align: left; }
+}
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 25</div>
+    <h1>The KV Cache: Exact Memoisation, and What It Costs</h1>
+    <p class="lede">Attention at position <em>n</em> needs the keys and values of every position
+      before it. Recomputing them all on every step makes generation quadratic. Caching them makes
+      it linear — and the cache is not an approximation: K and V for a token depend only on that
+      token's hidden state, and causality guarantees nothing later can change it. This page proves
+      that equivalence in your browser, then prices the cache. At 128k context on a 70B model it is
+      <strong>42.95 GB per sequence</strong>, and without grouped-query attention it would be eight
+      times that.</p>
+    <noscript><p class="callout warn">This page recomputes the equivalence proof in the browser
+      from <code>assets/data/infer.js</code>. With JavaScript disabled you will see an empty shell.</p></noscript>
+  </div>
+
+  <section class="block" id="why">
+    <h2>1 · Without it, every token recomputes the whole prefix</h2>
+    <div id="whyBody"></div>
+  </section>
+
+  <section class="block" id="what">
+    <h2>2 · What is actually in it — and what is not</h2>
+    <div id="whatBody"></div>
+  </section>
+
+  <section class="block" id="proof">
+    <h2>3 · The proof that it is exact</h2>
+    <div id="proofBody"></div>
+  </section>
+
+  <section class="block" id="cost">
+    <h2>4 · The cost, at real scale</h2>
+    <div id="costBody"></div>
+  </section>
+
+  <section class="block" id="stream">
+    <h2>5 · It is not just stored — it is read on every single token</h2>
+    <div id="streamBody"></div>
+  </section>
+
+  <section class="block" id="fwd">
+    <h2>6 · Where this goes</h2>
+    <div id="fwdBody"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/lm.js"></script>
+<script src="../assets/data/infer.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T  = NN.T;
+  const I  = window.INFER;
+  const LM = window.LM;
+  const el = NN.el;
+  const X = "·", MUL = "×", ARR = "→";
+
+  const META   = I.meta;
+  const MODELS = I.models;
+  const GPUS   = I.gpus;
+  const ROOF   = I.roofline;
+  const KV     = I.kv_cache;
+  const GEN    = I.generation;
+  const TOKSTR = META.token_strings;
+  const DTB    = T.memory.dtype_bytes;
+
+  function gb(b, d) { return (b / 1e9).toFixed(d === undefined ? 2 : d) + " GB"; }
+  function tb(b, d) { return (b / 1e12).toFixed(d === undefined ? 2 : d) + " TB"; }
+  function pct(x, d) { return (x * 100).toFixed(d === undefined ? 1 : d) + "%"; }
+  function pname(p) {
+    const b = p / 1e9;
+    return NN.fmt(b, Math.abs(b - Math.round(b)) < 1e-9 ? 0 : 1) + "B";
+  }
+  function pageOf(id) { return NN.PAGES.filter(function (p) { return p.id === id; })[0]; }
+  function plink(id, label) {
+    const p = pageOf(id);
+    return '<a href="' + p.file + '">' + (label || (p.n + " " + p.title)) + "</a>";
+  }
+  function txt(s) { return document.createTextNode(s); }
+
+  /* ======================================================================
+     0 · AN INDEPENDENT RE-IMPLEMENTATION OF THE MODEL, IN JS
+     ----------------------------------------------------------------------
+     code/inference_toy.py claims the cache is exact. This page does not
+     take that on faith: it re-runs the whole thing here, from the weights
+     in INFER.params, and does its own comparison of
+        cached decode  vs  full recompute of the entire prefix.
+     Everything it needs is in INFER except the LayerNorm epsilon, which is
+     a constant inside the generator. The port pins it by agreement: the
+     logits it produces are compared against the stored ones, and they match
+     to ~1e-17, which is only possible if every constant is right.
+     ====================================================================== */
+  const EPS = 1e-5;
+  const P = I.params, DM = META.d_model, NH = META.n_heads,
+        DH = META.d_head, NL = META.n_layers;
+
+  function mm(A, B) {
+    const m = A.length, k = B.length, n = B[0].length, O = [];
+    for (let i = 0; i < m; i++) {
+      const r = [];
+      for (let j = 0; j < n; j++) { let s = 0; for (let t = 0; t < k; t++) s += A[i][t] * B[t][j]; r.push(s); }
+      O.push(r);
+    }
+    return O;
+  }
+  function dot(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; }
+  function gelu(x) {
+    const c = Math.sqrt(2 / Math.PI);
+    return 0.5 * x * (1 + Math.tanh(c * (x + 0.044715 * Math.pow(x, 3))));
+  }
+  function layernorm(v, g, b) {
+    const n = v.length;
+    let mu = 0; for (let i = 0; i < n; i++) mu += v[i]; mu /= n;
+    let va = 0; for (let i = 0; i < n; i++) va += Math.pow(v[i] - mu, 2); va /= n;
+    const inv = 1 / Math.sqrt(va + EPS), o = [];
+    for (let j = 0; j < n; j++) o.push(g[j] * (v[j] - mu) * inv + b[j]);
+    return o;
+  }
+  function softmax(v) {
+    const m = Math.max.apply(null, v);
+    const e = v.map(function (x) { return Math.exp(x - m); });
+    let s = 0; e.forEach(function (x) { s += x; });
+    return e.map(function (x) { return x / s; });
+  }
+  function runBlock(l, hidden, cache, useCache, sink) {
+    const n = hidden.map(function (h) { return layernorm(h, P["L" + l + ".ln.g"], P["L" + l + ".ln.b"]); });
+    const Q = mm(n, P["L" + l + ".Wq"]);
+    const K = mm(n, P["L" + l + ".Wk"]);
+    const V = mm(n, P["L" + l + ".Wv"]);
+    if (sink) sink.push({ layer: l, Q: Q, K: K, V: V });
+    let Kall, Vall, off;
+    if (useCache) {
+      K.forEach(function (r) { cache.K.push(r); });
+      V.forEach(function (r) { cache.V.push(r); });
+      Kall = cache.K; Vall = cache.V; off = Kall.length - Q.length;
+    } else { Kall = K; Vall = V; off = 0; }
+    const scale = 1 / Math.sqrt(DH);
+    const O = Q.map(function () { return new Array(DM).fill(0); });
+    for (let qi = 0; qi < Q.length; qi++) {
+      const ap = off + qi;
+      for (let h = 0; h < NH; h++) {
+        const lo = h * DH, hi = (h + 1) * DH;
+        const qv = Q[qi].slice(lo, hi);
+        const sc = [];
+        for (let j = 0; j <= ap; j++) sc.push(dot(qv, Kall[j].slice(lo, hi)) * scale);
+        const p = softmax(sc);
+        for (let d = 0; d < DH; d++) {
+          let s = 0; for (let j = 0; j <= ap; j++) s += p[j] * Vall[j][lo + d];
+          O[qi][lo + d] = s;
+        }
+      }
+    }
+    const A = mm(O, P["L" + l + ".Wo"]);
+    const h1 = hidden.map(function (hh, i) { return hh.map(function (x, d) { return x + A[i][d]; }); });
+    const n2 = h1.map(function (x) { return layernorm(x, P["L" + l + ".ln2.g"], P["L" + l + ".ln2.b"]); });
+    const U = mm(n2, P["L" + l + ".W1"]);
+    const G = U.map(function (r) { return r.map(gelu); });
+    const D2 = mm(G, P["L" + l + ".W2"]);
+    return h1.map(function (hh, i) { return hh.map(function (x, d) { return x + D2[i][d]; }); });
+  }
+  function forward(ids, caches, sink) {
+    let hidden = ids.map(function (t) { return P.E[t].slice(); });
+    for (let l = 0; l < NL; l++) {
+      hidden = runBlock(l, hidden, caches ? caches[l] : null, !!caches, sink);
+    }
+    const lg = mm(hidden, P.head);
+    return lg[lg.length - 1];
+  }
+  function maxAbs(a, b) {
+    let m = 0; for (let i = 0; i < a.length; i++) m = Math.max(m, Math.abs(a[i] - b[i]));
+    return m;
+  }
+
+  /* run it: prefill, then N_NEW decode steps, each verified two ways */
+  const RUN = (function () {
+    const caches = [];
+    for (let l = 0; l < NL; l++) caches.push({ K: [], V: [] });
+    const perStep = [], qByStep = [];
+    let sink = [];
+    let logits = forward(META.prompt.slice(), caches, sink);
+    qByStep.push(sink);
+    perStep.push({
+      phase: "prefill", step: 0, seq_len: META.prompt.length,
+      vs_stored: maxAbs(logits, GEN.steps[0].logits), chosen: argmax(logits)
+    });
+    let nxt = argmax(logits);
+    let seq = META.prompt.slice();
+    for (let s = 0; s < META.n_new; s++) {
+      seq.push(nxt);
+      sink = [];
+      const cached = forward([nxt], caches, sink);       // decode WITH the cache
+      const full   = forward(seq, null, null);           // the entire prefix, no cache
+      qByStep.push(sink);
+      perStep.push({
+        phase: "decode", step: s + 1, seq_len: seq.length,
+        cached_vs_recompute: maxAbs(cached, full),
+        vs_stored: maxAbs(cached, GEN.steps[s + 1].logits),
+        chosen: argmax(cached), stored_chosen: GEN.steps[s + 1].chosen,
+        recomputed_rows: seq.length
+      });
+      nxt = argmax(cached);
+    }
+    /* does the JS cache equal the one code/inference_toy.py dumped? */
+    let cacheDiff = 0;
+    GEN.cache_dump.forEach(function (cd, l) {
+      for (let i = 0; i < cd.K.length; i++) {
+        cacheDiff = Math.max(cacheDiff, maxAbs(cd.K[i], caches[l].K[i]), maxAbs(cd.V[i], caches[l].V[i]));
+      }
+    });
+    const decodes = perStep.filter(function (p) { return p.phase === "decode"; });
+    return {
+      perStep: perStep, caches: caches, qByStep: qByStep, cacheDiff: cacheDiff,
+      worstEquiv: Math.max.apply(null, decodes.map(function (p) { return p.cached_vs_recompute; })),
+      worstStored: Math.max.apply(null, perStep.map(function (p) { return p.vs_stored; })),
+      allPass: decodes.every(function (p) { return p.cached_vs_recompute === 0; })
+    };
+    function argmax(v) {
+      let bi = 0; for (let i = 1; i < v.length; i++) if (v[i] > v[bi]) bi = i;
+      return bi;
+    }
+  })();
+
+  /* ======================================================================
+     1 · WHY IT EXISTS
+     ====================================================================== */
+  (function buildWhy() {
+    const host = NN.$("#whyBody");
+    const steps = LM.inference.trained.steps;
+    const nSteps = steps.length;
+
+    host.appendChild(el("p", { html:
+      plink("lm", "Page 08") + " generated text the naive way, and printed the receipt every " +
+      "time. A transformer forward pass over a context of <em>n</em> tokens produces <em>n</em> " +
+      "rows of output, one per position. Sampling the next token needs exactly one of them: the " +
+      "last. Every other row was computed and thrown away." }));
+
+    /* the triangle */
+    const tri = el("div", { class: "tri" });
+    let totalRows = 0, usedRows = 0;
+    steps.forEach(function (s) {
+      totalRows += s.all_rows_computed; usedRows += 1;
+      const row = el("div", { class: "trirow" }, [
+        el("span", { class: "lb" }, "step " + s.step + " · " + s.all_rows_computed +
+          (s.all_rows_computed === 1 ? " row" : " rows"))
+      ]);
+      s.context_str.forEach(function (t, k) {
+        const used = k === s.row_used;
+        row.appendChild(el("span", { class: "rcell" + (used ? " used" : " waste") },
+          [txt(t)]));
+      });
+      row.appendChild(el("span", { class: "hint" },
+        ARR + " keeps row " + s.row_used + ", discards " + (s.all_rows_computed - 1)));
+      tri.appendChild(row);
+    });
+    host.appendChild(tri);
+
+    host.appendChild(el("p", { class: "small", style: { color: "var(--ink-2)" }, html:
+      "<code>LM.inference.trained.steps[" + (nSteps - 1) + "].wasted_note</code>: " +
+      steps[nSteps - 1].wasted_note }));
+
+    host.appendChild(NN.tiles([
+      { k: "rows computed, " + nSteps + " steps", v: String(totalRows),
+        s: "1 + 2 + … + " + nSteps + "  =  n(n+1)/2" },
+      { k: "rows actually used", v: String(usedRows), s: "one per step", cls: "activation" },
+      { k: "wasted", v: pct((totalRows - usedRows) / totalRows, 0),
+        s: String(totalRows - usedRows) + " of " + totalRows + " row-passes" }
+    ]));
+
+    host.appendChild(el("p", { html:
+      "The waste is not a constant factor, it is a <em>growth rate</em>. Generating n tokens " +
+      "naively costs 1 + 2 + … + n = n(n+1)/2 row-passes through the whole model. With the cache " +
+      "it costs n, because each step computes exactly one new row and reads the rest out of " +
+      "memory. Quadratic becomes linear, and the constant of proportionality is the entire model." }));
+
+    /* interactive n */
+    const maxSeq = Math.max.apply(null, KV.rows.map(function (r) { return r.seq; }));
+    const kMax = Math.round(Math.log2(maxSeq));
+    const rng = el("input", { type: "range", min: 1, max: kMax, step: 1, value: 13 });
+    const out = el("b");
+    const tOut = el("div");
+    const ctl = el("div", { class: "ctlgrid" }, [
+      el("div", { class: "panel" }, [
+        el("h4", {}, "generation length"),
+        el("div", { class: "fld" }, [
+          el("label", {}, [txt("tokens generated, n"), out]), rng]),
+        el("div", { class: "hint" },
+          "swept in powers of two up to " + NN.count(maxSeq) +
+          ", the longest context sampled in INFER.kv_cache")
+      ]),
+      el("div", { class: "panel", style: { gridColumn: "span 2" } }, [
+        el("h4", {}, "row-passes through the model"), tOut
+      ])
+    ]);
+    host.appendChild(ctl);
+
+    function renderN() {
+      const n = Math.pow(2, +rng.value);
+      out.textContent = NN.count(n);
+      const naive = n * (n + 1) / 2;
+      tOut.innerHTML = "";
+      tOut.appendChild(NN.tiles([
+        { k: "no cache", v: NN.count(naive), s: "n(n+1)/2 row-passes" },
+        { k: "with cache", v: NN.count(n), s: "one new row per step", cls: "activation" },
+        { k: "work removed", v: NN.count(Math.round(naive / n)) + MUL, s: "= (n+1)/2" }
+      ]));
+    }
+    rng.addEventListener("input", renderN);
+    renderN();
+
+    host.appendChild(NN.callout("why", "IT IS MEMOISATION, NOT AN OPTIMISATION OF ATTENTION",
+      "Nothing about the attention <em>math</em> changes. The cache is the classic trade: a pure " +
+      "function of a token's hidden state (its K and V) is computed once and stored instead of " +
+      "recomputed. What makes it legal is causality — the subject of section 3. What makes it " +
+      "expensive is that the table has one entry per token per layer per KV head, and it is read " +
+      "in full on every step — the subject of sections 4 and 5."));
+  })();
+
+  /* ======================================================================
+     2 · WHAT IT STORES
+     ====================================================================== */
+  (function buildWhat() {
+    const host = NN.$("#whatBody");
+
+    host.appendChild(el("p", { html:
+      "One entry per token, per layer: the key vector and the value vector that token contributes " +
+      "to attention. Below is the real cache from <code>INFER.generation.cache_dump</code> — the " +
+      "actual numbers <code>code/inference_toy.py</code> produced, all " +
+      GEN.cache_dump[0].entries + " rows of it, in both of the model's " + NL + " layers. Step " +
+      "the generation and watch a row appear. Nothing already written ever changes." }));
+
+    host.appendChild(NN.legend(["activation", "weight"]));
+
+    function kvTensor(name, vals) {
+      const t = NN.tensor({
+        name: name, shape: [vals.length, vals[0].length], values: vals,
+        cls: "activation", digits: 3, signed: true
+      });
+      t.show = function (n, freshFrom) {
+        t.cells.forEach(function (row, i) {
+          row.forEach(function (c, j) {
+            const on = i < n;
+            c.textContent = on ? NN.fmtSigned(vals[i][j], 3) : "·";
+            c.classList.toggle("dim", !on);
+            c.classList.toggle("hot", on && i >= freshFrom);
+            c.classList.toggle("is-zero", false);
+          });
+        });
+      };
+      return t;
+    }
+
+    const cols = el("div", { class: "kvcols" });
+    const layers = GEN.cache_dump.map(function (cd) {
+      const K = kvTensor("K" + cd.layer, cd.K);
+      const V = kvTensor("V" + cd.layer, cd.V);
+      cols.appendChild(el("div", { class: "kvlayer" }, [
+        el("div", { class: "lh" }, "layer " + cd.layer + " — cached, " + cd.entries + " rows max"),
+        K, V
+      ]));
+      return { K: K, V: V };
+    });
+
+    /* Q, recomputed live and thrown away */
+    const qHost = el("div", { class: "qbox" });
+    cols.appendChild(qHost);
+    host.appendChild(cols);
+
+    const info = el("div");
+    host.appendChild(info);
+    const mount = el("div");
+    host.appendChild(mount);
+
+    function render(i) {
+      const s = GEN.steps[i];
+      const n = s.cache_len_after;
+      const fresh = n - s.n_tokens_processed;
+      layers.forEach(function (L2) { L2.K.show(n, fresh); L2.V.show(n, fresh); });
+
+      /* the Q rows this step computed — from the independent JS run */
+      const sink = RUN.qByStep[i];
+      qHost.innerHTML = "";
+      qHost.appendChild(el("div", { class: "lh" }, "NOT cached — recomputed, used once, dropped"));
+      sink.forEach(function (rec) {
+        qHost.appendChild(NN.tensor({
+          name: "Q" + rec.layer, shape: [rec.Q.length, DM], values: rec.Q,
+          cls: "activation", digits: 3, signed: true,
+          note: "this step only"
+        }));
+      });
+
+      info.innerHTML = "";
+      info.appendChild(NN.tiles([
+        { k: "step", v: s.phase, s: s.n_tokens_processed + " token(s) in" },
+        { k: "rows in the cache", v: String(n), s: "per layer, K and V each", cls: "activation" },
+        { k: "rows added this step", v: String(s.n_tokens_processed) },
+        { k: "Q rows kept", v: "0", s: "queries are never cached" }
+      ]));
+    }
+
+    new NN.Stepper({
+      mount: mount, count: GEN.steps.length,
+      labels: GEN.steps.map(function (s) {
+        return s.phase + " · cache " + s.cache_len_after + " rows";
+      }),
+      onStep: render, autoplayMs: 1600
+    });
+
+    host.appendChild(NN.callout("key", "THE ASYMMETRY PEOPLE GET WRONG: Q IS NOT CACHED",
+      "Q, K and V come out of the same three projections of the same hidden state, so it is " +
+      "natural to assume all three are cached. They are not. A <b>key and a value belong to a " +
+      "position</b>: every future query will attend to them, so they are worth keeping. A " +
+      "<b>query belongs to a step</b>: it asks one question, gets its answer, and is never " +
+      "consulted again, because causality means no earlier token ever attends to a later one. " +
+      "Caching Q would store something with exactly zero future readers. That is also why the " +
+      "cache formula in section 4 has a <code>2 " + MUL + "</code> in it and not a <code>3 " +
+      MUL + "</code> — and why " + plink("attnvariants") + " can shrink K and V by sharing them " +
+      "across query heads without touching Q at all."));
+  })();
+
+  /* ======================================================================
+     3 · THE PROOF
+     ====================================================================== */
+  (function buildProof() {
+    const host = NN.$("#proofBody");
+    const CE = GEN.cache_equivalence;
+
+    host.appendChild(el("p", { html:
+      "A cache that changed the answer would be a quantisation scheme, not a cache. " +
+      "<code>code/inference_toy.py</code> checks this the only way that settles it: at every " +
+      "decode step it computes the logits twice — once from the cache, once by re-running the " +
+      "entire prefix from scratch with no cache at all — and compares." }));
+
+    host.appendChild(el("div", { class: "claim" }, [
+      el("div", { class: "hint", style: { marginBottom: "6px" } },
+        "INFER.generation.cache_equivalence.claim, verbatim:"),
+      el("q", {}, CE.claim)
+    ]));
+
+    /* the generator's own table */
+    const tbl = el("table", { class: "data" });
+    tbl.appendChild(el("thead", {}, [el("tr", {}, [
+      el("th", {}, "decode step"), el("th", {}, "sequence length"),
+      el("th", {}, "rows recomputed for the check"),
+      el("th", {}, "max |Δ logits|"), el("th", {}, "verdict")
+    ])]));
+    const tb = el("tbody");
+    CE.per_step.forEach(function (c) {
+      tb.appendChild(el("tr", {}, [
+        el("td", { class: "n" }, String(c.step)),
+        el("td", { class: "n" }, String(c.seq_len)),
+        el("td", { class: "n" }, String(c.seq_len)),
+        el("td", { class: "n" }, c.max_abs_err.toExponential(3)),
+        el("td", { style: { color: c.passed ? "var(--good)" : "var(--critical)", fontWeight: "700" } },
+          c.passed ? "PASS" : "FAIL")
+      ]));
+    });
+    tbl.appendChild(tb);
+    host.appendChild(el("div", { class: "scrollx" }, [tbl]));
+
+    host.appendChild(el("div", { class: "verdict " + (CE.passed ? "ok" : "bad") }, [
+      el("div", { class: "big" }, "max |Δ| = " + CE.max_abs_err.toExponential(3)),
+      el("div", { class: "det" },
+        "across all " + CE.per_step.length + " decode steps — not \"small\", not \"within " +
+        "tolerance\": exactly zero, in every one of the " + META.vocab + " logits")
+    ]));
+
+    /* the independent check */
+    host.appendChild(el("h3", {}, "Verified again, here, from the weights"));
+    host.appendChild(el("p", { html:
+      "Taking the generator's word for it would be a poor way to make this point, so this page " +
+      "re-implements the model in JavaScript — LayerNorm, GELU, causal attention, the LM head — " +
+      "reads the weights straight out of <code>INFER.params</code>, and runs the same experiment " +
+      "in your browser. The two columns below are computed live and are not read from the file." }));
+
+    const cl = el("div");
+    RUN.perStep.forEach(function (p) {
+      if (p.phase !== "decode") return;
+      cl.appendChild(el("div", { class: "checkline" }, [
+        el("span", {}, "decode step " + p.step + "  ·  seq_len " + p.seq_len),
+        el("span", { class: "muted" }, "cached vs full recompute"),
+        el("span", { class: p.cached_vs_recompute === 0 ? "ok" : "bad" },
+          "max|Δ| " + p.cached_vs_recompute.toExponential(3)),
+        el("span", { class: "muted" }, "vs the stored logits: " + p.vs_stored.toExponential(1)),
+        el("span", { class: p.chosen === p.stored_chosen ? "ok" : "bad" },
+          "argmax " + p.chosen + (p.chosen === p.stored_chosen ? " ✓" : " ✗"))
+      ]));
+    });
+    host.appendChild(cl);
+
+    host.appendChild(el("div", { class: "verdict " + (RUN.allPass ? "ok" : "bad") }, [
+      el("div", { class: "big" },
+        (RUN.allPass ? "independent check passes" : "INDEPENDENT CHECK FAILED") +
+        " — max |Δ| = " + RUN.worstEquiv.toExponential(3)),
+      el("div", { class: "det" },
+        "JS re-implementation, run just now. Its K/V cache also matches " +
+        "INFER.generation.cache_dump to " + RUN.cacheDiff.toExponential(1) +
+        ", and its logits match the stored ones to " + RUN.worstStored.toExponential(1) +
+        " — last-bit differences between two libm implementations of tanh and exp, not " +
+        "differences in the arithmetic.")
+    ]));
+
+    host.appendChild(el("h3", {}, "Why it has to be exact"));
+    host.appendChild(el("p", { html:
+      "The equality is not a lucky property of these weights, it is forced by two facts about the " +
+      "architecture, and it is worth stating them as an argument rather than a result." }));
+
+    host.appendChild(NN.formula({
+      rule: "k<sub>i</sub> = W<sub>K</sub> · LN(h<sub>i</sub>)   and   v<sub>i</sub> = W<sub>V</sub> · LN(h<sub>i</sub>)",
+      sub: "a function of token i's own hidden state and the weights — nothing else appears on the right",
+      cls: "activation"
+    }));
+
+    host.appendChild(el("ol", { class: "small", style: { color: "var(--ink-2)", lineHeight: "1.75", maxWidth: "72ch" } }, [
+      el("li", { html:
+        "<b>K and V are per-token functions.</b> The projections are applied row-wise. " +
+        "Position i's key depends on position i's hidden state and on " +
+        NN.chip("weight").outerHTML + " that are frozen at inference. No other position enters " +
+        "the expression." }),
+      el("li", { html:
+        "<b>Causality means the hidden state of position i cannot change.</b> A causal mask lets " +
+        "position i attend only to positions ≤ i. Appending token n+1 adds a row that reads from " +
+        "the earlier ones and is read by none of them, so h<sub>i</sub> for i ≤ n is bit-identical " +
+        "before and after. This is exactly the property " + plink("tfforward", "page 09") +
+        " showed as a lower-triangular attention matrix." }),
+      el("li", { html:
+        "Therefore k<sub>i</sub> and v<sub>i</sub> computed at step i and reused at step n are " +
+        "the same numbers the recompute would produce. The cache is a memo table for a pure " +
+        "function, and looking a value up in it is not an approximation of computing it — it is " +
+        "the same value." })
+    ]));
+
+    host.appendChild(NN.callout("warn", "WHAT WOULD BREAK IT",
+      "The argument leans entirely on causality, so anything that violates it invalidates the " +
+      "cache. Bidirectional attention (a BERT-style encoder) has no valid KV cache at all: " +
+      "adding a token changes every earlier hidden state. Editing a token in the middle of the " +
+      "prompt invalidates the cache from that position onward, which is why prefix caching keys " +
+      "on an exact token prefix. And <em>approximate</em> KV compression — eviction, low-rank " +
+      "projection, quantising the cache below the dtype it was written in — does change the " +
+      "answer. Those are real techniques, but they are no longer this proof."));
+  })();
+
+  /* ======================================================================
+     4 · THE COST
+     ====================================================================== */
+  (function buildCost() {
+    const host = NN.$("#costBody");
+    const SEQS = KV.rows.map(function (r) { return r.seq; })
+                   .filter(function (v, i, a) { return a.indexOf(v) === i; })
+                   .sort(function (a, b) { return a - b; });
+    const BATCHES = I.batching.by_seq[0].rows.map(function (r) { return r.batch; });
+    const DTYPES = Object.keys(DTB);
+
+    host.appendChild(el("p", { html:
+      "Two vectors per token per layer, one per KV head. That is the whole formula, and it is " +
+      "worth noticing what is <em>not</em> in it: d_model. The cache is sized by the number of " +
+      "KV heads, which is the exact lever grouped-query attention pulls." }));
+
+    host.appendChild(NN.formula({
+      rule: "KV bytes per sequence = " + KV.formula.replace(/\*/g, MUL),
+      sub: "per " + KV.per + "; multiply by batch for a running server",
+      cls: "activation"
+    }));
+
+    /* controls */
+    const S = {
+      model: MODELS.map(function (m) { return m.name; }).indexOf("Llama 3 70B"),
+      seq: SEQS.indexOf(8192), batch: 0, dtype: "bf16"
+    };
+    if (S.model < 0) S.model = 0;
+    if (S.seq < 0) S.seq = 0;
+
+    const selModel = el("select");
+    MODELS.forEach(function (m, i) {
+      selModel.appendChild(el("option", { value: i, selected: i === S.model ? "selected" : null },
+        m.name + "  (" + pname(m.params) + ")"));
+    });
+    const rngSeq = el("input", { type: "range", min: 0, max: SEQS.length - 1, step: 1, value: S.seq });
+    const seqOut = el("b");
+    const rngBatch = el("input", { type: "range", min: 0, max: BATCHES.length - 1, step: 1, value: S.batch });
+    const batchOut = el("b");
+    const selDt = el("select");
+    DTYPES.forEach(function (d) {
+      selDt.appendChild(el("option", { value: d, selected: d === S.dtype ? "selected" : null },
+        d + "  (" + DTB[d] + " B)"));
+    });
+
+    host.appendChild(el("div", { class: "ctlgrid" }, [
+      el("div", { class: "panel" }, [el("h4", {}, "model"),
+        el("div", { class: "fld" }, [selModel]), el("div", { class: "hint", id: "kvHint" })]),
+      el("div", { class: "panel" }, [el("h4", {}, "context"),
+        el("div", { class: "fld" }, [el("label", {}, [txt("sequence length"), seqOut]), rngSeq]),
+        el("div", { class: "hint" }, "sampled contexts: " +
+          SEQS.map(function (s) { return NN.count(s); }).join(", "))]),
+      el("div", { class: "panel" }, [el("h4", {}, "concurrency"),
+        el("div", { class: "fld" }, [el("label", {}, [txt("sequences in flight"), batchOut]), rngBatch]),
+        el("div", { class: "hint" }, "batch sizes from INFER.batching")]),
+      el("div", { class: "panel" }, [el("h4", {}, "cache dtype"),
+        el("div", { class: "fld" }, [selDt]),
+        el("div", { class: "hint" }, "from T.memory.dtype_bytes; the sampled rows are bf16")])
+    ]));
+
+    const calcHost = el("div");
+    host.appendChild(calcHost);
+    const chartHost = el("div");
+    host.appendChild(chartHost);
+
+    function render() {
+      const m = MODELS[S.model];
+      const seq = SEQS[S.seq];
+      const batch = BATCHES[S.batch];
+      const dt = DTB[S.dtype];
+      const row = KV.rows.filter(function (r) { return r.model === m.name && r.seq === seq; })[0];
+      const dHead = m.d_model / m.n_heads;
+      const kvh = m.n_kv_heads || m.n_heads;
+
+      /* the formula, evaluated here, and checked against the stored row */
+      const perSeq = 2 * m.n_layers * seq * kvh * dHead * dt;
+      const agrees = dt === DTB.bf16 ? perSeq === row.bytes_per_sequence : true;
+      const total = perSeq * batch;
+      /* weights stay bf16 here on purpose: this slider prices the CACHE.
+         Quantising the weights is page 28's variable, not this one. */
+      const weightsBf16 = m.params * DTB.bf16;
+      const weights = weightsBf16;
+      const mha = 2 * m.n_layers * seq * m.n_heads * dHead * dt;
+      const toEqual = weightsBf16 / perSeq;
+
+      seqOut.textContent = NN.count(seq);
+      batchOut.textContent = String(batch);
+      NN.$("#kvHint").textContent = m.n_layers + " layers · " + m.n_heads + " query heads · " +
+        kvh + " KV heads · d_head " + dHead + " · " + pname(m.params) + " params";
+
+      calcHost.innerHTML = "";
+      const tbl = el("table", { class: "arith" });
+      const tb = el("tbody");
+      function r2(a, b, c) {
+        tb.appendChild(el("tr", {}, [el("td", {}, a), el("td", { class: "op" }, b),
+          el("td", { class: "r" }, c)]));
+      }
+      r2("2", "K and V, one each", "2");
+      r2("layers", m.name, String(m.n_layers));
+      r2("seq", "context length", NN.count(seq));
+      r2("n_kv_heads", m.n_heads + " query heads ÷ " + (m.n_heads / kvh) + " (GQA group size)", String(kvh));
+      r2("d_head", "d_model " + m.d_model + " ÷ " + m.n_heads + " heads", String(dHead));
+      r2("dtype bytes", S.dtype, String(dt));
+      tb.appendChild(el("tr", { class: "sum" }, [
+        el("td", {}, "bytes per sequence"), el("td", { class: "op" }, "product"),
+        el("td", { class: "r" }, gb(perSeq) + "   (" + perSeq.toLocaleString("en-US") + " B)")
+      ]));
+      tb.appendChild(el("tr", { class: "sum" }, [
+        el("td", {}, MUL + " batch " + batch), el("td", { class: "op" }, "concurrent sequences"),
+        el("td", { class: "r" }, gb(total))
+      ]));
+      tbl.appendChild(tb);
+      calcHost.appendChild(el("div", { class: "scrollx" }, [tbl]));
+      calcHost.appendChild(el("div", { class: "hint", style: { margin: "6px 0 2px" } },
+        agrees
+          ? "matches INFER.kv_cache row for " + m.name + " at seq " + NN.count(seq) + " exactly"
+          : "derived from the bf16 row in INFER.kv_cache by rescaling the dtype"));
+
+      calcHost.appendChild(NN.tiles([
+        { k: "KV cache, one sequence", v: gb(perSeq), cls: "activation",
+          s: NN.count(seq) + " tokens · " + S.dtype },
+        { k: "KV cache, batch " + batch, v: gb(total), cls: "activation",
+          s: pct(total / (total + weights), 1) + " of weights + cache" },
+        { k: "model weights", v: gb(weights, 1), cls: "weight",
+          s: pname(m.params) + " params " + MUL + " " + DTB.bf16 + " B (bf16)" },
+        { k: "sequences = the weights", v: NN.fmt(toEqual, 1), cls: null,
+          s: "at bf16 weights: " + gb(weightsBf16, 1) + " ÷ " + gb(perSeq) }
+      ]));
+
+      const strip = NN.memstrip([
+        { cls: "weight", bytes: weights, label: "weights " + gb(weights, 1) },
+        { cls: "activation", bytes: total, label: "KV cache " + gb(total) }
+      ], weights + total);
+      calcHost.appendChild(el("div", { style: { margin: "12px 0 4px" } }, [strip]));
+      calcHost.appendChild(el("div", { class: "hint" },
+        "one decode step reads all of this: " + gb(weights + total) +
+        " for batch " + batch + " at " + NN.count(seq) + " context"));
+
+      /* GQA */
+      const hasGqa = mha > perSeq;
+      calcHost.appendChild(el("div", {
+        class: "verdict" + (hasGqa ? " bad" : ""), style: { marginTop: "18px" }
+      }, [
+        el("div", { class: "big" }, hasGqa
+          ? "without GQA: " + gb(mha) + " per sequence"
+          : "no GQA in this model: " + gb(perSeq) + " per sequence"),
+        el("div", { class: "det" }, hasGqa
+          ? "plain MHA would store all " + m.n_heads + " query heads' keys and values instead of " +
+            kvh + " — " + NN.fmt(mha / perSeq, 0) + MUL + " the bytes. " +
+            "INFER.kv_cache.rows[].mha_bytes_if_no_gqa = " + gb(row.mha_bytes_if_no_gqa) + " at bf16."
+          : m.name + " has n_kv_heads = n_heads = " + m.n_heads + ", so this IS the MHA figure: " +
+            "INFER.kv_cache.rows[].mha_bytes_if_no_gqa = " + gb(row.mha_bytes_if_no_gqa) +
+            " at bf16. Compare the " + MODELS[1].name + " row to see what GQA buys.")
+      ]));
+
+      /* per-context chart for this model */
+      chartHost.innerHTML = "";
+      chartHost.appendChild(el("h3", {}, "Every sampled context, " + m.name));
+      chartHost.appendChild(NN.chart.bars({
+        items: KV.rows.filter(function (r) { return r.model === m.name; })
+          .map(function (r) {
+            const b = r.bytes_per_sequence * (dt / DTB.bf16);
+            return {
+              label: NN.count(r.seq) + " tokens" + (r.seq === seq ? "  ◀" : ""),
+              value: b / 1e9, color: "var(--activation)",
+              sub: "· " + NN.fmt(weightsBf16 / b, 1) + " seqs = the weights"
+            };
+          }),
+        unit: "GB", limit: { value: weightsBf16 / 1e9, label: "model weights, bf16" }
+      }));
+      chartHost.appendChild(el("div", { class: "hint" },
+        "bars are one sequence each, " + S.dtype + ". " + KV.note));
+    }
+
+    selModel.addEventListener("change", function () { S.model = +selModel.value; render(); });
+    rngSeq.addEventListener("input", function () { S.seq = +rngSeq.value; render(); });
+    rngBatch.addEventListener("input", function () { S.batch = +rngBatch.value; render(); });
+    selDt.addEventListener("change", function () { S.dtype = selDt.value; render(); });
+    render();
+
+    /* the two headline numbers, stated flat */
+    const m70 = MODELS.filter(function (m) { return /70B/.test(m.name); })[0];
+    const r8k = KV.rows.filter(function (r) { return r.model === m70.name && r.seq === 8192; })[0];
+    const rLong = KV.rows.filter(function (r) { return r.model === m70.name; }).slice(-1)[0];
+
+    host.appendChild(NN.callout("mem", "THE NUMBERS TO CARRY AWAY",
+      "<b>" + m70.name + ", " + NN.count(r8k.seq) + " context:</b> " + gb(r8k.bytes_per_sequence) +
+      " per sequence. The weights are " + gb(m70.params * 2, 1) + ", so " +
+      Math.round(r8k.sequences_to_equal_weights) + " concurrent requests hold as many bytes as " +
+      "the model does.<br>" +
+      "<b>The same model at " + NN.count(rLong.seq) + ":</b> " + gb(rLong.bytes_per_sequence) +
+      " per sequence — " + NN.fmt(rLong.sequences_to_equal_weights, 1) +
+      " sequences equal the entire model. Three users with long documents open cost you a second " +
+      "copy of a 70B model, and unlike the weights that copy is not shareable between them."));
+
+    host.appendChild(NN.callout("key", "THIS IS WHY GQA EXISTS",
+      "<b>At " + NN.count(rLong.seq) + " without grouped-query attention the same cache would be " +
+      gb(rLong.mha_bytes_if_no_gqa) + " per sequence</b> instead of " +
+      gb(rLong.bytes_per_sequence) + " — " +
+      NN.fmt(rLong.mha_bytes_if_no_gqa / rLong.bytes_per_sequence, 0) + MUL +
+      " worse, because " + m70.name + " has " + m70.n_heads + " query heads sharing " +
+      (m70.n_kv_heads || m70.n_heads) + " KV heads. " + KV.gqa_note +
+      " " + plink("attnvariants") + " derives the mechanism and shows what it costs in quality; " +
+      "this page is the reason anyone was willing to pay it. Note what GQA does <em>not</em> " +
+      "change: the query heads, the FLOPs, or the output shape. It only removes rows from this " +
+      "table."));
+  })();
+
+  /* ======================================================================
+     5 · IT IS READ EVERY TOKEN
+     ====================================================================== */
+  (function buildStream() {
+    const host = NN.$("#streamBody");
+    const B = I.batching;
+    const rows = B.by_seq[0].rows;
+    const seq = B.by_seq[0].seq;
+    const m = MODELS.filter(function (x) { return x.name === B.model; })[0];
+    const g = ROOF.filter(function (x) { return x.gpu === B.gpu; })[0];
+    const gs = GPUS.filter(function (x) { return x.name === B.gpu; })[0];
+
+    host.appendChild(el("p", { html:
+      plink("regimes", "Page 24") + " established that a decode step is bandwidth-bound because " +
+      "it must read every weight in the model to produce one token. The KV cache is the second " +
+      "half of that read. It is not a passive allocation sitting in HBM: every cached key and " +
+      "value is streamed through the ALU on <em>every single decode step</em>, because the new " +
+      "token's query has to be scored against all of them." }));
+
+    host.appendChild(NN.formula({
+      rule: "bytes moved per decode step  =  weight bytes  +  KV bytes " + MUL + " batch",
+      sub: "weights are read once per STEP; the cache is read once per SEQUENCE per step",
+      result: "the second term is the one that grows"
+    }));
+
+    host.appendChild(el("p", { html:
+      "Below: " + m.name + " on " + g.gpu + " at " + NN.count(seq) + " context, from " +
+      "<code>INFER.batching</code>. The blue segment is fixed — " + gb(rows[0].weight_bytes, 1) +
+      " of weights, however many sequences are running. The green segment is per-sequence." }));
+
+    host.appendChild(NN.legend(["weight", "activation"]));
+
+    const wrap = el("div", { style: { marginTop: "10px" } });
+    rows.forEach(function (r) {
+      const tot = r.weight_bytes + r.kv_bytes;
+      wrap.appendChild(el("div", { class: "striprow" }, [
+        el("div", { class: "bl" }, "batch " + r.batch),
+        NN.memstrip([
+          { cls: "weight", bytes: r.weight_bytes, label: "weights" },
+          { cls: "activation", bytes: r.kv_bytes, label: "KV cache" }
+        ], tot),
+        el("div", { class: "br" },
+          gb(tot, 0) + " / step · KV " + pct(r.kv_share, 1) +
+          " · I = " + NN.fmt(r.intensity, 1) + " · " + r.bound)
+      ]));
+    });
+    host.appendChild(wrap);
+
+    const cross = rows.filter(function (r) { return r.bound === "compute"; })[0];
+    const half = rows.filter(function (r) { return r.kv_share >= 0.5; })[0];
+
+    host.appendChild(NN.tiles([
+      { k: "KV share at batch " + rows[0].batch, v: pct(rows[0].kv_share, 2), cls: "activation",
+        s: gb(rows[0].kv_bytes, 2) + " against " + gb(rows[0].weight_bytes, 1) },
+      { k: "KV share at batch " + rows[rows.length - 1].batch,
+        v: pct(rows[rows.length - 1].kv_share, 1), cls: "activation",
+        s: gb(rows[rows.length - 1].kv_bytes, 0) + " — bigger than the model" },
+      { k: "KV passes the weights at", v: half ? "batch " + half.batch : "—",
+        s: half ? pct(half.kv_share, 1) + " of the bytes moved" : "not within the sampled range" },
+      { k: "decode leaves memory-bound at", v: cross ? "batch " + cross.batch : "—",
+        s: "ridge " + NN.fmt(B.ridge, 2) + " FLOP/byte on " + B.gpu }
+    ]));
+
+    host.appendChild(el("p", { html:
+      "Read those two facts together, because they fight each other. Batching raises arithmetic " +
+      "intensity from " + NN.fmt(rows[0].intensity, 2) + " to " +
+      NN.fmt(rows[rows.length - 1].intensity, 1) + " FLOP/byte and FLOP utilisation from " +
+      pct(rows[0].flops_utilisation, 2) + " to " + pct(rows[rows.length - 1].flops_utilisation, 0) +
+      ", which is the single most effective thing you can do about " + plink("regimes", "page 24") +
+      "'s problem. But the mechanism only works because <em>weights</em> are amortised across the " +
+      "batch, and the KV cache is not amortised across anything: at batch " +
+      rows[rows.length - 1].batch + " it is " + pct(rows[rows.length - 1].kv_share, 0) +
+      " of the bytes, so each extra sequence now buys less intensity than the last." }));
+
+    host.appendChild(el("p", { class: "small", style: { color: "var(--ink-2)" }, html:
+      "<em>" + B.why + "</em>" }));
+
+    /* time cost */
+    const worst = rows[rows.length - 1];
+    host.appendChild(NN.callout("mem", "WHAT THAT COSTS IN TIME",
+      "At batch " + worst.batch + " a single decode step must move " +
+      gb(worst.weight_bytes + worst.kv_bytes, 0) + ". On " + B.gpu + " at " +
+      tb(gs.hbm_bw_bytes_per_s, 2) + "/s that is " +
+      NN.fmt((worst.weight_bytes + worst.kv_bytes) / gs.hbm_bw_bytes_per_s * 1e3, 1) +
+      " ms per step for the whole batch — " +
+      NN.fmt((worst.weight_bytes + worst.kv_bytes) / gs.hbm_bw_bytes_per_s * 1e3 / worst.batch, 3) +
+      " ms per token, versus " +
+      NN.fmt((rows[0].weight_bytes + rows[0].kv_bytes) / gs.hbm_bw_bytes_per_s * 1e3, 1) +
+      " ms per token at batch 1. That is the whole economic argument for batching, and " +
+      pct(worst.kv_share, 0) + " of the bytes in it are cache. It also will not fit: " +
+      gb(worst.kv_bytes, 0) + " of KV plus " + gb(worst.weight_bytes, 1) +
+      " of weights is far past one device's HBM, which is what " + plink("paged") + " and " +
+      plink("infpar") + " are for."));
+  })();
+
+  /* ======================================================================
+     6 · FORWARD
+     ====================================================================== */
+  (function buildFwd() {
+    const host = NN.$("#fwdBody");
+    const B = I.batching;
+    const rows = B.by_seq[0].rows;
+    const m70 = MODELS.filter(function (m) { return /70B/.test(m.name); })[0];
+    const rLong = KV.rows.filter(function (r) { return r.model === m70.name; }).slice(-1)[0];
+
+    host.appendChild(el("ul", { class: "small", style: { color: "var(--ink-2)", lineHeight: "1.75", maxWidth: "76ch" } }, [
+      el("li", { html: "<b>" + plink("batching") + "</b> — batching is the main lever on " +
+        "decode's arithmetic intensity, and this page has just shown what stops it: at batch " +
+        rows[rows.length - 1].batch + " the KV cache is " +
+        pct(rows[rows.length - 1].kv_share, 0) + " of the bytes moved and all of the memory " +
+        "pressure. Batch size is set by how much KV cache fits, not by how much compute is free." }),
+      el("li", { html: "<b>" + plink("paged") + "</b> — a cache that grows one row at a time, per " +
+        "request, with unknown final length, allocated contiguously, fragments badly. Wasting " +
+        "cache is wasting batch size, and batch size was the lever. The fix is paging, borrowed " +
+        "wholesale from operating systems." }),
+      el("li", { html: "<b>" + plink("attnvariants") + "</b> — MQA, GQA and MLA are all attacks on " +
+        "the <code>n_kv_heads</code> term in the formula above. They are the reason " +
+        gb(rLong.mha_bytes_if_no_gqa) + " became " + gb(rLong.bytes_per_sequence) + "." }),
+      el("li", { html: "<b>" + plink("quant") + "</b> — the cache can be stored in fewer bytes per " +
+        "element too, but note the difference: quantising the <em>weights</em> keeps the answer " +
+        "exact-ish for a fixed rounding, while quantising the <em>cache</em> gives up the proof in " +
+        "section 3. That is a real trade, not a free one." }),
+      el("li", { html: "<b>" + plink("flash") + "</b> — FlashAttention never materialises the " +
+        "seq" + MUL + "seq score matrix; the KV cache is the orthogonal saving, on the inputs to " +
+        "that matrix rather than the matrix itself. Both are exact, and both were proven exact " +
+        "rather than asserted." })
+    ]));
+
+    host.appendChild(NN.callout("why", "THE CACHE IS AN ACTIVATION THAT REFUSED TO DIE",
+      "In training, " + NN.chip("activation").outerHTML + " tensors live from the forward pass " +
+      "to the backward pass and are then freed — " + T.memory.by_class.activation.tensors +
+      " of them in the " + T.memory.n_params + "-parameter model of " + plink("memory", "page 01") +
+      ", occupying " + NN.bytes(T.memory.by_class.activation.bytes_fp32) + " for a few " +
+      "microseconds. Inference has no backward pass, so on paper the activation class should " +
+      "vanish. Instead one member of it becomes the longest-lived tensor in the system: it is " +
+      "allocated at the first token, grows every step, is read in full every step, is freed only " +
+      "when the request ends, and at " + NN.count(rLong.seq) + " context it is " +
+      gb(rLong.bytes_per_sequence) + " — " + pct(rLong.bytes_per_sequence / (m70.params * 2), 0) +
+      " of the model's weights, per user. Same four colours, completely different lifetime."));
+  })();
+
+  NN.page("kvcache");
+})();
+</script>
+</body>
+</html>

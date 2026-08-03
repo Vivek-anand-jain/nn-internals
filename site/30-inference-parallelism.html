@@ -1,0 +1,1300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 30 Inference Parallelism</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* page-local layout only; every colour is a design.css custom property */
+.panel { background: var(--surface-2); border: 1px solid var(--hairline);
+         border-radius: 8px; padding: 12px 14px; }
+.panel h4 { margin: 0 0 10px; font-family: var(--mono); font-size: .7rem; letter-spacing: .13em;
+            text-transform: uppercase; color: var(--ink-muted); font-weight: 700; }
+.ctlgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+           gap: 13px; margin: 16px 0; }
+.ctlgrid > *, .grid2 > *, .grid3 > * { min-width: 0; }
+.fld { margin: 0 0 11px; }
+.fld:last-child { margin-bottom: 0; }
+.fld > label { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+               font-family: var(--mono); font-size: .74rem; color: var(--ink-2); margin-bottom: 3px; }
+.fld .rv { color: var(--ink); font-weight: 700; font-variant-numeric: tabular-nums; }
+.fld input[type="range"], .fld select { width: 100%; }
+.fld select { background: var(--surface-3); color: var(--ink); border: 1px solid var(--hairline);
+              border-radius: 6px; padding: 5px 7px; font-family: var(--mono); font-size: .8rem; }
+.hint { font-size: .68rem; color: var(--ink-muted); font-family: var(--mono); line-height: 1.55; }
+.segbtns { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 12px; }
+
+.arith { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .8rem;
+         font-variant-numeric: tabular-nums; margin: 6px 0 0; }
+.arith td { padding: 5px 8px; border-bottom: 1px solid var(--hairline-2); white-space: nowrap; }
+.arith td.r { text-align: right; }
+.arith td.term { color: var(--ink-2); white-space: normal; }
+.arith tr.sum td { border-top: 1px solid var(--hairline); border-bottom: none;
+                   font-weight: 700; color: var(--ink); padding-top: 8px; }
+.arith tr.gap td { height: 9px; border: none; padding: 0; }
+
+.verdict { border-radius: 8px; padding: 15px 20px; margin: 16px 0; border: 1px solid var(--hairline);
+           background: var(--surface-2); display: flex; flex-wrap: wrap;
+           align-items: baseline; gap: 8px 22px; }
+.verdict .big { font-size: 1.55rem; font-weight: 800; letter-spacing: -.02em; line-height: 1.15; }
+.verdict .det { font-family: var(--mono); font-size: .84rem; color: var(--ink-2); }
+.verdict.ok  { border-left: 4px solid var(--good); }
+.verdict.ok .big { color: var(--good); }
+.verdict.bad { border-left: 4px solid var(--critical); }
+.verdict.bad .big { color: var(--critical); }
+.verdict.pend { border-left: 4px solid var(--accent); }
+.verdict.pend .big { color: var(--ink-2); }
+
+table.data td.wrap, table.data th.wrap { white-space: normal; max-width: 300px; text-align: left; }
+table.data tr.hi { background: var(--surface-3); }
+table.data td.bad { color: var(--critical); }
+table.data td.good { color: var(--good); }
+
+/* stage-by-stage latency accumulation for PP */
+.hops { display: flex; flex-wrap: wrap; align-items: stretch; gap: 6px; margin: 14px 0; }
+.hop { flex: 1 1 96px; min-width: 96px; border-radius: 8px; padding: 9px 10px;
+       background: var(--surface-2); border: 1px solid var(--hairline);
+       border-left: 3px solid var(--weight); font-family: var(--mono); font-size: .7rem; }
+.hop.wire { border-left-color: var(--activation); background: transparent;
+            border-style: dashed; flex: 0 1 90px; min-width: 84px; }
+.hop .hk { color: var(--ink-muted); text-transform: uppercase; letter-spacing: .07em;
+           font-size: .6rem; }
+.hop .hv { color: var(--ink); font-weight: 700; font-size: .84rem; margin-top: 2px; }
+.hop .hs { color: var(--ink-2); margin-top: 2px; line-height: 1.4; }
+
+.axisbar { display: flex; height: 26px; border-radius: 6px; overflow: hidden;
+           border: 1px solid var(--hairline); font-family: var(--mono); font-size: .64rem; }
+.axisbar > div { display: flex; align-items: center; justify-content: center;
+                 color: #fff; white-space: nowrap; overflow: hidden; }
+
+.mini { font-family: var(--mono); font-size: .78rem; font-variant-numeric: tabular-nums; }
+@media (max-width: 860px) { .grid2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 30</div>
+    <h1>Inference Parallelism</h1>
+    <p class="lede">The same three axes as training — TP, PP, DP — and the tradeoffs invert.
+      In training the batch is enormous and the step is long, so tensor parallelism's all-reduce
+      amortises and overlaps, and the pipeline bubble is the thing you fight. In decode the batch
+      is small and the step is a few milliseconds, so the all-reduce sits on the critical path of
+      every single token, its payload is too small to be a bandwidth problem, and it is
+      <em>latency</em> that refuses to amortise. This page recomputes
+      <a href="19-tensor-parallel.html">page 19</a>'s and
+      <a href="21-pipeline-parallel.html">page 21</a>'s arithmetic for one token instead of one
+      training step, and the conclusions land the other way up.</p>
+    <noscript><p class="callout warn">This page derives every number in the browser from
+      <code>assets/data/trace.js</code>, <code>assets/data/parallel.js</code> and
+      <code>assets/data/infer.js</code>. With JavaScript disabled you will see an empty shell.</p></noscript>
+  </div>
+
+  <section class="block" id="metrics">
+    <h2>1 · &ldquo;Faster&rdquo; is ambiguous until you say which number</h2>
+    <div id="metricsBody"></div>
+  </section>
+
+  <section class="block" id="tp">
+    <h2>2 · Tensor parallel: the all-reduce moves onto every token's critical path</h2>
+    <div id="tpBody"></div>
+  </section>
+
+  <section class="block" id="cross">
+    <h2>3 · The crossover: where more TP makes latency worse</h2>
+    <div id="crossBody"></div>
+  </section>
+
+  <section class="block" id="pp">
+    <h2>4 · Pipeline parallel: good for throughput, structurally bad for latency</h2>
+    <div id="ppBody"></div>
+  </section>
+
+  <section class="block" id="dp">
+    <h2>5 · Data parallel: replicas, and nothing else</h2>
+    <div id="dpBody"></div>
+  </section>
+
+  <section class="block" id="kv">
+    <h2>6 · TP shards the KV cache too</h2>
+    <div id="kvBody"></div>
+  </section>
+
+  <section class="block" id="recipe">
+    <h2>7 · The recipe, next to page 23's</h2>
+    <div id="recipeBody"></div>
+  </section>
+
+  <section class="block" id="limits">
+    <h2>8 · What this model is, and is not</h2>
+    <div id="limitsBody"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/parallel.js"></script>
+<script src="../assets/data/infer.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T   = NN.T;                 // ground_truth.py
+  const P   = NN.P;                 // parallel_toy.py  (window.PARALLEL)
+  const INF = window.INFER;         // inference_toy.py
+  const el  = NN.el;
+  const fmt = NN.fmt;
+
+  function p(html)  { return el("p", { html: html }); }
+  function h3(t)    { return el("h3", { text: t }); }
+  function code(t)  { return "<code>" + t + "</code>"; }
+  function ms(s)    { return fmt(s * 1e3, s * 1e3 < 10 ? 2 : 1) + " ms"; }
+  function us(s)    { return fmt(s * 1e6, s * 1e6 < 10 ? 2 : 1) + " µs"; }
+  function pct(x)   { return fmt(x * 100, 1) + "%"; }
+  const x = "×";
+
+  /* ====================================================================== */
+  /*  CANONICAL INPUTS — every one of them read, none typed                 */
+  /*    model + GPU        T.reference_configs                              */
+  /*    dtype width        T.memory.dtype_bytes                             */
+  /*    KV formula         INFER.kv_cache.formula                           */
+  /*    link bandwidth     PARALLEL.interconnects.links[].per_dir_GBps      */
+  /*    collective cost    PARALLEL.cost_model                              */
+  /*    ring factor        PARALLEL.collectives[all_reduce]                 */
+  /* ====================================================================== */
+  const RC   = T.reference_configs;
+  const COST = P.cost_model;
+  const BF16 = T.memory.dtype_bytes.bf16;
+  const DTB  = T.memory.dtype_bytes;
+
+  function linkByName(re) {
+    return P.interconnects.links.filter(function (l) { return re.test(l.name); })[0];
+  }
+  const NVL = linkByName(/NVLink 4/);            // intra-node, per_dir_GBps
+  const NDR = linkByName(/NDR/);                 // inter-node, per_dir_GBps
+  const PCI = linkByName(/PCIe/);
+
+  /* A STATED assumption, the same one page 23 makes: 8 GPUs behind one
+     NVSwitch domain. Everything above this crosses the fabric. */
+  const PER_NODE = 8;
+
+  const ARC = P.collectives.filter(function (c) { return c.op === "all_reduce"; })[0];
+  function ringFactorJs(N)   { return N > 1 ? 2 * (N - 1) / N : 0; }
+  function ringFactorData(N) {
+    const v = ARC.ring_factor_at_world[String(N)];
+    return v === undefined ? null : v;
+  }
+  function ringFactor(N) {
+    const d = ringFactorData(N);
+    return d === null ? ringFactorJs(N) : d;
+  }
+  const RING_DRIFT = [1, 2, 4, 8, 16, 32, 64].reduce(function (a, n) {
+    const d = ringFactorData(n);
+    return d === null ? a : Math.max(a, Math.abs(d - ringFactorJs(n)));
+  }, 0);
+
+  /* Models that carry everything the KV formula needs. INFER.models and
+     T.reference_configs.models overlap; T's entries are the richer ones. */
+  const MODELS = RC.models.filter(function (m) { return m.n_layers && m.n_heads; })
+                          .map(function (m) {
+    const nkv = m.n_kv_heads || m.n_heads;
+    return {
+      name: m.name, params: m.params, d_model: m.d_model, n_layers: m.n_layers,
+      n_heads: m.n_heads, n_kv_heads: nkv, d_head: m.d_model / m.n_heads,
+      seq: m.seq, gqa: nkv < m.n_heads
+    };
+  });
+  const GPUS = RC.gpus;
+  const DEF_MODEL = MODELS.filter(function (m) { return m.name === RC.default_model; })[0]
+                    || MODELS[MODELS.length - 1];
+  const DEF_GPU   = GPUS.filter(function (g) { return g.name === RC.default_gpu; })[0] || GPUS[0];
+
+  /* KV bytes for one sequence, straight from INFER.kv_cache.formula:
+     2 * layers * seq * n_kv_heads * d_head * dtype_bytes                    */
+  function kvBytes(m, seq, dtype) {
+    return 2 * m.n_layers * seq * m.n_kv_heads * m.d_head * (dtype === undefined ? BF16 : dtype);
+  }
+  function weightBytes(m, dtype) { return m.params * (dtype === undefined ? BF16 : dtype); }
+
+  /* --- cross-check the formula against INFER.kv_cache.rows -------------- */
+  const KV_CHECK = (function () {
+    let worst = 0, n = 0, sample = null;
+    INF.kv_cache.rows.forEach(function (r) {
+      const m = MODELS.filter(function (mm) { return mm.name === r.model; })[0];
+      if (!m) return;
+      const mine = kvBytes(m, r.seq);
+      worst = Math.max(worst, Math.abs(mine - r.bytes_per_sequence));
+      n++;
+      if (r.model === DEF_MODEL.name && r.seq === DEF_MODEL.seq) sample = { row: r, mine: mine };
+    });
+    return { rows: n, maxAbsErr: worst, ok: worst === 0, sample: sample };
+  })();
+
+  /* ====================================================================== */
+  /*  THE MODEL  —  one decode step, and one prefill                        */
+  /*  MODEL, NOT MEASUREMENT. PARALLEL.cost_model._status is surfaced       */
+  /*  verbatim in section 8 and beside every readout that uses it.          */
+  /* ====================================================================== */
+  const LAT_MODES = {
+    ring: {
+      label: "ring: α × 2(N−1) hops",
+      steps: function (N) { return N > 1 ? 2 * (N - 1) : 0; },
+      note: "A ring all-reduce is a reduce-scatter then an all-gather: " +
+            "2(N−1) sequential neighbour exchanges, each paying the link's " +
+            "latency. This is what PARALLEL.ring describes."
+    },
+    flat: {
+      label: "latency-optimised: one α",
+      steps: function (N) { return N > 1 ? 1 : 0; },
+      note: "One-shot / tree / in-network (NVLS, SHARP) algorithms collapse the " +
+            "hop count for small payloads. Optimistic, and the direction real " +
+            "libraries move in — cost_model.ignores lists in-network reduction " +
+            "as a thing it does not credit."
+    }
+  };
+
+  function scopeOf(N)  { return N > PER_NODE ? "inter" : "intra"; }
+  function linkOf(N)   { return N > PER_NODE ? NDR : NVL; }
+  function alphaOf(N)  { return (scopeOf(N) === "intra" ? COST.latency_us.intra_node
+                                                        : COST.latency_us.inter_node) * 1e-6; }
+
+  /**
+   * One all-reduce of a decode-step activation.
+   *   payload = batch x d_model elements, bf16
+   *   sent per GPU = ring_factor(N) x payload bytes
+   *   time = alpha(N) x steps(N)  +  sent / (link x achieved_fraction)
+   */
+  function allReduce(S, N) {
+    const elems = S.batch * S.model.d_model;
+    const bytes = elems * S.wdtype;
+    const sent  = ringFactor(N) * bytes;
+    const link  = linkOf(N);
+    const bw    = link.per_dir_GBps * 1e9 * S.eff;
+    const tLat  = alphaOf(N) * LAT_MODES[S.latmode].steps(N);
+    const tBw   = N > 1 ? sent / bw : 0;
+    return {
+      elems: elems, bytes: bytes, sent: sent, link: link, bw: bw,
+      lat: tLat, bwTime: tBw, total: tLat + tBw,
+      latShare: (tLat + tBw) > 0 ? tLat / (tLat + tBw) : 0,
+      crossed: N > PER_NODE
+    };
+  }
+
+  /**
+   * One decode step at TP = N. Decode is memory-bound (INFER.roofline: every
+   * row for every GPU says decode_bound = "memory"), so the arithmetic is
+   * bytes-read / HBM-bandwidth, not FLOPs / peak.
+   */
+  function decodeStep(S, N) {
+    const wBytes  = weightBytes(S.model, S.wdtype);
+    const kvOne   = kvBytes(S.model, S.seq, S.kvdtype);
+    const kvAll   = S.batch * kvOne;
+    const perGpu  = (wBytes + kvAll) / N;                 // TP shards BOTH
+    const tMem    = perGpu / S.gpu.hbm_bw_bytes_per_s;
+    const ar      = allReduce(S, N);
+    const nAR     = 2 * S.model.n_layers;                 // attention out + MLP out
+    const comm    = nAR * ar.total;
+    const itl     = tMem + comm;
+    return {
+      N: N, wBytes: wBytes, kvOne: kvOne, kvAll: kvAll, perGpu: perGpu,
+      tMem: tMem, ar: ar, nAR: nAR, comm: comm,
+      commLat: nAR * ar.lat, commBw: nAR * ar.bwTime,
+      itl: itl, commShare: comm / itl,
+      tokPerSec: S.batch / itl, tokPerSecPerGpu: S.batch / itl / N,
+      fitsPerGpu: (wBytes / N) + (kvAll / N) <= S.gpu.hbm_bytes,
+      weightsFit: (wBytes / N) <= S.gpu.hbm_bytes,
+      headroomBytes: S.gpu.hbm_bytes - wBytes / N
+    };
+  }
+
+  /**
+   * Prefill of one request. Compute-bound (INFER.roofline: prefill_bound =
+   * "compute" in every row), so FLOPs / (dense peak x a STATED utilisation).
+   * 2 x params x tokens is INFER.cost_model.flops_note.
+   */
+  function prefill(S, N) {
+    const flops   = 2 * S.model.params * S.seq;
+    const rate    = S.gpu.bf16_dense_tflops * 1e12 * S.mfu;
+    const compute = flops / N / rate;
+    const elems   = S.seq * S.model.d_model;              // per request, whole prompt
+    const bytes   = elems * S.wdtype;
+    const sent    = ringFactor(N) * bytes;
+    const link    = linkOf(N);
+    const tLat    = alphaOf(N) * LAT_MODES[S.latmode].steps(N);
+    const tBw     = N > 1 ? sent / (link.per_dir_GBps * 1e9 * S.eff) : 0;
+    const comm    = 2 * S.model.n_layers * (tLat + tBw);
+    return {
+      flops: flops, compute: compute, elems: elems, bytes: bytes, sent: sent,
+      lat: 2 * S.model.n_layers * tLat, bwTime: 2 * S.model.n_layers * tBw,
+      comm: comm, ttft: compute + comm,
+      latShare: comm > 0 ? (2 * S.model.n_layers * tLat) / comm : 0
+    };
+  }
+
+  const TP_DEGREES  = [1, 2, 4, 8, 16, 32];
+  const BATCHES     = [1, 2, 4, 8, 16, 32, 64, 128, 256];
+  const SEQS        = (function () {
+    const s = {};
+    INF.kv_cache.rows.forEach(function (r) { s[r.seq] = 1; });
+    return Object.keys(s).map(Number).sort(function (a, b) { return a - b; });
+  })();
+
+  /* ====================================================================== */
+  /*  1 · WHICH "FASTER"                                                    */
+  /* ====================================================================== */
+  (function () {
+    const host = NN.$("#metricsBody");
+
+    host.appendChild(p(
+      "A training step has one number that matters: how long the step takes. Everything else " +
+      "— communication, memory, the bubble — is judged by whether it makes that number bigger. " +
+      "Inference has <b>four</b>, and they are not the same number, and the parallelism axes " +
+      "move them in different directions."
+    ));
+
+    const tbl = el("table", { class: "data" });
+    tbl.innerHTML =
+      "<thead><tr><th>metric</th><th class='wrap'>what it measures</th><th>regime</th>" +
+      "<th class='wrap'>what it is bounded by</th><th class='wrap'>who cares</th></tr></thead><tbody>" +
+      "<tr><td>TTFT</td><td class='wrap'>time to first token: request arrives → first token emitted</td>" +
+        "<td>prefill</td><td class='wrap'>FLOPs. " + INF.roofline[0].rows[0].prefill_bound +
+        "-bound in every row of <code>INFER.roofline</code></td>" +
+        "<td class='wrap'>the human watching a cursor blink</td></tr>" +
+      "<tr><td>ITL</td><td class='wrap'>inter-token latency: the gap between token <i>t</i> and token <i>t</i>+1</td>" +
+        "<td>decode</td><td class='wrap'>HBM bandwidth. " + INF.roofline[0].rows[0].decode_bound +
+        "-bound in every row</td>" +
+        "<td class='wrap'>the human reading the stream; ITL sets words-per-second</td></tr>" +
+      "<tr><td>throughput</td><td class='wrap'>tokens per second across every concurrent request on the fleet</td>" +
+        "<td>both</td><td class='wrap'>how many sequences you can hold and schedule at once</td>" +
+        "<td class='wrap'>whoever pays for the GPUs</td></tr>" +
+      "<tr><td>goodput</td><td class='wrap'>throughput counting only requests that met their latency targets</td>" +
+        "<td>both</td><td class='wrap'>the two above, jointly</td>" +
+        "<td class='wrap'>everyone. <a href='31-serving.html'>Page 31</a> makes it the objective</td></tr>" +
+      "</tbody>";
+    host.appendChild(el("div", { class: "scrollx" }, tbl));
+
+    host.appendChild(p(
+      "The reason this distinction has to come first is that the three parallelism axes are not " +
+      "ranked the same way by each column. Read the next four sections with the question " +
+      "&ldquo;which of these four am I buying?&rdquo; held open. A configuration that triples " +
+      "throughput and doubles ITL is a good trade for a batch summarisation job and a terrible " +
+      "one for a chat endpoint, and nothing in the arithmetic tells you which you are."
+    ));
+
+    host.appendChild(NN.callout("key", "THE ONE-LINE VERSION OF THIS PAGE",
+      "In training, TP's all-reduce is expensive in <em>bytes</em> and it is hidden by a long " +
+      "compute step over a large batch. In decode, the same all-reduce is trivial in bytes and " +
+      "impossible to hide, because the step is short and the payload is too small for bandwidth " +
+      "to be the term that matters. Latency does not amortise. That single sentence inverts " +
+      "most of what <a href='19-tensor-parallel.html'>page 19</a> and " +
+      "<a href='21-pipeline-parallel.html'>page 21</a> concluded."));
+  })();
+
+  /* ====================================================================== */
+  /*  2 · TP: THE PAYLOAD IS TINY, SO LATENCY IS THE WHOLE COST             */
+  /* ====================================================================== */
+  (function () {
+    const host = NN.$("#tpBody");
+    const M = DEF_MODEL, G = DEF_GPU;
+
+    host.appendChild(p(
+      "Tensor parallelism on a transformer block is unchanged from " +
+      "<a href='19-tensor-parallel.html'>page 19</a>: the attention output projection and the " +
+      "MLP down-projection are row-parallel, so each rank produces a <em>partial</em> sum and " +
+      "the ranks have to all-reduce to get the real one. Two all-reduces per block. What " +
+      "changes at inference time is the size of the thing being reduced."
+    ));
+
+    host.appendChild(NN.formula({
+      rule: "all-reduce payload = tokens in the step " + x + " d_model",
+      sub: "training (page 19's defaults): batch " + x + " sequence " + x + " d_model &nbsp;·&nbsp; " +
+           "decode: batch " + x + " <b>1</b> " + x + " d_model",
+      result: "decode's payload is smaller by exactly the sequence length",
+      cls: "activation"
+    }));
+
+    /* page 19's own worked configuration, restated so the ratio is honest */
+    const P19 = { b: 2, s: 4096, h: 8192 };
+    const trainElems = P19.b * P19.s * P19.h;
+    const decElems   = 1 * M.d_model;
+
+    host.appendChild(p(
+      "Page 19 prices its all-reduce at batch " + P19.b + ", sequence " + NN.count(P19.s) +
+      ", hidden " + NN.count(P19.h) + " — " + NN.count(trainElems) + " elements, " +
+      NN.bytes(trainElems * BF16) + " in bf16, per all-reduce. A decode step for " + M.name +
+      " at batch 1 reduces <b>" + NN.count(decElems) + " elements</b>, " +
+      NN.bytes(decElems * BF16) + ". That is a factor of <b class='num'>" +
+      NN.count(trainElems / decElems) + "</b> — precisely batch " + x + " sequence, because " +
+      "decode processes exactly one position per sequence per step."
+    ));
+
+    /* --- the static worked table at TP 2/4/8 ------------------------- */
+    const S0 = {
+      model: M, gpu: G, batch: 1, seq: M.seq, wdtype: BF16, kvdtype: BF16,
+      eff: COST.achieved_fraction, latmode: "ring", mfu: 0.45
+    };
+
+    host.appendChild(h3("Per-token all-reduce cost, " + M.name + " on " + G.name));
+    host.appendChild(p(
+      "One decode token, batch 1. The payload is fixed at " + NN.bytes(decElems * BF16) +
+      "; the only thing changing across the columns is the TP degree, which changes the ring " +
+      "factor " + code(ARC.ring_factor) + " and — past " + PER_NODE +
+      " — which wire the ring rides. Bandwidth term and latency term are shown separately " +
+      "because the entire point is which of them is bigger."
+    ));
+
+    const t2 = el("table", { class: "data" });
+    let head = "<thead><tr><th>term</th>";
+    const cols = [2, 4, 8, 16];
+    cols.forEach(function (n) {
+      head += "<th>TP = " + n + (n > PER_NODE ? " ✗" : "") + "</th>";
+    });
+    head += "</tr></thead>";
+    const rowsSpec = [
+      ["link the ring rides", function (r, n) { return r.ar.link.name; }],
+      ["per-direction rate " + x + " achieved_fraction " + COST.achieved_fraction,
+        function (r, n) { return fmt(r.ar.bw / 1e9, 0) + " GB/s"; }],
+      ["ring factor " + ARC.ring_factor, function (r, n) { return fmt(ringFactor(n), 4); }],
+      ["bytes sent per GPU per all-reduce", function (r) { return NN.bytes(r.ar.sent); }],
+      ["→ bandwidth term", function (r) { return us(r.ar.bwTime); }],
+      ["→ latency term  α " + x + " 2(N−1)", function (r) { return us(r.ar.lat); }],
+      ["one all-reduce", function (r) { return us(r.ar.total); }],
+      ["<b>latency's share of it</b>", function (r) { return "<b>" + pct(r.ar.latShare) + "</b>"; }],
+      ["" + (2 * M.n_layers) + " all-reduces per token (2 " + x + " " + M.n_layers + " layers)",
+        function (r) { return ms(r.comm); }]
+    ];
+    let body = "<tbody>";
+    rowsSpec.forEach(function (spec, i) {
+      body += "<tr" + (i === 7 ? " class='hi'" : "") + "><td class='wrap'>" + spec[0] + "</td>";
+      cols.forEach(function (n) {
+        const r = decodeStep(S0, n);
+        body += "<td class='n'>" + spec[1](r, n) + "</td>";
+      });
+      body += "</tr>";
+    });
+    body += "</tbody>";
+    t2.innerHTML = head + body;
+    host.appendChild(el("div", { class: "scrollx" }, t2));
+
+    const r8 = decodeStep(S0, 8);
+    host.appendChild(el("div", { class: "hint", html:
+      "Ring factor cross-check: <code>PARALLEL.collectives[all_reduce].ring_factor_at_world</code> " +
+      "against this page's own 2(N−1)/N, max |Δ| = " +
+      (RING_DRIFT === 0 ? "0" : RING_DRIFT.toExponential(1)) + ". " +
+      "α from <code>cost_model.latency_us</code>: " + COST.latency_us.intra_node +
+      " µs intra-node, " + COST.latency_us.inter_node + " µs inter-node. " +
+      COST.latency_us.note }));
+
+    host.appendChild(NN.chart.bars({
+      items: [
+        { label: "latency  α " + x + " hops, TP = " + PER_NODE,
+          value: r8.commLat * 1e3, color: "var(--gradient)",
+          sub: "· " + pct(r8.ar.latShare) + " of the collective" },
+        { label: "bandwidth  bytes / link rate, TP = " + PER_NODE,
+          value: r8.commBw * 1e3, color: "var(--gradient)",
+          sub: "· " + pct(1 - r8.ar.latShare) + " of the collective" },
+        { label: "HBM read of weights + KV, per GPU",
+          value: r8.tMem * 1e3, color: "var(--weight)",
+          sub: "· " + NN.bytes(r8.perGpu) + " at " + fmt(G.hbm_bw_bytes_per_s / 1e12, 2) + " TB/s" }
+      ],
+      unit: "ms per token"
+    }));
+    host.appendChild(NN.legend(["weight", "gradient", "activation"]));
+    host.appendChild(el("div", { class: "hint", html:
+      "Communication is drawn in the gradient hue throughout Part III and Part IV because that " +
+      "is what <code>NN.gpu.opColor</code> assigns to a reduction — the hue tracks the " +
+      "<em>operation</em>, not the tensor's training role; there are no gradients at inference " +
+      "time at all. Weight-hue bars are bytes read out of HBM. Activation hue appears in " +
+      "section 4, where what crosses a wire really is an activation." }));
+
+    host.appendChild(NN.callout("key", "LATENCY IS " + pct(r8.ar.latShare).replace(/\.\d+/, "") +
+      " OF THE COLLECTIVE, AND IT DOES NOT AMORTISE",
+      "At TP = " + PER_NODE + ", batch 1, the ring moves " + NN.bytes(r8.ar.sent) +
+      " per GPU per all-reduce. On " + NVL.name + " at " + NVL.per_dir_GBps +
+      " GB/s per direction that takes <b class='num'>" + us(r8.ar.bwTime) +
+      "</b>. The fixed cost of <em>starting</em> the collective is <b class='num'>" +
+      us(r8.ar.lat) + "</b>. Page 19's analysis — payload " + x + " ring factor ÷ bandwidth — " +
+      "computes a term that is <b>" + pct(1 - r8.ar.latShare) + "</b> of the answer here. " +
+      "Buying a faster link does almost nothing for this. Halving the hop count does everything. " +
+      "Multiply by " + (2 * M.n_layers) + " collectives per token and the fixed cost is <b>" +
+      ms(r8.commLat) + " of every single token</b>."));
+
+    /* --- prefill, for contrast --------------------------------------- */
+    host.appendChild(h3("The same collective during prefill behaves like training"));
+    const pf8 = prefill(S0, 8);
+    host.appendChild(p(
+      "Prefill pushes the whole prompt through at once, so its all-reduce payload is " +
+      "sequence " + x + " d_model = " + NN.count(pf8.elems) + " elements (" +
+      NN.bytes(pf8.bytes) + ") per request at " + NN.count(M.seq) + " tokens. At TP = " +
+      PER_NODE + " that costs " + ms(pf8.bwTime) + " of bandwidth against " + ms(pf8.lat) +
+      " of latency — latency is only " + pct(pf8.latShare) + " of it, and the whole " +
+      ms(pf8.comm) + " sits beside " + ms(pf8.compute) + " of arithmetic. That is page 19's " +
+      "world, unchanged: bandwidth-dominated, amortised over a lot of work. " +
+      "<b>Prefill and decode disagree about what tensor parallelism costs</b>, which is one of " +
+      "the arguments for running them on separate pools — " +
+      "<a href='31-serving.html'>page 31</a>."
+    ));
+
+    host.appendChild(NN.tiles([
+      { k: "AR payload, prefill", v: NN.bytes(pf8.bytes), s: NN.count(M.seq) + " tokens " + x + " d_model" },
+      { k: "AR payload, decode", v: NN.bytes(decElems * BF16), s: "1 token " + x + " d_model", cls: "activation" },
+      { k: "ratio", v: NN.count(M.seq) + x, s: "exactly the sequence length" },
+      { k: "latency share, prefill", v: pct(pf8.latShare), s: "bandwidth-dominated" },
+      { k: "latency share, decode", v: pct(r8.ar.latShare), s: "latency-dominated", cls: "gradient" }
+    ]));
+  })();
+
+  /* ====================================================================== */
+  /*  3 · THE CROSSOVER (the interactive)                                   */
+  /* ====================================================================== */
+  (function () {
+    const host = NN.$("#crossBody");
+
+    host.appendChild(p(
+      "Adding TP does two things at once. It divides the bytes each GPU has to read out of HBM, " +
+      "which is the whole of decode's compute cost — that is pure win. And it adds " +
+      (2 * DEF_MODEL.n_layers) + " collectives per token whose fixed cost <em>grows</em> with " +
+      "the group size, because more ranks means more hops. Somewhere those two curves cross. " +
+      "Below the crossing, more TP is faster; above it, more TP is slower, and you are paying " +
+      "for GPUs that make the product worse."
+    ));
+
+    const S = {
+      model: DEF_MODEL, gpu: DEF_GPU, batch: 1, seq: DEF_MODEL.seq,
+      wdtype: BF16, kvdtype: BF16, eff: COST.achieved_fraction,
+      latmode: "ring", mfu: 0.45
+    };
+
+    const out = el("div");
+
+    /* ---- controls ------------------------------------------------------ */
+    function listSlider(key, list, label, fmtv, onSet) {
+      const idx = Math.max(0, list.indexOf(S[key]));
+      const rv = el("span", { class: "rv" }, fmtv(S[key]));
+      const inp = el("input", { type: "range", min: 0, max: list.length - 1, step: 1, value: idx });
+      inp.addEventListener("input", function () {
+        S[key] = list[+inp.value]; rv.textContent = fmtv(S[key]);
+        if (onSet) onSet(); render();
+      });
+      return el("div", { class: "fld" }, [el("label", {}, [el("span", {}, label), rv]), inp]);
+    }
+    function rangeSlider(key, min, max, step, label, fmtv) {
+      const rv = el("span", { class: "rv" }, fmtv(S[key]));
+      const inp = el("input", { type: "range", min: min, max: max, step: step, value: S[key] });
+      inp.addEventListener("input", function () {
+        S[key] = +inp.value; rv.textContent = fmtv(S[key]); render();
+      });
+      return el("div", { class: "fld" }, [el("label", {}, [el("span", {}, label), rv]), inp]);
+    }
+    function pick(label, options, current, onPick) {
+      const sel = el("select", {}, options.map(function (o) {
+        return el("option", { value: o.k }, o.label);
+      }));
+      sel.value = current;
+      sel.addEventListener("change", function () { onPick(sel.value); render(); });
+      return el("div", { class: "fld" }, [el("label", {}, [el("span", {}, label)]), sel]);
+    }
+
+    const seqField = listSlider("seq", SEQS, "sequence length (KV depth)", NN.count);
+
+    const ctl = el("div", { class: "ctlgrid" }, [
+      el("div", { class: "panel" }, [
+        el("h4", {}, "workload"),
+        pick("model", MODELS.map(function (m) { return { k: m.name, label: m.name }; }),
+          S.model.name, function (v) {
+            S.model = MODELS.filter(function (m) { return m.name === v; })[0];
+          }),
+        listSlider("batch", BATCHES, "concurrent sequences in the step", String),
+        seqField,
+        el("div", { class: "hint" },
+          "Batch here is decode batch: how many sequences advance by one token in this step. " +
+          "Sequence length only enters through the KV cache that has to be re-read every step.")
+      ]),
+      el("div", { class: "panel" }, [
+        el("h4", {}, "hardware"),
+        pick("gpu", GPUS.map(function (g) { return { k: g.name, label: g.name }; }),
+          S.gpu.name, function (v) {
+            S.gpu = GPUS.filter(function (g) { return g.name === v; })[0];
+          }),
+        el("div", { class: "hint" },
+          "Inside a node the ring rides " + NVL.name + " at " + NVL.per_dir_GBps +
+          " GB/s per direction (vendors quote " + NVL.bidir_GBps +
+          " GB/s — that is the two directions summed, and a ring cares about one). " +
+          "Past " + PER_NODE + " GPUs it rides " + NDR.name + " at " + NDR.per_dir_GBps +
+          " GB/s per direction. " + (NDR.note || ""))
+      ]),
+      el("div", { class: "panel" }, [
+        el("h4", {}, "the cost model"),
+        pick("latmode", Object.keys(LAT_MODES).map(function (k) {
+          return { k: k, label: LAT_MODES[k].label };
+        }), S.latmode, function (v) { S.latmode = v; }),
+        rangeSlider("eff", 0.4, 1, 0.05, "achieved fraction of link rate",
+          function (v) { return Math.round(v * 100) + "%"; }),
+        el("div", { class: "hint" }, COST.achieved_note)
+      ])
+    ]);
+    host.appendChild(ctl);
+    host.appendChild(out);
+
+    function crossoverOf() {
+      /* smallest degree at which ITL stops improving */
+      let best = null, cross = null;
+      TP_DEGREES.forEach(function (n) {
+        const r = decodeStep(S, n);
+        if (!r.weightsFit) return;
+        if (best === null) { best = { n: n, itl: r.itl }; return; }
+        if (cross === null && r.itl >= best.itl) cross = { from: best.n, to: n, itl: r.itl, prev: best.itl };
+        if (r.itl < best.itl) best = { n: n, itl: r.itl };
+      });
+      return { best: best, cross: cross };
+    }
+
+    function render() {
+      out.innerHTML = "";
+      const rows = TP_DEGREES.map(function (n) { return decodeStep(S, n); });
+      const co = crossoverOf();
+      const fits = rows.filter(function (r) { return r.weightsFit; });
+      const minN = fits.length ? fits[0].N : null;
+
+      /* --- verdict ---------------------------------------------------- */
+      const bestRow = co.best ? decodeStep(S, co.best.n) : null;
+      out.appendChild(el("div", { class: "verdict " + (co.cross ? "pend" : "ok") }, [
+        el("div", { class: "big" }, co.cross
+          ? "TP " + co.cross.from + " → " + co.cross.to + " makes latency WORSE"
+          : "latency still improving at TP = " + TP_DEGREES[TP_DEGREES.length - 1]),
+        el("div", { class: "det" }, co.cross
+          ? "ITL " + ms(co.cross.prev) + " → " + ms(co.cross.itl) + "  ·  a " +
+            fmt(co.cross.itl / co.cross.prev, 2) + x + " regression for " +
+            fmt(co.cross.to / co.cross.from, 0) + x + " the GPUs"
+          : "under " + LAT_MODES[S.latmode].label + " at this batch, the fixed cost never " +
+            "catches the halving of HBM traffic"),
+        bestRow ? el("div", { class: "det" },
+          "best ITL " + ms(bestRow.itl) + " at TP = " + bestRow.N + "  ·  " +
+          fmt(bestRow.tokPerSec, 0) + " tok/s for the group  ·  " +
+          pct(bestRow.commShare) + " of the token is communication") : null,
+        minN ? el("div", { class: "det" },
+          "weights alone need TP ≥ " + minN + " to fit " + NN.bytes(rows[0].wBytes) +
+          " into " + NN.gibytes(S.gpu.hbm_bytes) + " per GPU") : null
+      ]));
+
+      /* --- two charts, never one with two axes ------------------------ */
+      const g2 = el("div", { class: "grid2" });
+
+      const itlBox = el("div");
+      itlBox.appendChild(el("div", { class: "hint", style: { marginBottom: "6px" } },
+        "Inter-token latency. Lower is better. Red bars are TP groups that have left the node."));
+      itlBox.appendChild(NN.chart.bars({
+        items: rows.map(function (r) {
+          return {
+            label: "TP = " + r.N + (r.ar.crossed ? "  (cross-node)" : "") +
+                   (r.weightsFit ? "" : "  — does not fit"),
+            value: r.itl * 1e3,
+            color: r.ar.crossed ? "var(--critical)" : "var(--accent)",
+            sub: "· " + ms(r.tMem) + " HBM + " + ms(r.comm) + " comm"
+          };
+        }),
+        unit: "ms / token"
+      }));
+      g2.appendChild(itlBox);
+
+      const tpsBox = el("div");
+      tpsBox.appendChild(el("div", { class: "hint", style: { marginBottom: "6px" } },
+        "Tokens per second out of the whole TP group. Higher is better. Same configuration, " +
+        "same bars, reciprocal quantity — a separate chart because the scales are different."));
+      tpsBox.appendChild(NN.chart.bars({
+        items: rows.map(function (r) {
+          return {
+            label: "TP = " + r.N + (r.ar.crossed ? "  (cross-node)" : ""),
+            value: r.tokPerSec,
+            color: r.ar.crossed ? "var(--critical)" : "var(--accent)",
+            sub: "· " + fmt(r.tokPerSecPerGpu, 1) + " tok/s per GPU"
+          };
+        }),
+        unit: "tok/s"
+      }));
+      g2.appendChild(tpsBox);
+      out.appendChild(g2);
+
+      /* --- comm split ------------------------------------------------- */
+      out.appendChild(el("div", { class: "hint", style: { margin: "14px 0 4px" } },
+        "The same communication time, split into its two terms. Watch which one grows."));
+      out.appendChild(NN.chart.bars({
+        items: rows.filter(function (r) { return r.N > 1; }).map(function (r) {
+          return {
+            label: "TP = " + r.N + " · latency term",
+            value: r.commLat * 1e3, color: "var(--gradient)",
+            sub: "· bandwidth term " + ms(r.commBw) + " (" + pct(1 - r.ar.latShare) + ")"
+          };
+        }),
+        unit: "ms / token"
+      }));
+
+      /* --- arithmetic ------------------------------------------------- */
+      const sel = decodeStep(S, co.best ? co.best.n : 8);
+      const t = el("table", { class: "arith" });
+      function row(term, val, cls) {
+        t.appendChild(el("tr", { class: cls || "" }, [
+          el("td", { class: "term", html: term }), el("td", { class: "r", html: val })]));
+      }
+      out.appendChild(h3("The arithmetic at TP = " + sel.N));
+      row("weights  " + NN.count(S.model.params) + " params " + x + " " + S.wdtype + " B (bf16)",
+        NN.bytes(sel.wBytes));
+      row("KV per sequence  " + code(INF.kv_cache.formula) + "<br>2 " + x + " " +
+        S.model.n_layers + " " + x + " " + NN.count(S.seq) + " " + x + " " + S.model.n_kv_heads +
+        " " + x + " " + S.model.d_head + " " + x + " " + S.kvdtype + " B",
+        NN.bytes(sel.kvOne));
+      row("KV for " + S.batch + " concurrent sequence" + (S.batch === 1 ? "" : "s"), NN.bytes(sel.kvAll));
+      row("÷ TP = " + sel.N + " → bytes read per GPU per step", NN.bytes(sel.perGpu));
+      row("÷ " + S.gpu.name + " HBM " + fmt(S.gpu.hbm_bw_bytes_per_s / 1e12, 2) + " TB/s", ms(sel.tMem), "sum");
+      t.appendChild(el("tr", { class: "gap" }, [el("td", { colspan: 2 })]));
+      row("all-reduce payload  batch " + x + " d_model = " + S.batch + " " + x + " " +
+        NN.count(S.model.d_model), NN.count(sel.ar.elems) + " elems = " + NN.bytes(sel.ar.bytes));
+      row("ring sends " + ARC.ring_factor + " = " + fmt(ringFactor(sel.N), 4) + " " + x + " payload",
+        NN.bytes(sel.ar.sent) + " per GPU");
+      row("÷ " + sel.ar.link.name + " " + sel.ar.link.per_dir_GBps + " GB/s/dir " + x + " " +
+        Math.round(S.eff * 100) + "%", us(sel.ar.bwTime));
+      row("+ α " + (scopeOf(sel.N) === "intra" ? COST.latency_us.intra_node
+                                                    : COST.latency_us.inter_node) +
+        " µs " + x + " " + LAT_MODES[S.latmode].steps(sel.N) + " hop" +
+        (LAT_MODES[S.latmode].steps(sel.N) === 1 ? "" : "s"), us(sel.ar.lat));
+      row("one all-reduce", us(sel.ar.total));
+      row(x + " " + sel.nAR + " per token (2 per block " + x + " " + S.model.n_layers + " blocks)",
+        ms(sel.comm), "sum");
+      t.appendChild(el("tr", { class: "gap" }, [el("td", { colspan: 2 })]));
+      row("<b>ITL = HBM read + communication</b>",
+        "<b>" + ms(sel.itl) + "</b>  (" + pct(sel.commShare) + " communication)", "sum");
+      row("tokens/s for the group  = batch ÷ ITL", fmt(sel.tokPerSec, 1));
+      out.appendChild(el("div", { class: "scrollx" }, t));
+
+      out.appendChild(el("p", { class: "small muted", html:
+        "<b>" + COST._status + "</b> The communication half is " + code("PARALLEL.cost_model") +
+        ", the same one pages 17, 19 and 23 price with (" + code(COST.time_bytes) + " at " +
+        Math.round(S.eff * 100) + "% of nominal, plus α). The HBM half assumes the decode " +
+        "step reaches the full " + fmt(S.gpu.hbm_bw_bytes_per_s / 1e12, 2) +
+        " TB/s of " + S.gpu.name + ", which real kernels do not — so ITL is a floor and the " +
+        "communication <em>share</em> is an overestimate. Section 8 lists the rest." }));
+    }
+
+    render();
+
+    host.appendChild(NN.callout("warn", "THE NODE BOUNDARY IS THE CLIFF, AND IT IS SHARP",
+      "Under the default ring model, at " + DEF_MODEL.name + " batch 1, the group is still " +
+      "getting faster at TP = " + PER_NODE + " and " + fmt(
+        decodeStep({ model: DEF_MODEL, gpu: DEF_GPU, batch: 1, seq: DEF_MODEL.seq, wdtype: BF16,
+                     kvdtype: BF16, eff: COST.achieved_fraction, latmode: "ring", mfu: 0.45 }, 16).itl /
+        decodeStep({ model: DEF_MODEL, gpu: DEF_GPU, batch: 1, seq: DEF_MODEL.seq, wdtype: BF16,
+                     kvdtype: BF16, eff: COST.achieved_fraction, latmode: "ring", mfu: 0.45 }, 8).itl, 1) +
+      x + " slower at TP = 16. Two things go wrong at once when the ring leaves the node: α " +
+      "jumps from " + COST.latency_us.intra_node + " µs to " + COST.latency_us.inter_node +
+      " µs, and the hop count doubles. The bandwidth term stays negligible the whole time — it " +
+      "is not the wire that got slower, it is that there is now twice as much waiting. " +
+      "Switch the cost model to the latency-optimised setting and the cliff moves but does not " +
+      "vanish; the fixed cost is still " + COST.latency_us.inter_node + "/" +
+      COST.latency_us.intra_node + x + " larger the moment you cross."));
+
+    host.appendChild(p(
+      "Raise the batch slider and watch the shape change. At large batch the HBM term grows " +
+      "(the KV cache is per-sequence, so it scales with batch while the weights do not) and the " +
+      "communication term grows too, but more slowly — so the crossover moves right and TP " +
+      "keeps paying off further. This is the same effect " +
+      "<a href='26-batching.html'>page 26</a> describes from the arithmetic-intensity side: " +
+      INF.batching.why
+    ));
+  })();
+
+  /* ====================================================================== */
+  /*  4 · PIPELINE PARALLEL                                                 */
+  /* ====================================================================== */
+  (function () {
+    const host = NN.$("#ppBody");
+    const M = DEF_MODEL, G = DEF_GPU;
+    const S = { model: M, gpu: G, batch: 1, seq: M.seq, wdtype: BF16, kvdtype: BF16,
+                eff: COST.achieved_fraction, latmode: "ring", mfu: 0.45 };
+
+    host.appendChild(p(
+      "<a href='21-pipeline-parallel.html'>Page 21</a> spends most of its length on the bubble, " +
+      "because in training the bubble is what pipeline parallelism costs you: " +
+      code(P.strategies.pp.bubble_formula) + " of every GPU's time, bought down with more " +
+      "micro-batches. At inference the bubble is not the interesting failure. Continuous " +
+      "batching keeps a stream of requests in flight, so a serving pipeline is rarely draining; " +
+      "there is always another request to push in. The problem is structural and it is not about " +
+      "occupancy at all."
+    ));
+
+    host.appendChild(NN.callout("key", "PIPELINE PARALLELISM DOES NOT REDUCE PER-TOKEN LATENCY. AT ALL.",
+      "Split " + M.n_layers + " layers across P stages and each stage holds " + M.n_layers +
+      "/P of the weights, so each stage's HBM read is 1/P as long. But a token has to pass " +
+      "through <em>all P stages, in order</em>. The stage times sum back to exactly the " +
+      "single-GPU time — and then you add P−1 hops of wire on top. PP is the one axis that " +
+      "makes latency strictly worse than not doing it, ignoring the fact that without it the " +
+      "model may not fit at all."));
+
+    /* hop-by-hop accumulation */
+    const PMAX = 4;
+    const hopHost = el("div");
+    const tileHost = el("div");
+    const pSlider = (function () {
+      let cur = PMAX;
+      const rv = el("span", { class: "rv" }, String(cur));
+      const inp = el("input", { type: "range", min: 2, max: 8, step: 1, value: cur });
+      function draw(Pn) {
+        const perStageBytes = weightBytes(M, BF16) / Pn;
+        const kvBytesAll = kvBytes(M, S.seq, BF16) * S.batch;
+        const tStage = (perStageBytes + kvBytesAll / Pn) / G.hbm_bw_bytes_per_s;
+        /* one activation vector per hop: batch x d_model, point-to-point.
+           Between nodes if the pipeline spans them, which for PP it does. */
+        const hopBytes = S.batch * M.d_model * BF16;
+        const hopLink  = NDR;
+        const tHop = COST.latency_us.inter_node * 1e-6 +
+                     hopBytes / (hopLink.per_dir_GBps * 1e9 * S.eff);
+        const total = Pn * tStage + (Pn - 1) * tHop;
+        const single = decodeStep(S, 1);
+
+        hopHost.innerHTML = "";
+        const strip = el("div", { class: "hops" });
+        let acc = 0;
+        for (let s = 0; s < Pn; s++) {
+          acc += tStage;
+          strip.appendChild(el("div", { class: "hop" }, [
+            el("div", { class: "hk" }, "stage " + s),
+            el("div", { class: "hv" }, ms(tStage)),
+            el("div", { class: "hs" }, "layers " + Math.round(s * M.n_layers / Pn) + "–" +
+              (Math.round((s + 1) * M.n_layers / Pn) - 1) + "<br>t = " + ms(acc))
+          ]));
+          if (s < Pn - 1) {
+            acc += tHop;
+            strip.appendChild(el("div", { class: "hop wire" }, [
+              el("div", { class: "hk" }, "hop " + s),
+              el("div", { class: "hv" }, us(tHop)),
+              el("div", { class: "hs" }, NN.bytes(hopBytes) + " p2p<br>t = " + ms(acc))
+            ]));
+          }
+        }
+        hopHost.appendChild(strip);
+
+        tileHost.innerHTML = "";
+        tileHost.appendChild(NN.tiles([
+          { k: "stages P", v: String(Pn), s: Math.round(M.n_layers / Pn) + " layers each" },
+          { k: "per-stage HBM read", v: ms(tStage), s: NN.bytes(perStageBytes + kvBytesAll / Pn), cls: "weight" },
+          { k: "P " + x + " stage time", v: ms(Pn * tStage),
+            s: "identical to TP = 1 (" + ms(single.tMem) + ")" },
+          { k: "P−1 hops", v: ms((Pn - 1) * tHop), s: "pure addition to the token's latency", cls: "activation" },
+          { k: "token latency", v: ms(total),
+            s: fmt(total / single.itl, 2) + x + " the single-GPU time" },
+          { k: "steady-state throughput", v: fmt(S.batch / tStage, 0) + " tok/s",
+            s: "one token leaves every " + ms(tStage) + ", not every " + ms(total) }
+        ]));
+      }
+      inp.addEventListener("input", function () {
+        cur = +inp.value; rv.textContent = String(cur); draw(cur);
+      });
+      draw(cur);
+      return el("div", { class: "panel" }, [
+        el("h4", {}, "pipeline depth"),
+        el("div", { class: "fld" }, [
+          el("label", {}, [el("span", {}, "stages P"), rv]), inp
+        ]),
+        el("div", { class: "hint" },
+          "Each stage's HBM read shrinks as 1/P. The token still visits every stage, so the " +
+          "stage times add straight back up, and the hops are on top. Hop cost uses " +
+          NDR.name + " at " + NDR.per_dir_GBps + " GB/s per direction plus " +
+          COST.latency_us.inter_node + " µs — a pipeline that fits in one node would not " +
+          "need to be a pipeline.")
+      ]);
+    })();
+
+    host.appendChild(pSlider);
+    host.appendChild(hopHost);
+    host.appendChild(el("div", { class: "hint", html:
+      "Solid cards are compute; dashed cards are wire. Read the <code>t =</code> line across: " +
+      "that is the token's age when it leaves each box." }));
+    host.appendChild(NN.legend(["weight", "activation"]));
+    host.appendChild(tileHost);
+
+    host.appendChild(p(
+      "The last two tiles are the whole argument. Per-token <em>latency</em> is the sum of the " +
+      "path: P stage times plus P−1 hops, which is worse than one GPU. Steady-state " +
+      "<em>throughput</em> is set by the slowest stage alone, because stage 0 starts the next " +
+      "request's token the instant it hands off — so the pipeline emits a token every " +
+      "stage-time, and throughput scales with P exactly as replicas would."
+    ));
+
+    host.appendChild(NN.callout("why", "WHY PP IS STILL THE RIGHT ANSWER SOMETIMES",
+      "Compare against the alternative that gets the same throughput: P data-parallel replicas. " +
+      "P replicas need P full copies of the weights — " +
+      NN.bytes(weightBytes(M, BF16)) + " each, " +
+      NN.bytes(weightBytes(M, BF16) * 4) + " for four of them. A four-stage pipeline needs " +
+      "<b>one</b> copy, cut four ways, so each GPU spends " +
+      NN.bytes(weightBytes(M, BF16) / 4) + " on weights instead of " +
+      NN.bytes(weightBytes(M, BF16)) + " and the difference — " +
+      NN.bytes(weightBytes(M, BF16) * 3 / 4) + " per GPU — becomes KV cache, which becomes " +
+      "concurrency, which becomes throughput. For a model that does not fit on one device at " +
+      "all, the comparison is not even close: DP is not an option and PP is. That is the " +
+      "throughput-per-dollar case, and it is a real one. It is just not a latency case."));
+
+    host.appendChild(p(
+      "The communication is also almost nothing, exactly as page 21 said: one activation tensor " +
+      "of " + NN.bytes(S.batch * M.d_model * BF16) + " per hop per token, point-to-point, " +
+      "against TP's " + (2 * M.n_layers) + " collectives over the whole group. PP is the axis " +
+      "you can run over Ethernet. It is also the axis that puts every hop's latency directly " +
+      "into the user's time-to-token, which is why chat endpoints avoid it and batch pipelines " +
+      "do not care."
+    ));
+  })();
+
+  /* ====================================================================== */
+  /*  5 · DATA PARALLEL                                                     */
+  /* ====================================================================== */
+  (function () {
+    const host = NN.$("#dpBody");
+    const M = DEF_MODEL, G = DEF_GPU;
+    const S = { model: M, gpu: G, batch: 1, seq: M.seq, wdtype: BF16, kvdtype: BF16,
+                eff: COST.achieved_fraction, latmode: "ring", mfu: 0.45 };
+
+    host.appendChild(p(
+      "Data parallelism at inference is not the DDP of <a href='17-data-parallel.html'>page 17</a>. " +
+      "DDP splits a batch and then all-reduces gradients to keep the replicas identical — " +
+      code(NN.count(P.strategies.ddp.schedule[0].elements) + " elements per step") +
+      " in the toy, the entire model's worth. Inference has no backward pass, so there is " +
+      "nothing to reduce. The replicas never need to agree about anything. <b>The " +
+      "communication is exactly zero.</b>"
+    ));
+
+    host.appendChild(NN.gpu.grid({
+      count: 4,
+      label: function (g) { return "replica " + g; },
+      render: function (g) {
+        return [
+          NN.gpu.shard({ name: "weights", parts: 1, mine: 0, color: "var(--weight)" }),
+          NN.gpu.shard({ name: "KV pool", parts: 1, mine: 0, color: "var(--activation)" }),
+          el("div", { class: "gpu-line" }, NN.bytes(weightBytes(M, BF16)) + " of weights"),
+          el("div", { class: "gpu-line" }, "no collective, ever")
+        ];
+      }
+    }));
+    host.appendChild(NN.legend(["weight", "activation"]));
+
+    host.appendChild(NN.gpu.commCard({
+      op: "none", tensor: "—", why: "Inference replicas share no state. A request is routed to " +
+        "one replica and lives there for its whole life; nothing it computes is ever needed by " +
+        "another replica. The router is the only coordination, and it moves request metadata, " +
+        "not tensors.", phase: "every step, every replica"
+    }));
+
+    const one = decodeStep(S, PER_NODE);
+    host.appendChild(NN.tiles([
+      { k: "communication", v: "0 B", s: "no gradients, no parameters to sync" },
+      { k: "ITL vs 1 replica", v: "unchanged", s: ms(one.itl) + " either way" },
+      { k: "throughput vs R replicas", v: "R" + x, s: "perfectly linear, no Amdahl term" },
+      { k: "memory cost", v: NN.bytes(weightBytes(M, BF16)), s: "a full model copy per replica", cls: "weight" }
+    ]));
+
+    host.appendChild(p(
+      "Linear throughput with zero communication is as good as a scaling axis gets, and it is " +
+      "the reason DP is the outermost axis of every serving deployment. The price is in the " +
+      "last tile. Every replica pays " + NN.bytes(weightBytes(M, BF16)) + " of weights again. " +
+      "On " + G.name + " that is " + fmt(weightBytes(M, BF16) / G.hbm_bytes, 2) + x +
+      " a single device's " + NN.gibytes(G.hbm_bytes) + ", so a replica of " + M.name +
+      " is not one GPU — it is a TP group of at least " +
+      (function () {
+        for (let i = 0; i < TP_DEGREES.length; i++) {
+          if (weightBytes(M, BF16) / TP_DEGREES[i] <= G.hbm_bytes) return TP_DEGREES[i];
+        }
+        return "more than " + TP_DEGREES[TP_DEGREES.length - 1];
+      })() + ". DP composes on top of whatever the replica turns out to be; it never " +
+      "substitutes for it."
+    ));
+
+    host.appendChild(NN.callout("mem", "WHAT THE COPY ACTUALLY COSTS YOU",
+      "The weights are not the interesting loss — they are a fixed cost you were going to pay " +
+      "per GPU anyway under TP. The loss is that memory spent on a duplicated weight is memory " +
+      "not spent on KV cache. At " + NN.count(M.seq) + " context one sequence of " + M.name +
+      " needs " + NN.bytes(kvBytes(M, M.seq)) + " of KV (" + INF.kv_cache.formula +
+      "). Every GB of duplicated weight is " +
+      fmt(1e9 / kvBytes(M, M.seq), 2) + " sequences of concurrency you did not get, and " +
+      "concurrency is what decode throughput is made of — " + INF.batching.why));
+  })();
+
+  /* ====================================================================== */
+  /*  6 · TP SHARDS THE KV CACHE                                            */
+  /* ====================================================================== */
+  (function () {
+    const host = NN.$("#kvBody");
+    const M = DEF_MODEL, G = DEF_GPU;
+
+    host.appendChild(p(
+      "One benefit of tensor parallelism at inference has nothing to do with splitting " +
+      "arithmetic. TP splits attention <em>by head</em>: rank <i>r</i> owns a disjoint subset " +
+      "of the query heads and — critically — of the key/value heads that go with them. It " +
+      "computes those heads' K and V, and it is the only rank that ever needs them. So the KV " +
+      "cache shards along with the weights, with no extra communication at all: no rank has to " +
+      "gather anyone else's cache, because attention is head-local right up to the output " +
+      "projection, and that projection's all-reduce is already in the budget from section 2."
+    ));
+
+    host.appendChild(NN.formula({
+      rule: "KV per GPU = " + INF.kv_cache.formula + " ÷ TP",
+      sub: "each rank holds " + code("n_kv_heads / TP") + " heads' worth of K and V for every " +
+           "layer and every position",
+      result: "TP is a KV-capacity multiplier as well as a compute split",
+      cls: "activation"
+    }));
+
+    host.appendChild(NN.callout("warn", "THE ONE PLACE THIS BREAKS",
+      "GQA already shrank <code>n_kv_heads</code> — " + M.name + " has " + M.n_heads +
+      " query heads and only " + M.n_kv_heads + " KV heads, which is " +
+      INF.kv_cache.gqa_note.charAt(0).toLowerCase() + INF.kv_cache.gqa_note.slice(1) +
+      " Sharding " + M.n_kv_heads + " KV heads across TP = " + PER_NODE + " gives exactly " +
+      fmt(M.n_kv_heads / PER_NODE, 2) + " head per rank, and across TP = 16 it gives less than " +
+      "one. Past that point implementations either replicate the KV heads across ranks (so the " +
+      "cache stops sharding and TP's memory benefit stops) or shard the cache along a different " +
+      "axis. The clean split in the formula above holds while <b>TP ≤ n_kv_heads = " +
+      M.n_kv_heads + "</b>."));
+
+    /* aggregate KV capacity across the TP group */
+    const kv1 = kvBytes(M, M.seq);
+    const rows = TP_DEGREES.filter(function (n) { return weightBytes(M, BF16) / n <= G.hbm_bytes; });
+    const tbl = el("table", { class: "data" });
+    let h = "<thead><tr><th>TP</th><th>weights / GPU</th><th>free / GPU</th>" +
+            "<th>KV capacity, group</th><th>concurrent sequences at " + NN.count(M.seq) +
+            "</th><th class='wrap'>KV heads per rank</th></tr></thead><tbody>";
+    rows.forEach(function (n) {
+      const wpg = weightBytes(M, BF16) / n;
+      const free = G.hbm_bytes - wpg;
+      const groupKv = free * n;
+      const seqs = groupKv / kv1;
+      const heads = M.n_kv_heads / n;
+      h += "<tr" + (n === PER_NODE ? " class='hi'" : "") + "><td>" + n + "</td>" +
+        "<td class='n'>" + NN.bytes(wpg) + "</td>" +
+        "<td class='n'>" + NN.bytes(free) + "</td>" +
+        "<td class='n'>" + NN.bytes(groupKv) + "</td>" +
+        "<td class='n'>" + fmt(seqs, 0) + "</td>" +
+        "<td class='n " + (heads >= 1 ? "good" : "bad") + "'>" + fmt(heads, 2) +
+        (heads >= 1 ? "" : " — replicated") + "</td></tr>";
+    });
+    h += "</tbody>";
+    tbl.innerHTML = h;
+    host.appendChild(el("div", { class: "scrollx" }, tbl));
+
+    host.appendChild(el("div", { class: "hint", html:
+      "Device capacity in <code>NN.gibytes</code> terms: " + G.name + " is " +
+      NN.gibytes(G.hbm_bytes) + ", which is " + NN.bytes(G.hbm_bytes) +
+      " in the decimal units the model and KV sizes are quoted in. The two are not the same " +
+      "number and the table uses decimal for both sides of every subtraction. " +
+      "KV formula verified against <code>INFER.kv_cache.rows</code> — " + KV_CHECK.rows +
+      " rows, max absolute error " + KV_CHECK.maxAbsErr + " bytes " +
+      (KV_CHECK.ok ? "✓" : "✗ MISMATCH") + "." }));
+
+    const w2 = weightBytes(M, BF16) / 2, w8 = weightBytes(M, BF16) / PER_NODE;
+    host.appendChild(NN.memstrip([
+      { cls: "weight", bytes: w8, label: "weights at TP " + PER_NODE },
+      { cls: "activation", bytes: G.hbm_bytes - w8, label: "KV cache" }
+    ], G.hbm_bytes));
+    host.appendChild(NN.memstrip([
+      { cls: "weight", bytes: w2, label: "weights at TP 2" },
+      { cls: "activation", bytes: G.hbm_bytes - w2, label: "KV cache" }
+    ], G.hbm_bytes));
+    host.appendChild(NN.legend(["weight", "activation"]));
+    host.appendChild(el("div", { class: "hint" },
+      "One GPU's " + NN.gibytes(G.hbm_bytes) + ", at TP " + PER_NODE + " (top) and TP 2 " +
+      "(bottom). Same device, same model. The weight block shrinks by " +
+      fmt(w2 / w8, 0) + x + " and every byte it gives up becomes cache."));
+
+    host.appendChild(NN.callout("key", "THE THIRD REASON FOR TP, AND OFTEN THE DECIDING ONE",
+      "Going from TP " + 2 + " to TP " + PER_NODE + " on " + M.name + " multiplies the group's " +
+      "KV capacity from " + NN.bytes((G.hbm_bytes - w2) * 2) + " to " +
+      NN.bytes((G.hbm_bytes - w8) * PER_NODE) + " — " +
+      fmt(((G.hbm_bytes - w8) * PER_NODE) / ((G.hbm_bytes - w2) * 2), 1) + x +
+      " the concurrent sequences, from " + fmt((G.hbm_bytes - w2) * 2 / kv1, 0) + " to " +
+      fmt((G.hbm_bytes - w8) * PER_NODE / kv1, 0) + " at " + NN.count(M.seq) +
+      " context. Concurrency is the lever on decode throughput (" + INF.batching.why +
+      "), so TP buys throughput through the memory door even where the latency argument is " +
+      "marginal. <a href='27-paged-attention.html'>Page 27</a> is about not wasting the " +
+      "capacity this table just bought you."));
+  })();
+
+  /* ====================================================================== */
+  /*  7 · THE RECIPE, AGAINST PAGE 23'S                                     */
+  /* ====================================================================== */
+  (function () {
+    const host = NN.$("#recipeBody");
+    const M = DEF_MODEL, G = DEF_GPU;
+
+    host.appendChild(p(
+      "Put the two recipes in one table and the inversion is a column-by-column read. Nothing " +
+      "about the hardware changed. Nothing about the collectives changed. What changed is that " +
+      "the step got short and the batch got small, and every judgement follows from that."
+    ));
+
+    const t = el("table", { class: "data" });
+    t.innerHTML =
+      "<thead><tr><th>axis</th><th class='wrap'>training — page 23</th>" +
+      "<th class='wrap'>inference decode — this page</th>" +
+      "<th class='wrap'>what flipped</th></tr></thead><tbody>" +
+
+      "<tr><td>TP</td>" +
+      "<td class='wrap'>Inside a node, degree " + PER_NODE + ". Expensive in bytes " +
+        "(page 19 prices " + NN.bytes(2 * 4096 * 8192 * BF16) + " per all-reduce) but amortised " +
+        "over a long step. Used when a layer will not fit or when the DP collective has outgrown " +
+        "the fabric.</td>" +
+      "<td class='wrap'>Inside a node, degree " + PER_NODE + " — and it is now the <b>primary " +
+        "latency lever</b>. Cheap in bytes (" + NN.bytes(M.d_model * BF16) +
+        " at batch 1) and expensive in fixed cost. Also the KV-capacity lever, section 6.</td>" +
+      "<td class='wrap'>bandwidth-bound → latency-bound. Same instruction, opposite bottleneck.</td></tr>" +
+
+      "<tr><td>PP</td>" +
+      "<td class='wrap'>The axis that crosses nodes, because it sends one tensor per boundary. " +
+        "Costs you the bubble, " + P.strategies.pp.bubble_formula + ", bought down with " +
+        "micro-batches. Reach for it after TP and ZeRO.</td>" +
+      "<td class='wrap'>Still the cheap-wire axis, still crosses nodes — but it <b>adds</b> to " +
+        "per-token latency and never subtracts. Use it for throughput per dollar on models that " +
+        "will not otherwise fit. The bubble is largely handled by continuous batching.</td>" +
+      "<td class='wrap'>the bubble stops being the problem; sequential traversal becomes it.</td></tr>" +
+
+      "<tr><td>DP</td>" +
+      "<td class='wrap'>Splits the batch, then all-reduces every gradient — " +
+        NN.count(P.strategies.ddp.schedule[0].elements) + " elements per step in the toy, the " +
+        "whole model. The traffic that ZeRO and TP exist to reduce.</td>" +
+      "<td class='wrap'><b>Zero communication.</b> Independent replicas behind a router. Linear " +
+        "throughput, unchanged latency, one full model copy each.</td>" +
+      "<td class='wrap'>the most expensive axis becomes the free one, because there is no backward pass.</td></tr>" +
+
+      "<tr><td>ZeRO / FSDP</td>" +
+      "<td class='wrap'>The first thing to reach for: stage 1 removes " +
+        "the optimizer-state share of the bill for almost no extra traffic.</td>" +
+      "<td class='wrap'>Not applicable. There are no gradients and no optimizer state to shard — " +
+        "of the four tensor classes, inference holds weights and activations and nothing else.</td>" +
+      "<td class='wrap'>two of the four classes stop existing.</td></tr>" +
+
+      "<tr><td>what you optimise</td>" +
+      "<td class='wrap'>time per step at a fixed global batch</td>" +
+      "<td class='wrap'>TTFT and ITL under an SLO, then tokens/s/$ subject to it — goodput</td>" +
+      "<td class='wrap'>one objective becomes two that fight</td></tr>" +
+      "</tbody>";
+    host.appendChild(el("div", { class: "scrollx" }, t));
+
+    host.appendChild(h3("The order to reach for them"));
+    const ol = el("ol", { class: "small" });
+    [
+      ["<b>TP up to the node, and no further.</b> It is the only axis that reduces ITL, and it " +
+       "is the axis that turns weight memory into KV capacity. Stop at " + PER_NODE +
+       " — section 3's cliff is at the NVSwitch boundary and it is a factor of several, not a " +
+       "few percent."],
+      ["<b>DP across nodes for throughput.</b> Free, linear, and it does not touch latency. " +
+       "This is where you spend GPUs once TP has done what it can."],
+      ["<b>PP only when the model will not fit otherwise</b>, or when the workload is " +
+       "throughput-only and you would rather have one model copy across P GPUs than P copies. " +
+       "Accept that every stage boundary is added to time-to-token."],
+      ["<b>Then stop adding GPUs and change the workload instead.</b> Quantisation " +
+       "(<a href='28-quantisation.html'>page 28</a>) shrinks the bytes read per token, which is " +
+       "the actual bound; speculative decoding (<a href='29-speculative.html'>page 29</a>) gets " +
+       "more tokens out of one weight read. Both attack ITL without adding a single collective."]
+    ].forEach(function (s) { ol.appendChild(el("li", { html: s })); });
+    host.appendChild(ol);
+
+    host.appendChild(NN.callout("why", "THE SAME HARDWARE MAP, READ BACKWARDS",
+      "Page 23's mapping rule was: put the chatty collective on the fast wire, put the quiet " +
+      "one on the slow wire. That rule survives intact — TP still belongs on NVLink and PP " +
+      "still belongs on the fabric. What inverts is the <em>ranking</em>. In training, DP is " +
+      "the expensive axis you shrink and PP is the tolerable one you accept. In decode, DP is " +
+      "free and PP is the one you avoid unless it is buying you something structural. " +
+      P.interconnects.why_it_matters));
+  })();
+
+  /* ====================================================================== */
+  /*  8 · LIMITS                                                            */
+  /* ====================================================================== */
+  (function () {
+    const host = NN.$("#limitsBody");
+
+    host.appendChild(el("div", { class: "verdict pend" }, [
+      el("div", { class: "big" }, "MODEL, NOT MEASUREMENT"),
+      el("div", { class: "det" }, code("PARALLEL.cost_model._status") + ": " + COST._status)
+    ]));
+
+    host.appendChild(p(
+      "Every timing on this page is arithmetic over published specifications, not a profile. " +
+      "The specifications themselves are quoted, not derived: " + code("T.reference_configs") +
+      " (" + RC._source + ") and " + code("PARALLEL.interconnects") + " (" +
+      P.interconnects._source + "). Here is what the arithmetic assumes."
+    ));
+
+    const assumptions = [
+      ["Decode is HBM-bandwidth-bound, so step time = bytes read ÷ HBM bandwidth.",
+       "Justified by <code>INFER.roofline</code>, where <code>decode_bound</code> is " +
+       "&ldquo;memory&rdquo; for every model on every GPU listed. It is still an idealisation: " +
+       "it credits the kernel with 100% of peak HBM bandwidth, which nothing achieves. Real ITL " +
+       "is higher, and because the communication term is unaffected, the communication " +
+       "<em>share</em> printed here is an overestimate."],
+      ["Prefill is compute-bound, at a STATED 45% of dense bf16 peak.",
+       "Justified by <code>INFER.roofline</code> (<code>prefill_bound</code> = compute " +
+       "everywhere). The 45% is chosen, not measured: " + RC.mfu_note],
+      ["Ring all-reduce latency is α " + x + " 2(N−1) hops by default.",
+       "<code>PARALLEL.cost_model.latency_us</code> gives α as " +
+       COST.latency_us.intra_node + " µs intra-node and " + COST.latency_us.inter_node +
+       " µs inter-node, described as &ldquo;per collective&rdquo;. Scaling it by the ring's " +
+       "2(N−1) phases is <b>this page's extension</b>, made because the hop structure is " +
+       "exactly what a small-payload collective pays for. The toggle in section 3 turns it off. " +
+       "Real libraries use tree, one-shot and in-network algorithms that land between the two " +
+       "settings — <code>cost_model.ignores</code> explicitly lists in-network reduction " +
+       "(NVLS / SHARP) as something it does not credit."],
+      ["8 GPUs per NVSwitch domain.",
+       "A stated topology assumption, the same one <a href='23-3d-parallelism.html'>page 23</a> " +
+       "makes. It is what puts the cliff between TP 8 and TP 16. On a 4-GPU box it would sit " +
+       "between 4 and 8; on an NVL72-class domain it moves much further out."],
+      ["Two all-reduces per transformer block, and no others.",
+       "The attention output projection and the MLP down-projection, per " +
+       "<a href='19-tensor-parallel.html'>page 19</a>. Sequence parallelism " +
+       "(<a href='20-sequence-parallel.html'>page 20</a>) would replace them with " +
+       "reduce-scatter/all-gather pairs of the same shape and roughly the same fixed cost. " +
+       "The vocabulary projection's collective is not counted."],
+      ["bf16 weights and bf16 KV cache.",
+       "<code>T.memory.dtype_bytes</code> gives " + DTB.bf16 + " bytes. Quantisation changes " +
+       "both the HBM term and the all-reduce payload and is " +
+       "<a href='28-quantisation.html'>page 28</a>, not this page."],
+      ["The KV cache shards cleanly across TP.",
+       "True while TP ≤ <code>n_kv_heads</code>; section 6 gives the exact bound and what " +
+       "happens past it."],
+      ["No overlap of communication with compute.",
+       "In training, TP's collectives are partially hidden. In decode there is very little to " +
+       "hide behind — the collective's result <em>is</em> the next layer's input, and the layer " +
+       "is only a few hundred microseconds long. Treating it as serial is close to right here " +
+       "and would be badly wrong for a training page."]
+    ];
+    const dl = el("table", { class: "data" });
+    dl.innerHTML = "<thead><tr><th class='wrap'>assumption</th><th class='wrap'>why, and how wrong</th></tr></thead>";
+    const tb = el("tbody");
+    assumptions.forEach(function (a) {
+      tb.appendChild(el("tr", {}, [
+        el("td", { class: "wrap", html: "<b>" + a[0] + "</b>" }),
+        el("td", { class: "wrap", html: a[1] })
+      ]));
+    });
+    dl.appendChild(tb);
+    host.appendChild(el("div", { class: "scrollx" }, dl));
+
+    host.appendChild(p("And what " + code("PARALLEL.cost_model") + " itself declares it ignores:"));
+    host.appendChild(el("ul", { class: "small muted" },
+      COST.ignores.map(function (s) { return el("li", {}, s); })));
+
+    host.appendChild(NN.callout("key", "WHAT TO TAKE AWAY EVEN IF EVERY CONSTANT IS WRONG",
+      "The constants move the crossover. They do not move the structure. Decode's all-reduce " +
+      "payload is smaller than training's by a factor of batch " + x + " sequence, which is " +
+      "three to four orders of magnitude, so it is on the fixed-cost side of the collective's " +
+      "cost curve rather than the bandwidth side — and that is true for any α and any link " +
+      "rate you care to substitute. Fixed costs do not amortise over a batch of one. Everything " +
+      "else on this page is a consequence."));
+  })();
+
+  NN.page("infpar");
+})();
+</script>
+</body>
+</html>

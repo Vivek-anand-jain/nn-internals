@@ -1,0 +1,1016 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 26 Batching</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* page-local layout only; every colour comes from design.css custom properties */
+.panel { background: var(--surface-2); border: 1px solid var(--hairline);
+         border-radius: 8px; padding: 12px 14px; }
+.panel h4 { margin: 0 0 8px; font-family: var(--mono); font-size: .7rem; letter-spacing: .13em;
+            text-transform: uppercase; color: var(--ink-muted); font-weight: 700; }
+
+.transport { display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+             margin: 14px 0 6px; }
+.transport input[type="range"] { flex: 1; min-width: 180px; accent-color: var(--weight); }
+.tclock { font-family: var(--mono); font-size: .82rem; color: var(--ink-2);
+          white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+.occhead { display: flex; justify-content: space-between; align-items: baseline;
+           gap: 10px; font-family: var(--mono); font-size: .76rem; margin-bottom: 4px; }
+.occhead .nm { font-weight: 700; color: var(--ink); }
+.occhead .st { color: var(--ink-muted); font-size: .72rem; }
+
+.statekey { display: flex; flex-wrap: wrap; gap: 8px 14px; margin: 10px 0 4px; }
+.statekey .k { display: inline-flex; align-items: center; gap: 6px;
+               font-family: var(--mono); font-size: .74rem; color: var(--ink-2); }
+.statekey .sw { width: 15px; height: 15px; border-radius: 3px; display: inline-flex;
+                align-items: center; justify-content: center; font-size: .56rem;
+                font-weight: 700; color: #fff; border: 1px solid var(--hairline); }
+
+.seqtabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 4px; }
+.seqtabs .btn.on { background: var(--surface-3); border-color: var(--ink-muted); color: var(--ink); }
+
+.histrow { display: grid; grid-template-columns: 92px 1fr; gap: 10px; align-items: center;
+           margin: 5px 0; font-family: var(--mono); font-size: .74rem; }
+.histbar { display: flex; align-items: center; gap: 6px; height: 13px; }
+.histbar i { display: block; height: 100%; border-radius: 2px; }
+.histbar span { color: var(--ink-muted); font-size: .68rem; }
+
+.asmp { width: 100%; border-collapse: collapse; font-size: .85rem; margin: 10px 0 0; }
+.asmp td { padding: 6px 10px 6px 0; border-bottom: 1px solid var(--hairline-2);
+           vertical-align: top; }
+.asmp td.k { font-family: var(--mono); font-size: .74rem; color: var(--ink-muted);
+             white-space: nowrap; width: 1%; }
+.asmp td.v { font-family: var(--mono); font-size: .76rem; color: var(--ink); width: 22%; }
+.asmp td.w { color: var(--ink-2); font-size: .84rem; line-height: 1.5; }
+@media (max-width: 900px) { .asmp td.k { white-space: normal; } }
+
+.reqtab td.b, .reqtab th.b { border-left: 1px solid var(--hairline); }
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 26</div>
+    <h1>Batching: the scheduler is the throughput</h1>
+    <p class="lede">A decode step reads every weight in the model to produce one token, so a second
+      sequence riding along in the same step is nearly free. That single fact turns serving into a
+      scheduling problem: what matters is not how fast one step is but how many sequences are in
+      flight during it, and therefore <em>when a finished sequence gives its slot back</em> and
+      <em>what is allowed to block a step</em>. This page simulates a queue of requests through two
+      schedulers and one prefill policy, and counts the difference.</p>
+    <noscript><p class="callout warn">This page computes and animates every number in the browser.
+      With JavaScript disabled you will see an empty shell.</p></noscript>
+  </div>
+
+  <section class="block" id="workload">
+    <h2>1 · The workload — and what is assumed about it</h2>
+    <div id="wlBody"></div>
+  </section>
+
+  <section class="block" id="schedulers">
+    <h2>2 · Static vs continuous batching, slot by slot</h2>
+    <div id="schedBody"></div>
+  </section>
+
+  <section class="block" id="cost">
+    <h2>3 · What the static batch costs</h2>
+    <div id="costBody"></div>
+  </section>
+
+  <section class="block" id="chunk">
+    <h2>4 · Chunked prefill — the other thing that blocks a step</h2>
+    <div id="chunkBody"></div>
+  </section>
+
+  <section class="block" id="free">
+    <h2>5 · Why decode batching is nearly free, and where it stops being free</h2>
+    <div id="freeBody"></div>
+  </section>
+
+  <section class="block" id="close">
+    <h2>6 · What the scheduler cannot fix</h2>
+    <div id="closeBody"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/infer.js"></script>
+<script src="../assets/data/serving.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T = NN.T;
+  const S = window.SERVING;
+  const I = window.INFER;
+  const el = NN.el, svg = NN.svg;
+  const M = S.meta;
+
+  /* ---------------------------------------------------------- formatting */
+  function fms(x) { return NN.fmt(x, x < 10 ? 2 : 1) + " ms"; }
+  function pc(x, d) { return NN.fmt(x * 100, d === undefined ? 1 : d) + "%"; }
+  function xfmt(x) { return NN.fmt(x, 2) + "×"; }
+
+  /* State grammar for the occupancy grid.
+     Only two of the four tensor hues appear, and each is earned:
+       prefill  — the phase whose whole point is that the WEIGHTS are read
+                  once and amortised over many tokens            (weight, blue)
+       decode   — one step appends one entry to the KV cache, which is an
+                  activation                                 (activation, green)
+     Everything that is NOT work — stalled, finished-but-held, empty — is
+     --accent, the neutral. No third tensor hue is introduced, and every
+     state carries a letter and a label as well as a colour. */
+  const STATE = {
+    P: { fill: "var(--weight)",     label: "prefill (compute-bound)", letter: "P" },
+    D: { fill: "var(--activation)", label: "decode (bandwidth-bound)", letter: "D" },
+    W: { fill: "var(--accent)",     label: "admitted, stalled behind a prefill",
+         letter: "W", pattern: "dots", op: 0.5 },
+    B: { fill: "var(--accent)",     label: "FINISHED — still holding the slot",
+         letter: "B", pattern: "stripe", op: 0.85 },
+    "-": { fill: "var(--surface-3)", label: "slot empty", letter: "" }
+  };
+
+  function stateKey(keys) {
+    return el("div", { class: "statekey" }, keys.map(function (k) {
+      const s = STATE[k];
+      return el("span", { class: "k" }, [
+        el("span", {
+          class: "sw",
+          style: { background: s.fill, opacity: s.op ? String(s.op) : "1" }
+        }, s.letter),
+        s.label
+      ]);
+    }));
+  }
+
+  /* ======================================================================
+     OCCUPANCY VIEW
+     x is WALL-CLOCK TIME, not iteration index, so a 2048-token prefill is
+     visibly 35 times wider than a decode step and two schedulers on the
+     same axis are directly comparable. y is the slot.
+     ====================================================================== */
+  let uid = 0;
+  function occupancy(o) {
+    const tl = o.timeline, slots = o.slots;
+    const W = 660, rowH = 15, padL = 30, padR = 8, padT = 8, padB = 20;
+    const H = padT + slots * rowH + padB;
+    const sc = (W - padL - padR) / o.maxMs;
+    const id = "occ" + (++uid);
+
+    const root = svg("svg", {
+      viewBox: "0 0 " + W + " " + H, width: "100%", height: H,
+      class: "chart", role: "img",
+      "aria-label": o.name + " slot occupancy over time"
+    });
+
+    const defs = svg("defs", {});
+    const stripe = svg("pattern", {
+      id: id + "-stripe", width: 5, height: 5,
+      patternUnits: "userSpaceOnUse", patternTransform: "rotate(45)"
+    });
+    stripe.appendChild(svg("rect", { width: 5, height: 5, fill: "var(--accent)", opacity: .30 }));
+    stripe.appendChild(svg("rect", { width: 2, height: 5, fill: "var(--accent)", opacity: .95 }));
+    defs.appendChild(stripe);
+    const dots = svg("pattern", {
+      id: id + "-dots", width: 4, height: 4, patternUnits: "userSpaceOnUse"
+    });
+    dots.appendChild(svg("rect", { width: 4, height: 4, fill: "var(--accent)", opacity: .16 }));
+    dots.appendChild(svg("circle", { cx: 2, cy: 2, r: 1, fill: "var(--accent)", opacity: .8 }));
+    defs.appendChild(dots);
+    const clip = svg("clipPath", { id: id + "-clip" });
+    const clipRect = svg("rect", { x: 0, y: 0, width: W, height: H });
+    clip.appendChild(clipRect);
+    defs.appendChild(clip);
+    root.appendChild(defs);
+
+    /* slot lanes */
+    for (let s = 0; s < slots; s++) {
+      root.appendChild(svg("rect", {
+        x: padL, y: padT + s * rowH + 1, width: W - padL - padR, height: rowH - 2,
+        fill: "var(--surface-3)", opacity: .55, rx: 2
+      }));
+      const t = svg("text", {
+        x: padL - 5, y: padT + s * rowH + rowH / 2 + 3.2, "text-anchor": "end"
+      });
+      t.textContent = "s" + s;
+      root.appendChild(t);
+    }
+
+    const g = svg("g", { "clip-path": "url(#" + id + "-clip)" });
+    tl.forEach(function (it) {
+      const x = padL + it.t0 * sc, w = Math.max(0.7, it.ms * sc);
+      it.slots.forEach(function (c, s) {
+        const st = c[0];
+        if (st === "-") return;
+        const d = STATE[st];
+        g.appendChild(svg("rect", {
+          x: x, y: padT + s * rowH + 1, width: w, height: rowH - 2, rx: 1.5,
+          fill: d.pattern ? "url(#" + id + "-" + d.pattern + ")" : d.fill,
+          opacity: d.pattern ? 1 : (d.op || 1)
+        }));
+      });
+    });
+    root.appendChild(g);
+
+    const cursor = svg("line", {
+      x1: padL, x2: padL, y1: padT, y2: padT + slots * rowH,
+      stroke: "var(--ink)", "stroke-width": 1.2, opacity: .85
+    });
+    root.appendChild(cursor);
+
+    /* x axis: ms */
+    root.appendChild(svg("line", {
+      class: "axis", x1: padL, x2: W - padR,
+      y1: padT + slots * rowH + 2, y2: padT + slots * rowH + 2
+    }));
+    for (let k = 0; k <= 4; k++) {
+      const v = o.maxMs * k / 4;
+      const t = svg("text", {
+        x: padL + v * sc, y: H - 6, "text-anchor": k === 0 ? "start" : (k === 4 ? "end" : "middle")
+      });
+      t.textContent = NN.fmt(v, 0) + (k === 4 ? " ms" : "");
+      root.appendChild(t);
+    }
+
+    /* hover: which iteration, what was in it */
+    root.addEventListener("mousemove", function (e) {
+      const r = root.getBoundingClientRect();
+      const px = (e.clientX - r.left) / r.width * W;
+      const tms = (px - padL) / sc;
+      let hit = null;
+      for (let i = 0; i < tl.length; i++) {
+        if (tl[i].t0 <= tms && tms <= tl[i].t1) { hit = tl[i]; break; }
+      }
+      if (!hit) { NN.tip.hide(); return; }
+      const counts = {};
+      hit.slots.forEach(function (c) { counts[c[0]] = (counts[c[0]] || 0) + 1; });
+      let rows = "";
+      Object.keys(STATE).forEach(function (k) {
+        if (counts[k]) rows += "<div>" + counts[k] + " × " + STATE[k].label + "</div>";
+      });
+      NN.tip.show("<div class='muted'>" + o.name + " · t = " + fms(hit.t0) + "</div>" +
+        "<div><b>" + fms(hit.ms) + "</b> iteration, " + hit.bound + "-bound</div>" +
+        "<div class='muted'>" + hit.prefill_tokens + " prefill + " +
+        hit.decode_tokens + " decode tokens</div>" + rows, e.clientX, e.clientY);
+    });
+    root.addEventListener("mouseleave", function () { NN.tip.hide(); });
+
+    const stat = el("span", { class: "st" });
+    const head = el("div", { class: "occhead" }, [
+      el("span", { class: "nm" }, o.name), stat
+    ]);
+    const wrap = el("div", {}, [head, root]);
+
+    wrap.setTime = function (t) {
+      const x = padL + Math.min(t, o.maxMs) * sc;
+      clipRect.setAttribute("width", Math.max(0, x));
+      cursor.setAttribute("x1", x); cursor.setAttribute("x2", x);
+      cursor.setAttribute("opacity", t >= o.maxMs ? 0 : .85);
+      /* live occupancy readout at the cursor */
+      let cur = null;
+      for (let i = 0; i < tl.length; i++) {
+        if (tl[i].t0 <= t && t < tl[i].t1) { cur = tl[i]; break; }
+      }
+      if (!cur) {
+        stat.textContent = t >= o.makespan
+          ? "all " + o.done + " requests done at " + fms(o.makespan)
+          : "no runnable sequence — the queue is empty";
+      } else {
+        let work = 0, blocked = 0, stalled = 0;
+        cur.slots.forEach(function (c) {
+          if (c[0] === "P" || c[0] === "D") work++;
+          else if (c[0] === "B") blocked++;
+          else if (c[0] === "W") stalled++;
+        });
+        stat.textContent = work + "/" + slots + " slots working" +
+          (stalled ? " · " + stalled + " stalled" : "") +
+          (blocked ? " · " + blocked + " finished but held" : "");
+      }
+    };
+    wrap.setTime(0);
+    return wrap;
+  }
+
+  /** One play/pause + scrub transport driving several occupancy views. */
+  function transport(views, maxMs, seconds) {
+    const btn = el("button", { class: "btn primary" }, "▶ Play");
+    const rng = el("input", {
+      type: "range", min: "0", max: "1000", value: "0", step: "1",
+      "aria-label": "scrub simulated time"
+    });
+    const clock = el("span", { class: "tclock" });
+    const bar = el("div", { class: "transport" }, [btn, rng, clock]);
+    /* start fully drawn: the finished picture is the thing worth reading, and
+       Play rewinds to zero and replays it. */
+    let t = maxMs, playing = false, last = 0;
+
+    function apply() {
+      views.forEach(function (v) { v.setTime(t); });
+      rng.value = String(Math.round(t / maxMs * 1000));
+      clock.textContent = "t = " + NN.fmt(t, 0) + " / " + NN.fmt(maxMs, 0) + " ms";
+    }
+    function frame(now) {
+      if (!playing) return;
+      const dt = Math.min(64, now - last); last = now;
+      t += dt / 1000 * (maxMs / seconds);
+      if (t >= maxMs) { t = maxMs; playing = false; btn.textContent = "▶ Replay"; }
+      apply();
+      if (playing) requestAnimationFrame(frame);
+    }
+    btn.addEventListener("click", function () {
+      if (playing) { playing = false; btn.textContent = "▶ Play"; return; }
+      if (t >= maxMs) t = 0;
+      playing = true; btn.textContent = "⏸ Pause";
+      last = performance.now();
+      requestAnimationFrame(frame);
+    });
+    rng.addEventListener("input", function () {
+      playing = false; btn.textContent = "▶ Play";
+      t = Number(rng.value) / 1000 * maxMs; apply();
+    });
+    apply();
+    return bar;
+  }
+
+  /* ======================================================================
+     1 · WORKLOAD
+     ====================================================================== */
+  (function workload() {
+    const host = NN.$("#wlBody");
+    const w = S.workload;
+
+    host.appendChild(el("p", { html:
+      "Everything below runs the same " + w.n + " requests through the same machine: " +
+      "<b>" + M.model.name + "</b> at " + NN.count(M.model.params) + " parameters in bf16 on one " +
+      "<b>" + M.gpu.name + "</b>, " + NN.bytes(M.weight_bytes) + " of weights and " +
+      (M.bytes_per_token / 1024) + " KiB of KV cache per token. " +
+      "An engine iteration is priced as a roofline: " +
+      "<code>max(bytes ÷ " + NN.bytes(M.gpu.hbm_bw_bytes_per_s) + "/s, FLOPs ÷ (" +
+      M.gpu.bf16_dense_tflops + " TFLOP/s × MFU " + M.mfu + "))</code>. " +
+      "A decode-only iteration lands on the bandwidth side of that max; a prefill lands on " +
+      "the compute side. The ridge between them is " + NN.fmt(M.ridge_flops_per_byte, 1) +
+      " FLOP/byte, the same ridge <a href=\"24-prefill-decode.html\">page 24</a> uses." }));
+
+    host.appendChild(NN.tiles([
+      { k: "requests", v: String(w.n), s: "in the queue" },
+      { k: "prompt tokens", v: NN.count(w.prompt_tokens), s: "to prefill" },
+      { k: "output tokens", v: NN.count(w.output_tokens), s: "to generate" },
+      { k: "slots", v: String(M.slots), s: "concurrent sequences" },
+      { k: "arrivals", v: fms(M.interarrival_ms), s: "between requests" }
+    ]));
+
+    const tab = el("table", { class: "asmp" });
+    M.assumptions.forEach(function (a) {
+      tab.appendChild(el("tr", {}, [
+        el("td", { class: "k" }, a.k),
+        el("td", { class: "v" }, a.v),
+        el("td", { class: "w" }, a.why)
+      ]));
+    });
+    const box = el("div", {});
+    box.appendChild(el("p", { class: "small", style: { margin: "0 0 4px" }, html:
+      "Nothing on this page was measured on a GPU. The hardware and model shapes are quoted " +
+      "public figures; every latency, every token per second and every occupancy cell is " +
+      "<em>simulated</em> by <code>code/serving.py</code> from the assumptions below. Change an " +
+      "assumption and the conclusions move — which is the reason to print them." }));
+    box.appendChild(tab);
+    host.appendChild(NN.callout("warn", "THESE ARE ASSUMPTIONS, NOT MEASUREMENTS",
+      box.innerHTML));
+
+    /* the mix itself */
+    const t2 = el("table", { class: "data reqtab" });
+    const hr = el("tr", {}, [el("th", {}, "request")]);
+    const r1 = el("tr", {}, [el("td", {}, "prompt")]);
+    const r2 = el("tr", {}, [el("td", {}, "output")]);
+    w.prompts.forEach(function (p, i) {
+      hr.appendChild(el("th", { class: "n" }, "r" + i));
+      r1.appendChild(el("td", { class: "n" }, String(p)));
+      r2.appendChild(el("td", { class: "n" }, String(w.outputs[i])));
+    });
+    const body = el("tbody", {}, [r1, r2]);
+    t2.appendChild(el("thead", {}, [hr]));
+    t2.appendChild(body);
+    host.appendChild(el("div", { class: "scrollx" }, [t2]));
+    host.appendChild(el("p", { class: "small muted", html:
+      "Long prompts carry short outputs and short prompts carry long outputs — the " +
+      "summarise-this-document request next to the chat turn. The spread inside a batch " +
+      "is the whole story of the next section: the longest output here is " +
+      Math.max.apply(null, w.outputs) + " tokens and the shortest is " +
+      Math.min.apply(null, w.outputs) + "." }));
+  })();
+
+  /* ======================================================================
+     2 · STATIC vs CONTINUOUS
+     ====================================================================== */
+  (function sched() {
+    const host = NN.$("#schedBody");
+    const st = S.batching.static, co = S.batching.continuous;
+    const maxMs = Math.max(st.makespan_ms, co.makespan_ms);
+
+    host.appendChild(el("p", { html:
+      "Both schedulers see byte-identical input and run on the same cost model. The only " +
+      "difference is <b>when a slot is released</b>. Static batching admits a batch, runs it to " +
+      "completion, and frees every slot together — so a sequence that finished early keeps its " +
+      "slot, and its padding, until the longest member of its batch is done. Continuous " +
+      "(in-flight) batching refills a slot on the next iteration." }));
+
+    host.appendChild(stateKey(["P", "D", "W", "B", "-"]));
+    host.appendChild(el("p", { class: "small muted", html:
+      "Width is time, not iterations: the wide blue bars are prefills of the long prompts, and " +
+      "they are wide because they are compute-bound. Hover any column for what that iteration " +
+      "actually did." }));
+
+    const vStatic = occupancy({
+      timeline: st.timeline, slots: st.slots, maxMs: maxMs,
+      makespan: st.makespan_ms, done: S.workload.n,
+      name: "STATIC — " + st.iterations + " iterations, " + fms(st.makespan_ms)
+    });
+    const vCont = occupancy({
+      timeline: co.timeline, slots: co.slots, maxMs: maxMs,
+      makespan: co.makespan_ms, done: S.workload.n,
+      name: "CONTINUOUS — " + co.iterations + " iterations, " + fms(co.makespan_ms)
+    });
+
+    host.appendChild(transport([vStatic, vCont], maxMs, 11));
+    host.appendChild(el("div", { class: "panel", style: { marginBottom: "12px" } }, [vStatic]));
+    host.appendChild(el("div", { class: "panel" }, [vCont]));
+
+    /* comparison table */
+    const rows = [
+      ["iterations", String(st.iterations), String(co.iterations), false],
+      ["makespan", fms(st.makespan_ms), fms(co.makespan_ms), true],
+      ["throughput", NN.fmt(st.throughput_tok_s, 1) + " tok/s",
+       NN.fmt(co.throughput_tok_s, 1) + " tok/s", true],
+      ["mean latency", fms(st.mean_latency_ms), fms(co.mean_latency_ms), true],
+      ["p99 latency", fms(st.p99_latency_ms), fms(co.p99_latency_ms), true],
+      ["mean time to first token", fms(st.mean_ttft_ms), fms(co.mean_ttft_ms), true],
+      ["slot utilisation", pc(st.slot_utilisation), pc(co.slot_utilisation), true],
+      ["slot-time finished but held", pc(st.blocked_share), pc(co.blocked_share), true],
+      ["slot-time stalled behind a prefill", pc(st.stalled_share), pc(co.stalled_share), false],
+      ["slot-time empty", pc(st.empty_share), pc(co.empty_share), false]
+    ];
+    const tab = el("table", { class: "data" });
+    tab.appendChild(el("thead", {}, [el("tr", {}, [
+      el("th", {}, "metric"), el("th", {}, "static"),
+      el("th", { class: "best" }, "continuous")
+    ])]));
+    const tb = el("tbody", {});
+    rows.forEach(function (r) {
+      tb.appendChild(el("tr", {}, [
+        el("td", {}, r[0]), el("td", { class: "n" }, r[1]),
+        el("td", { class: "n" + (r[3] ? " best" : "") }, r[2])
+      ]));
+    });
+    tab.appendChild(tb);
+    host.appendChild(tab);
+
+    const g = S.batching.gain;
+    host.appendChild(NN.tiles([
+      { k: "throughput", v: xfmt(g.throughput_x), s: "continuous ÷ static", cls: "activation" },
+      { k: "mean latency", v: xfmt(g.latency_x), s: "static ÷ continuous", cls: "activation" },
+      { k: "slot utilisation", v: xfmt(g.utilisation_x), s: "continuous ÷ static" },
+      { k: "wasted slot-time", v: pc(g.blocked_slot_share_static),
+        s: "static, finished but held" }
+    ]));
+
+    host.appendChild(NN.callout("key", "THE SLOT IS THE RESOURCE",
+      "Nothing about the model changed. The same " + NN.bytes(M.weight_bytes) +
+      " of weights were read the same number of times per iteration, and every kernel ran at the " +
+      "same speed. Continuous batching is " + xfmt(g.throughput_x) + " the throughput purely " +
+      "because " + pc(st.blocked_share) + " of the static run's slot-time was spent on sequences " +
+      "that had already emitted their last token and were being padded to the length of the " +
+      "slowest sequence in their batch. " + S.batching.why));
+  })();
+
+  /* ======================================================================
+     3 · WHAT THE STATIC BATCH COSTS
+     ====================================================================== */
+  (function cost() {
+    const host = NN.$("#costBody");
+    const st = S.batching.static, co = S.batching.continuous;
+
+    host.appendChild(el("p", { html:
+      "Read the static timeline again and count the striped cells. Every one of them is a slot " +
+      "holding a sequence whose output is finished, occupying KV cache, being padded into the " +
+      "attention kernel and contributing nothing. The arithmetic is a plain accounting of the " +
+      "slot-time grid: " + st.slots + " slots × " + fms(st.makespan_ms) + " of makespan." }));
+
+    host.appendChild(NN.formula({
+      rule: "slot-time = slots × makespan",
+      sub: st.slots + " × " + NN.fmt(st.makespan_ms, 1) + " ms",
+      result: NN.fmt(st.slots * st.makespan_ms, 0) + " slot-ms",
+      cls: "activation"
+    }));
+
+    function strip(sim, name) {
+      const s = [
+        { label: "working", frac: sim.slot_utilisation, fill: "var(--activation)" },
+        { label: "finished but held", frac: sim.blocked_share, fill: "var(--accent)", op: .85 },
+        { label: "stalled", frac: sim.stalled_share, fill: "var(--accent)", op: .5 },
+        { label: "empty", frac: sim.empty_share, fill: "var(--surface-3)" }
+      ];
+      const bar = el("div", {
+        style: { display: "flex", height: "26px", borderRadius: "5px",
+                 overflow: "hidden", border: "1px solid var(--hairline)" }
+      }, s.map(function (x) {
+        return el("div", {
+          style: { flexGrow: String(Math.max(x.frac, 0.0001)), background: x.fill,
+                   opacity: x.op ? String(x.op) : "1" },
+          title: x.label + " — " + pc(x.frac)
+        });
+      }));
+      return el("div", { style: { margin: "12px 0" } }, [
+        el("div", { class: "occhead" }, [
+          el("span", { class: "nm" }, name),
+          el("span", { class: "st" }, s.map(function (x) {
+            return x.label + " " + pc(x.frac, 0);
+          }).join("  ·  "))
+        ]),
+        bar
+      ]);
+    }
+    host.appendChild(strip(st, "STATIC slot-time"));
+    host.appendChild(strip(co, "CONTINUOUS slot-time"));
+    host.appendChild(el("p", { class: "small muted" },
+      "Both bars are the same physical resource: " + st.slots +
+      " sequence slots for the length of the run. Only the working fraction produces tokens."));
+
+    /* per-request latency comparison */
+    const w = S.workload;
+    const tab = el("table", { class: "data" });
+    tab.appendChild(el("thead", {}, [el("tr", {}, [
+      el("th", {}, "req"), el("th", {}, "prompt"), el("th", {}, "output"),
+      el("th", { class: "b" }, "static TTFT"), el("th", {}, "static latency"),
+      el("th", { class: "b" }, "continuous TTFT"), el("th", {}, "continuous latency"),
+      el("th", {}, "Δ latency")
+    ])]));
+    const tb = el("tbody", {});
+    st.requests.forEach(function (r, i) {
+      const c = co.requests[i];
+      const d = c.latency_ms - r.latency_ms;
+      tb.appendChild(el("tr", {}, [
+        el("td", {}, "r" + r.id),
+        el("td", { class: "n" }, String(r.prompt)),
+        el("td", { class: "n" }, String(r.out)),
+        el("td", { class: "n b" }, fms(r.ttft_ms)),
+        el("td", { class: "n" }, fms(r.latency_ms)),
+        el("td", { class: "n b" }, fms(c.ttft_ms)),
+        el("td", { class: "n" }, fms(c.latency_ms)),
+        el("td", {
+          class: "n",
+          style: { color: d < 0 ? "var(--good)" : (d > 0 ? "var(--critical)" : "inherit") }
+        }, NN.fmtSigned(d, 1) + " ms")
+      ]));
+    });
+    tab.appendChild(tb);
+    host.appendChild(el("div", { class: "scrollx" }, [tab]));
+
+    const better = co.requests.filter(function (c, i) {
+      return c.latency_ms < st.requests[i].latency_ms;
+    }).length;
+    host.appendChild(el("p", { class: "small muted" },
+      better + " of " + co.requests.length + " requests finish sooner under continuous " +
+      "batching, and the mean falls from " + fms(st.mean_latency_ms) + " to " +
+      fms(co.mean_latency_ms) + ". Continuous batching is not a throughput-for-latency " +
+      "trade: on this workload it wins both, because the slot a finished request gives back " +
+      "immediately starts a queued one."));
+  })();
+
+  /* ======================================================================
+     4 · CHUNKED PREFILL
+     ====================================================================== */
+  (function chunked() {
+    const host = NN.$("#chunkBody");
+    const cp = S.chunked_prefill;
+    const un = cp.unchunked, ch = cp.chunked;
+    const unTL = S.batching.continuous.timeline;      /* same run, chunking off */
+    const chTL = cp.timeline_chunked;
+    const maxMs = Math.max(un.sim.makespan_ms, ch.sim.makespan_ms);
+    const longest = Math.max.apply(null, S.workload.prompts);
+
+    const worstIter = Math.max.apply(null, unTL.map(function (i) { return i.ms; }));
+    const medianIter = (function () {
+      const d = unTL.filter(function (i) { return i.decode_tokens && !i.prefill_tokens; })
+                    .map(function (i) { return i.ms; }).sort(function (a, b) { return a - b; });
+      return d[Math.floor(d.length / 2)];
+    })();
+
+    host.appendChild(el("p", { html:
+      "Continuous batching fixed <em>when a slot is freed</em>. It did nothing about the other " +
+      "way a step gets blocked. Under the classic prefill-first policy a prefill runs " +
+      "<b>alone</b>: the longest iteration in the unchunked run is " + fms(worstIter) +
+      " — the " + longest + "-token prompt going through in one piece — against a typical " +
+      "decode-only iteration of " + fms(medianIter) + ". Every sequence already decoding waits " +
+      "the whole of it. That is head-of-line blocking, and it is the wide blue bar with a row " +
+      "of stalled slots beside it in the timeline above." }));
+
+    host.appendChild(el("p", { html:
+      "Chunked prefill removes it by giving the scheduler a token budget — here <b>" +
+      cp.budget + " tokens per iteration</b> — and spending it on decodes <em>first</em>, " +
+      "then on a slice of one prefill. The long prompt is now cut into " +
+      Math.ceil(longest / cp.budget) + " chunks that interleave with everybody's decoding." }));
+
+    host.appendChild(stateKey(["P", "D", "W", "-"]));
+    const vUn = occupancy({
+      timeline: unTL, slots: S.meta.slots, maxMs: maxMs,
+      makespan: un.sim.makespan_ms, done: S.workload.n,
+      name: "UNCHUNKED — a prefill runs alone (" + un.sim.iterations + " iterations)"
+    });
+    const vCh = occupancy({
+      timeline: chTL, slots: S.meta.slots, maxMs: maxMs,
+      makespan: ch.sim.makespan_ms, done: S.workload.n,
+      name: "CHUNKED — " + cp.budget + "-token budget, decodes scheduled first (" +
+            ch.sim.iterations + " iterations)"
+    });
+    host.appendChild(transport([vUn, vCh], maxMs, 11));
+    host.appendChild(el("div", { class: "panel", style: { marginBottom: "12px" } }, [vUn]));
+    host.appendChild(el("div", { class: "panel" }, [vCh]));
+    host.appendChild(el("p", { class: "small muted" },
+      "The chunked run has more iterations (" + ch.sim.iterations + " vs " +
+      un.sim.iterations + ") and each one is smaller. The blue is no longer a wall."));
+
+    /* ---- latency distributions ---- */
+    host.appendChild(el("h3", {}, "The two latency distributions"));
+    host.appendChild(el("p", { html:
+      "Inter-token latency is what a reader experiences as smoothness: the gap between one " +
+      "streamed token and the next. Here is every one of the " + un.stats.itl.n +
+      " gaps in each run, bucketed." }));
+
+    const hu = cp.itl_hist.unchunked, hc = cp.itl_hist.chunked;
+    const hmax = Math.max.apply(null, hu.counts.concat(hc.counts));
+    const grid = el("div", { class: "grid2" });
+    [["unchunked", hu, "var(--critical)"], ["chunked", hc, "var(--accent)"]].forEach(function (p) {
+      const box = el("div", { class: "panel" });
+      box.appendChild(el("h4", {}, p[0] + " — inter-token latency, ms"));
+      p[1].labels.forEach(function (lab, i) {
+        const n = p[1].counts[i];
+        box.appendChild(el("div", { class: "histrow" }, [
+          el("span", { class: "muted" }, lab),
+          el("div", { class: "histbar" }, [
+            el("i", { style: { width: (n / hmax * 100) + "%", background: p[2],
+                               minWidth: n ? "2px" : "0" } }),
+            el("span", {}, String(n))
+          ])
+        ]));
+      });
+      grid.appendChild(box);
+    });
+    host.appendChild(grid);
+
+    const tab = el("table", { class: "data" });
+    tab.appendChild(el("thead", {}, [el("tr", {}, [
+      el("th", {}, "statistic"), el("th", {}, "unchunked"),
+      el("th", {}, "chunked"), el("th", {}, "change")
+    ])]));
+    const tb = el("tbody", {});
+    function row(name, a, b, lowerIsBetter) {
+      const d = b - a;
+      const good = lowerIsBetter ? d < 0 : d > 0;
+      tb.appendChild(el("tr", {}, [
+        el("td", {}, name),
+        el("td", { class: "n" }, fms(a)),
+        el("td", { class: "n" }, fms(b)),
+        el("td", {
+          class: "n",
+          style: { color: Math.abs(d) < 1e-9 ? "inherit"
+                          : (good ? "var(--good)" : "var(--critical)") }
+        }, NN.fmtSigned(d, 1) + " ms  (" + xfmt(b / a) + ")")
+      ]));
+    }
+    row("inter-token latency, median", un.stats.itl.p50, ch.stats.itl.p50, true);
+    row("inter-token latency, p90", un.stats.itl.p90, ch.stats.itl.p90, true);
+    row("inter-token latency, p99", un.stats.itl.p99, ch.stats.itl.p99, true);
+    row("inter-token latency, worst", un.stats.itl.max, ch.stats.itl.max, true);
+    row("time to first token, mean", un.stats.ttft.mean, ch.stats.ttft.mean, true);
+    row("time to first token, p90", un.stats.ttft.p90, ch.stats.ttft.p90, true);
+    row("time to first token, longest prompt (" + longest + " tokens)",
+        cp.ttft_longest_prompt.unchunked_ms, cp.ttft_longest_prompt.chunked_ms, true);
+    tb.appendChild(el("tr", {}, [
+      el("td", {}, "throughput"),
+      el("td", { class: "n" }, NN.fmt(un.sim.throughput_tok_s, 1) + " tok/s"),
+      el("td", { class: "n" }, NN.fmt(ch.sim.throughput_tok_s, 1) + " tok/s"),
+      el("td", { class: "n" }, xfmt(ch.sim.throughput_tok_s / un.sim.throughput_tok_s))
+    ]));
+    tab.appendChild(tb);
+    host.appendChild(el("div", { class: "scrollx" }, [tab]));
+
+    const tl = cp.ttft_longest_prompt;
+    host.appendChild(NN.callout("why", "THE TRADEOFF, STATED HONESTLY",
+      "Chunking cuts the worst inter-token stall from " + fms(un.stats.itl.max) + " to " +
+      fms(ch.stats.itl.max) + " — a factor of " +
+      xfmt(un.stats.itl.max / ch.stats.itl.max) + " on the p99 tail — because no single " +
+      "iteration is ever longer than the token budget's worth of work. It is not free. The " +
+      longest + "-token prompt's own time to first token rises from " +
+      fms(tl.unchunked_ms) + " to " + fms(tl.chunked_ms) + " (" +
+      NN.fmtSigned(tl.delta_ms, 1) + " ms), because its prefill is now sharing every iteration " +
+      "with other people's decodes instead of monopolising the GPU. " +
+      "<br><br>Mean time to first token across the whole queue still <em>falls</em>, from " +
+      fms(un.stats.ttft.mean) + " to " + fms(ch.stats.ttft.mean) +
+      ", because everybody else stops queueing behind that monopoly. That is the real shape of " +
+      "the tradeoff: the request being chunked pays, and the fleet is paid."));
+  })();
+
+  /* ======================================================================
+     5 · WHY DECODE BATCHING IS NEARLY FREE
+     ====================================================================== */
+  (function free() {
+    const host = NN.$("#freeBody");
+    const db = S.decode_batching;
+
+    host.appendChild(el("p", { html:
+      "All of the above assumes the premise: putting more sequences in one step is close to " +
+      "free. Here is why, in bytes. A decode iteration reads the weights <b>once</b>, whatever " +
+      "the batch size — that is the whole reason decode is bandwidth-bound. It also reads each " +
+      "sequence's KV cache, and that term <em>is</em> per-sequence. So arithmetic intensity is" }));
+
+    host.appendChild(NN.formula({
+      rule: "intensity(B) = FLOPs ÷ bytes = (2 · params · B + attention) ÷ " +
+            "(weight_bytes + B · seq · bytes_per_token)",
+      sub: "weight_bytes = " + NN.bytes(db.weight_bytes) + " (fixed), " +
+           "bytes_per_token = " + (db.bytes_per_token / 1024) + " KiB (per sequence)",
+      cls: "weight"
+    }));
+
+    host.appendChild(el("p", { html:
+      "The numerator is linear in B and so is half the denominator. While the fixed weight term " +
+      "dominates the bytes, doubling the batch nearly doubles the intensity: the second sequence " +
+      "rides along on a weight read that was happening anyway. Once <code>B · seq · " +
+      "bytes_per_token</code> catches <code>weight_bytes</code>, that stops being true and the " +
+      "curve bends over towards its asymptote." }));
+
+    /* --- seq selector --- */
+    const tabs = el("div", { class: "seqtabs" });
+    const chartHost = el("div", { class: "panel" });
+    const infoHost = el("div", {});
+    let sel = 1;   /* default: the middle sequence length */
+
+    function intensityChart(e) {
+      const W = 680, H = 300, m = { t: 14, r: 14, b: 40, l: 56 };
+      const iw = W - m.l - m.r, ih = H - m.t - m.b;
+      const xs = e.rows.map(function (r) { return Math.log2(r.batch); });
+      const x0 = 0, x1 = Math.max.apply(null, xs);
+      const ymax = Math.max(db.ridge, e.asymptote) * 1.12;
+      const X = function (v) { return m.l + (v - x0) / (x1 - x0) * iw; };
+      const Y = function (v) { return m.t + ih - v / ymax * ih; };
+
+      const root = svg("svg", {
+        viewBox: "0 0 " + W + " " + H, width: "100%", height: H, class: "chart",
+        role: "img", "aria-label": "arithmetic intensity versus batch size"
+      });
+      for (let k = 0; k <= 5; k++) {
+        const v = ymax * k / 5, yy = Y(v);
+        root.appendChild(svg("line", { class: "gridline", x1: m.l, x2: m.l + iw, y1: yy, y2: yy }));
+        root.appendChild(svg("text", { x: m.l - 8, y: yy + 3.5, "text-anchor": "end" }))
+          .textContent = NN.fmt(v, 0);
+      }
+      e.rows.forEach(function (r) {
+        const t = svg("text", { x: X(Math.log2(r.batch)), y: m.t + ih + 16, "text-anchor": "middle" });
+        t.textContent = String(r.batch);
+        root.appendChild(t);
+      });
+      root.appendChild(svg("line", { class: "axis", x1: m.l, x2: m.l + iw, y1: m.t + ih, y2: m.t + ih }));
+      root.appendChild(svg("line", { class: "axis", x1: m.l, x2: m.l, y1: m.t, y2: m.t + ih }));
+      root.appendChild(svg("text", {
+        x: m.l + iw / 2, y: H - 6, "text-anchor": "middle"
+      })).textContent = "batch size (log scale)";
+      const yl = svg("text", {
+        x: -(m.t + ih / 2), y: 13, transform: "rotate(-90)", "text-anchor": "middle"
+      });
+      yl.textContent = "FLOP per byte"; root.appendChild(yl);
+
+      /* the ridge */
+      root.appendChild(svg("line", {
+        x1: m.l, x2: m.l + iw, y1: Y(db.ridge), y2: Y(db.ridge),
+        stroke: "var(--critical)", "stroke-width": 1.5, "stroke-dasharray": "6 4"
+      }));
+      root.appendChild(svg("text", {
+        x: m.l + iw - 4, y: Y(db.ridge) - 5, "text-anchor": "end", fill: "var(--critical)"
+      })).textContent = "ridge " + NN.fmt(db.ridge, 1) + " — compute-bound above this";
+
+      /* the asymptote */
+      root.appendChild(svg("line", {
+        x1: m.l, x2: m.l + iw, y1: Y(e.asymptote), y2: Y(e.asymptote),
+        stroke: "var(--ink-muted)", "stroke-width": 1, "stroke-dasharray": "2 4"
+      }));
+      root.appendChild(svg("text", {
+        x: m.l + 4, y: Y(e.asymptote) - 5, fill: "var(--ink-muted)"
+      })).textContent = "asymptote " + NN.fmt(e.asymptote, 1) +
+        " = 2·params ÷ KV bytes per sequence";
+
+      /* the curve */
+      const d = e.rows.map(function (r, i) {
+        return (i ? "L" : "M") + X(Math.log2(r.batch)).toFixed(2) + " " +
+               Y(r.intensity).toFixed(2);
+      }).join(" ");
+      root.appendChild(svg("path", {
+        class: "series", d: d, stroke: "var(--accent)", "stroke-width": 2.4,
+        "stroke-linejoin": "round"
+      }));
+      /* the linear ideal, for contrast: what intensity would do if the KV
+         term did not exist at all -- i.e. if batching really were free */
+      const slope = e.rows[0].intensity;             /* intensity at batch 1 */
+      const dIdeal = e.rows.map(function (r, i) {
+        return (i ? "L" : "M") + X(Math.log2(r.batch)).toFixed(2) + " " +
+               Y(Math.min(slope * r.batch, ymax)).toFixed(2);
+      }).join(" ");
+      root.appendChild(svg("path", {
+        class: "series", d: dIdeal, stroke: "var(--ink-muted)", "stroke-width": 1.2,
+        "stroke-dasharray": "3 3", opacity: .7
+      }));
+
+      e.rows.forEach(function (r) {
+        const c = svg("circle", {
+          cx: X(Math.log2(r.batch)), cy: Y(r.intensity), r: 3.4,
+          fill: r.bound === "compute" ? "var(--critical)" : "var(--accent)",
+          stroke: "var(--surface-1)", "stroke-width": 1.5
+        });
+        c.addEventListener("mousemove", function (ev) {
+          NN.tip.show("<div class='muted'>batch " + r.batch + "</div>" +
+            "<div><b>" + NN.fmt(r.intensity, 2) + "</b> FLOP/byte · " + r.bound + "-bound</div>" +
+            "<div class='muted'>KV is " + pc(r.kv_share) + " of the bytes read</div>" +
+            "<div class='muted'>" + pc(r.flops_utilisation, 2) + " of peak FLOPs</div>",
+            ev.clientX, ev.clientY);
+        });
+        c.addEventListener("mouseleave", function () { NN.tip.hide(); });
+        root.appendChild(c);
+      });
+
+      /* the crossover */
+      const bx = X(Math.log2(e.kv_crossover_batch));
+      root.appendChild(svg("line", {
+        x1: bx, x2: bx, y1: m.t, y2: m.t + ih,
+        stroke: "var(--warning)", "stroke-width": 1.5, "stroke-dasharray": "5 3"
+      }));
+      const lab = svg("text", { x: bx + 5, y: m.t + 12, fill: "var(--warning)" });
+      lab.textContent = "batch " + NN.fmt(e.kv_crossover_batch, 0) +
+        ": KV bytes = weight bytes";
+      root.appendChild(lab);
+
+      if (e.ridge_reachable) {
+        const rx = X(Math.log2(e.ridge_crossover_batch));
+        root.appendChild(svg("line", {
+          x1: rx, x2: rx, y1: m.t, y2: m.t + ih,
+          stroke: "var(--critical)", "stroke-width": 1.2, "stroke-dasharray": "2 3"
+        }));
+        const l2 = svg("text", { x: rx - 5, y: m.t + 26, fill: "var(--critical)", "text-anchor": "end" });
+        l2.textContent = "batch " + NN.fmt(e.ridge_crossover_batch, 0) + ": compute-bound";
+        root.appendChild(l2);
+      }
+      return root;
+    }
+
+    function renderInfo(e) {
+      infoHost.innerHTML = "";
+      infoHost.appendChild(NN.tiles([
+        { k: "context length", v: NN.count(e.seq), s: "tokens per sequence" },
+        { k: "KV per sequence", v: NN.bytes(e.kv_bytes_per_seq),
+          s: NN.count(e.seq) + " × " + (db.bytes_per_token / 1024) + " KiB", cls: "activation" },
+        { k: "KV = weights at", v: "batch " + NN.fmt(e.kv_crossover_batch, 0),
+          s: "the per-sequence term catches the fixed one" },
+        { k: "intensity ceiling", v: NN.fmt(e.asymptote, 1),
+          s: "FLOP/byte as batch → ∞" },
+        { k: "compute-bound at", v: e.ridge_reachable
+            ? "batch " + NN.fmt(e.ridge_crossover_batch, 0) : "never",
+          s: e.ridge_reachable ? "intensity reaches the ridge"
+            : "ceiling " + NN.fmt(e.asymptote, 1) + " < ridge " + NN.fmt(db.ridge, 1),
+          cls: e.ridge_reachable ? undefined : undefined }
+      ]));
+
+      /* byte split at a chosen batch — the memstrip is the four-class grammar:
+         weights are a weight, the KV cache is an activation. */
+      const rows = e.rows;
+      const slider = el("input", {
+        type: "range", min: "0", max: String(rows.length - 1), value: "5", step: "1",
+        style: { width: "100%", accentColor: "var(--weight)" },
+        "aria-label": "batch size"
+      });
+      const out = el("div", {});
+      function paint() {
+        const r = rows[Number(slider.value)];
+        out.innerHTML = "";
+        out.appendChild(el("div", { class: "occhead" }, [
+          el("span", { class: "nm" }, "batch " + r.batch),
+          el("span", { class: "st" },
+            NN.fmt(r.intensity, 2) + " FLOP/byte · " + r.bound + "-bound · " +
+            pc(r.flops_utilisation, 2) + " of peak FLOPs")
+        ]));
+        out.appendChild(NN.memstrip([
+          { cls: "weight", bytes: r.weight_bytes, label: "weights, read once" },
+          { cls: "activation", bytes: r.kv_bytes, label: "KV cache, per sequence" }
+        ]));
+        out.appendChild(el("p", { class: "small muted", style: { marginTop: "6px" } },
+          "Bytes moved per decode iteration: " + NN.bytes(r.weight_bytes) + " of weights + " +
+          NN.bytes(r.kv_bytes) + " of KV cache = " +
+          NN.bytes(r.weight_bytes + r.kv_bytes) + ". The KV cache is " + pc(r.kv_share) +
+          " of it. Adding one more sequence costs " + NN.bytes(e.kv_bytes_per_seq) +
+          " of extra reading and zero extra weight traffic."));
+      }
+      slider.addEventListener("input", paint);
+      const panel = el("div", { class: "panel", style: { marginTop: "12px" } }, [
+        el("h4", {}, "where the bytes go, at batch"), slider, out
+      ]);
+      paint();
+      infoHost.appendChild(panel);
+      infoHost.appendChild(NN.legend(["weight", "activation"]));
+    }
+
+    function select(i) {
+      sel = i;
+      NN.$$(".btn", tabs).forEach(function (b, k) { b.classList.toggle("on", k === i); });
+      chartHost.innerHTML = "";
+      chartHost.appendChild(intensityChart(db.by_seq[i]));
+      renderInfo(db.by_seq[i]);
+    }
+
+    db.by_seq.forEach(function (e, i) {
+      const b = el("button", { class: "btn" }, "seq " + NN.count(e.seq));
+      b.addEventListener("click", function () { select(i); });
+      tabs.appendChild(b);
+    });
+    host.appendChild(tabs);
+    host.appendChild(chartHost);
+    host.appendChild(el("p", { class: "small muted", html:
+      "Solid line: measured intensity from the cost model. Dotted grey: what it would be if " +
+      "batching were <em>perfectly</em> free — a straight line through the batch-1 point, i.e. " +
+      "if the KV cache cost nothing to re-read. The gap between them is the KV cache. " +
+      "The amber line marks the batch at which the two byte terms are equal; the red dashed " +
+      "line is the device ridge. Hover any point." }));
+    host.appendChild(infoHost);
+    select(sel);
+
+    /* the honest finding */
+    const mid = db.by_seq[1];
+    const short = db.by_seq[0];
+    const inf70 = I.batching;
+    const inf70last = inf70.by_seq[0].rows[inf70.by_seq[0].rows.length - 1];
+    host.appendChild(NN.callout("key", "BATCHING HAS A CEILING, AND GQA LOWERED IT",
+      "The curve does not rise forever. Its ceiling is <code>2 · params ÷ (seq × " +
+      "bytes_per_token)</code>, and for " + db.model + " at " + NN.count(mid.seq) +
+      " tokens of context that ceiling is <b>" + NN.fmt(mid.asymptote, 1) +
+      " FLOP/byte</b> — below the " + db.gpu + "'s ridge of " + NN.fmt(db.ridge, 1) +
+      ". No batch size makes that decode compute-bound. At " + NN.count(short.seq) +
+      " tokens the KV per sequence is " + xfmt(mid.kv_bytes_per_seq / short.kv_bytes_per_seq) +
+      " smaller and the ridge <em>is</em> reachable, at batch " +
+      NN.fmt(short.ridge_crossover_batch, 0) + ". " +
+      "<br><br>Bigger models push the ceiling back up, because the fixed weight term grows " +
+      "while the KV term does not: <code>infer.js</code> runs the same sweep for " +
+      inf70.model + " on " + inf70.gpu + " at " + NN.count(inf70.by_seq[0].seq) +
+      " tokens and reaches " + inf70last.bound + "-bound at batch " + inf70last.batch +
+      " (" + NN.fmt(inf70last.intensity, 1) + " FLOP/byte against a ridge of " +
+      NN.fmt(inf70.ridge, 1) + "). " + db.why));
+  })();
+
+  /* ======================================================================
+     6 · CLOSE
+     ====================================================================== */
+  (function close_() {
+    const host = NN.$("#closeBody");
+    const db = S.decode_batching;
+    const mid = db.by_seq[1];
+    const bd = S.allocator.budget;
+
+    host.appendChild(el("p", { html:
+      "Every scheduler on this page wants the same thing: more sequences resident at once. " +
+      "Continuous batching gets them by not wasting slots; chunked prefill gets them by not " +
+      "stalling the ones it has. Both then run into the same wall, and it is not a scheduling " +
+      "wall — it is an allocation one. At " + NN.count(mid.seq) + " tokens of context each " +
+      "resident sequence needs " + NN.bytes(mid.kv_bytes_per_seq) + " of KV cache, and a " +
+      NN.gibytes(bd.hbm_bytes) + " GPU holding " + NN.bytes(bd.weight_bytes) +
+      " of weights has " + NN.bytes(bd.kv_budget_bytes) + " left for all of it." }));
+
+    host.appendChild(NN.callout("mem", "THE SLOT IS ONLY HALF THE RESOURCE",
+      "A slot is free to schedule and expensive to fill. The scheduler can hand a slot back " +
+      "in one iteration; the allocator has to find " + NN.bytes(bd.reservation_bytes) +
+      " for it if it can only allocate contiguously, because it does not know how long the " +
+      "sequence will run. <a href=\"27-paged-attention.html\">Page 27</a> takes that apart: " +
+      "at this budget a contiguous allocator fits " + bd.concurrent_contiguous +
+      " concurrent sequences and a paged one fits " + bd.concurrent_paged + ", which is " +
+      xfmt(bd.ratio) + " — and every extra resident sequence is another free ride on the same " +
+      "weight read."));
+
+    host.appendChild(el("p", { class: "small muted", html:
+      "The " + T.param_names.length + "-parameter model from " +
+      "<a href=\"01-memory.html\">page 01</a> has the same structure and none of the pressure: " +
+      "its weights are " + NN.bytes(T.memory.by_class.weight.bytes_fp32) + ", its whole peak " +
+      "footprint is " + NN.bytes(T.memory.peak_bytes_fp32) + ", and a second inference would " +
+      "reuse the same weight read for free too. Batching is not a large-model trick; it is " +
+      "just that at " + NN.count(S.meta.model.params) + " parameters the weight read costs " +
+      NN.bytes(S.meta.weight_bytes) + " and you cannot afford to spend it on one token." }));
+  })();
+
+  NN.page("batching");
+})();
+</script>
+</body>
+</html>

@@ -325,10 +325,23 @@ def at_scale():
     for t in (1, 2, 4, 8, 16, 32):
         tp_only = 10 + 24 / t
         tp_sp = 34 / t
+        # NAMING MATTERS HERE. These are the COEFFICIENTS A + B/t and C/t
+        # from the formula s*b*h*(...), so their units are bytes per token
+        # per layer PER HIDDEN DIMENSION -- not bytes per token per layer.
+        # An earlier field name dropped the h, and a slide built on it came
+        # out 8192x low (8.52 MB where the answer is 69.8 GB). The audit
+        # caught it. The worked example below exists so nobody has to infer
+        # the units from a name again.
+        h_ref, s_ref, L_ref = 8192, 8192, 80        # Llama 3 70B shape
         rows.append({
             "tp": t,
-            "bytes_per_token_per_layer_tp_only": round(tp_only, 3),
-            "bytes_per_token_per_layer_tp_sp": round(tp_sp, 3),
+            "coeff_tp_only": round(tp_only, 3),
+            "coeff_tp_sp": round(tp_sp, 3),
+            "units": "bytes per token per layer per hidden dimension",
+            "worked_llama70b_gb_tp_only":
+                round(tp_only * s_ref * h_ref * L_ref / 1e9, 2),
+            "worked_llama70b_gb_tp_sp":
+                round(tp_sp * s_ref * h_ref * L_ref / 1e9, 2),
             "saving_pct": round(100 * (1 - tp_sp / tp_only), 1),
         })
     return {
@@ -348,6 +361,10 @@ def at_scale():
         "_source": "Korthikanti et al. 2022, 'Reducing Activation "
                    "Recomputation in Large Transformer Models', Table 2. "
                    "Coefficients quoted, not derived here.",
+        "worked_example": {"model": "Llama 3 70B", "s": 8192, "b": 1,
+                           "h": 8192, "layers": 80,
+                           "note": "batch 1. Multiply by batch for the real "
+                                   "figure."},
         "formula_tp_only": "s*b*h*(10 + 24/t) per layer",
         "formula_tp_sp": "s*b*h*(34/t) per layer",
         "table": rows,
@@ -431,10 +448,12 @@ def main():
     print(f"  sent per rank: TP {c['tp_total_sent']}  vs  TP+SP {c['sp_total_sent']}"
           f"   -> {'IDENTICAL' if c['identical'] else 'DIFFERENT'}")
     print()
-    print("  at scale (Korthikanti coefficients, bytes/token/layer):")
+    print("  at scale — coefficients are per token per layer PER HIDDEN DIM,")
+    print("  so the GB columns multiply by s=8192, h=8192, L=80 (Llama 3 70B, batch 1):")
     for r in d["at_scale"]["table"]:
-        print(f"    t={r['tp']:2d}   TP only {r['bytes_per_token_per_layer_tp_only']:6.2f}"
-              f"   TP+SP {r['bytes_per_token_per_layer_tp_sp']:6.2f}"
+        print(f"    t={r['tp']:2d}   coeff {r['coeff_tp_only']:6.2f} vs {r['coeff_tp_sp']:6.2f}"
+              f"   ->  {r['worked_llama70b_gb_tp_only']:7.1f} GB vs"
+              f" {r['worked_llama70b_gb_tp_sp']:6.1f} GB"
               f"   ({r['saving_pct']}% less)")
     print()
     print(f"  wrote {os.path.join(outdir, 'seqpar.js')}")

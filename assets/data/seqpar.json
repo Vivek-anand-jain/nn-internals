@@ -603,43 +603,69 @@
    "floor_includes": "LayerNorm output, dropout mask, and the residual stream"
   },
   "_source": "Korthikanti et al. 2022, 'Reducing Activation Recomputation in Large Transformer Models', Table 2. Coefficients quoted, not derived here.",
+  "worked_example": {
+   "model": "Llama 3 70B",
+   "s": 8192,
+   "b": 1,
+   "h": 8192,
+   "layers": 80,
+   "note": "batch 1. Multiply by batch for the real figure."
+  },
   "formula_tp_only": "s*b*h*(10 + 24/t) per layer",
   "formula_tp_sp": "s*b*h*(34/t) per layer",
   "table": [
    {
     "tp": 1,
-    "bytes_per_token_per_layer_tp_only": 34.0,
-    "bytes_per_token_per_layer_tp_sp": 34.0,
+    "coeff_tp_only": 34.0,
+    "coeff_tp_sp": 34.0,
+    "units": "bytes per token per layer per hidden dimension",
+    "worked_llama70b_gb_tp_only": 182.54,
+    "worked_llama70b_gb_tp_sp": 182.54,
     "saving_pct": 0.0
    },
    {
     "tp": 2,
-    "bytes_per_token_per_layer_tp_only": 22.0,
-    "bytes_per_token_per_layer_tp_sp": 17.0,
+    "coeff_tp_only": 22.0,
+    "coeff_tp_sp": 17.0,
+    "units": "bytes per token per layer per hidden dimension",
+    "worked_llama70b_gb_tp_only": 118.11,
+    "worked_llama70b_gb_tp_sp": 91.27,
     "saving_pct": 22.7
    },
    {
     "tp": 4,
-    "bytes_per_token_per_layer_tp_only": 16.0,
-    "bytes_per_token_per_layer_tp_sp": 8.5,
+    "coeff_tp_only": 16.0,
+    "coeff_tp_sp": 8.5,
+    "units": "bytes per token per layer per hidden dimension",
+    "worked_llama70b_gb_tp_only": 85.9,
+    "worked_llama70b_gb_tp_sp": 45.63,
     "saving_pct": 46.9
    },
    {
     "tp": 8,
-    "bytes_per_token_per_layer_tp_only": 13.0,
-    "bytes_per_token_per_layer_tp_sp": 4.25,
+    "coeff_tp_only": 13.0,
+    "coeff_tp_sp": 4.25,
+    "units": "bytes per token per layer per hidden dimension",
+    "worked_llama70b_gb_tp_only": 69.79,
+    "worked_llama70b_gb_tp_sp": 22.82,
     "saving_pct": 67.3
    },
    {
     "tp": 16,
-    "bytes_per_token_per_layer_tp_only": 11.5,
-    "bytes_per_token_per_layer_tp_sp": 2.125,
+    "coeff_tp_only": 11.5,
+    "coeff_tp_sp": 2.125,
+    "units": "bytes per token per layer per hidden dimension",
+    "worked_llama70b_gb_tp_only": 61.74,
+    "worked_llama70b_gb_tp_sp": 11.41,
     "saving_pct": 81.5
    },
    {
     "tp": 32,
-    "bytes_per_token_per_layer_tp_only": 10.75,
-    "bytes_per_token_per_layer_tp_sp": 1.062,
+    "coeff_tp_only": 10.75,
+    "coeff_tp_sp": 1.062,
+    "units": "bytes per token per layer per hidden dimension",
+    "worked_llama70b_gb_tp_only": 57.71,
+    "worked_llama70b_gb_tp_sp": 5.7,
     "saving_pct": 90.1
    }
   ],

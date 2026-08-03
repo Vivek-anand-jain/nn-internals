@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 34 MoE Inference</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* page-local layout only; every colour comes from design.css custom properties */
+.panel { background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 8px; padding: 12px 14px; }
+.panel h4 { margin: 0 0 9px; font-family: var(--mono); font-size: .68rem; letter-spacing: .13em;
+            text-transform: uppercase; color: var(--ink-muted); font-weight: 700; }
+.hint { font-size: .7rem; color: var(--ink-muted); font-family: var(--mono); line-height: 1.55; }
+
+.ctlrow { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; margin: 12px 0; }
+.ctlrow label { font-family: var(--mono); font-size: .74rem; color: var(--ink-2);
+                display: flex; align-items: center; gap: 9px; }
+.ctlrow input[type="range"] { width: 220px; }
+.kv { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+.rchart { width: 100%; display: block; }
+.rchart .gridline { stroke: var(--grid); stroke-width: 1; }
+.rchart .axis { stroke: var(--hairline); stroke-width: 1; }
+.rchart text { fill: var(--ink-muted); font-family: var(--mono); font-size: 10px; }
+.rchart .ser { fill: none; stroke-width: 2.4; stroke-linejoin: round; stroke-linecap: round; }
+.rchart .ser.dense { stroke-dasharray: 6 4; }
+.rchart .ridge { stroke: var(--critical); stroke-width: 1.6; stroke-dasharray: 4 4; }
+.rchart .pick { fill: none; stroke: var(--ink); stroke-width: 2; }
+
+.serlegend { display: flex; flex-wrap: wrap; gap: 18px; font-family: var(--mono); font-size: .72rem;
+             color: var(--ink-2); margin: 4px 0 12px; }
+.serlegend i { display: inline-block; width: 26px; height: 0; border-top-width: 3px;
+               border-top-style: solid; vertical-align: 4px; margin-right: 7px; }
+
+.scatterbox { display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); gap: 6px; margin: 10px 0; }
+.ecell { border: 1px solid var(--hairline); border-radius: 6px; background: var(--surface-2);
+         padding: 6px 5px; text-align: center; font-family: var(--mono); }
+.ecell .en { font-size: .6rem; color: var(--ink-muted); }
+.ecell .ev { font-size: .95rem; font-weight: 700; }
+.ecell.hit { border-color: var(--activation); background: var(--activation-w); }
+.ecell.hit .ev { color: var(--activation); }
+.ecell.gemv { border-style: dashed; }
+.ecell.cold { opacity: .45; }
+
+.vtable { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .76rem; margin: 8px 0; }
+.vtable td, .vtable th { padding: 5px 9px; border-bottom: 1px solid var(--hairline-2); text-align: left; white-space: nowrap; }
+.vtable td.r, .vtable th.r { text-align: right; font-variant-numeric: tabular-nums; }
+.vtable th { font-size: .61rem; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-muted); }
+.vtable tr.now td { background: var(--surface-3); }
+.vtable td.bad { color: var(--critical); }
+.vtable td.good { color: var(--good); }
+
+.residbar { display: flex; height: 30px; border-radius: 7px; overflow: hidden;
+            border: 1px solid var(--hairline); margin: 10px 0 4px; }
+.residbar .seg { display: flex; align-items: center; justify-content: center; font-family: var(--mono);
+                 font-size: .68rem; font-weight: 700; color: #fff; overflow: hidden; white-space: nowrap; }
+.residbar .seg.touched { background: var(--weight); }
+.residbar .seg.idle { color: var(--weight);
+    background: repeating-linear-gradient(135deg, var(--weight-w) 0 7px, transparent 7px 14px);
+    border-left: 1px dashed var(--weight); }
+.reslegend { display: flex; flex-wrap: wrap; gap: 16px; font-family: var(--mono); font-size: .7rem; color: var(--ink-2); }
+.reslegend .sw { display: inline-block; width: 22px; height: 11px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; }
+.reslegend .sw.touched { background: var(--weight); }
+.reslegend .sw.idle { background: repeating-linear-gradient(135deg, var(--weight-w) 0 5px, transparent 5px 10px);
+                      border: 1px dashed var(--weight); }
+
+.approach { border: 1px solid var(--hairline); border-left: 4px dotted var(--accent); border-radius: 7px;
+            background: var(--surface-2); padding: 10px 13px; margin: 9px 0; }
+.approach .h { font-family: var(--mono); font-size: .78rem; font-weight: 700; }
+.approach .b { font-size: .85rem; color: var(--ink-2); margin-top: 4px; line-height: 1.55; }
+.notsim { display: inline-block; font-family: var(--mono); font-size: .55rem; letter-spacing: .08em;
+          text-transform: uppercase; font-weight: 700; padding: 1px 7px; border-radius: 99px;
+          border: 1px dotted var(--accent); color: var(--accent); margin-left: 8px; vertical-align: middle; }
+table.data td.wrap, table.data th.wrap { white-space: normal; }
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 34</div>
+    <h1>MoE Inference</h1>
+    <p class="lede">Training and inference are different problems for an MoE, not two views of one
+      problem. In training a large batch hits every expert and grouping produces real GEMMs. In
+      decode the batch is small and it <em>scatters</em> — each expert may see one or two tokens,
+      and you still read its entire weight matrix to serve them. The sparsity that bought capacity
+      buys nothing at all here.</p>
+    <noscript><p class="callout warn">This page derives every number in the browser from
+      <code>assets/data/moe.js</code> and <code>assets/data/infer.js</code>. With JavaScript
+      disabled you will see an empty shell.</p></noscript>
+  </div>
+
+  <section class="block" id="different">
+    <h2>1 · Why decode is a different problem</h2>
+    <div id="diffBody"></div>
+  </section>
+
+  <section class="block" id="collapse">
+    <h2>2 · The intensity collapse</h2>
+    <div id="collapseBody"></div>
+  </section>
+
+  <section class="block" id="memory">
+    <h2>3 · The memory problem</h2>
+    <div id="memBody"></div>
+  </section>
+
+  <section class="block" id="a2adecode">
+    <h2>4 · The all-to-all in decode, honestly</h2>
+    <div id="a2aBody"></div>
+  </section>
+
+  <section class="block" id="ties">
+    <h2>5 · Where this sits</h2>
+    <div id="tiesBody"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/parallel.js"></script>
+<script src="../assets/data/infer.js"></script>
+<script src="../assets/data/moe.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T = NN.T;
+  const M = window.MOE;
+  const INFER = window.INFER;
+  const P = window.PARALLEL;
+  const el = NN.el, fmt = NN.fmt, svg = NN.svg;
+
+  if (!M || !INFER) {
+    document.querySelector("#diffBody").appendChild(NN.callout("warn",
+      "data did not load",
+      "Run <code>python3 code/moe_toy.py</code> and <code>python3 code/inference_toy.py</code>."));
+    NN.page("moeinfer");
+    return;
+  }
+
+  const MET = M.meta;
+  const NT = MET.n_tokens, NE = MET.n_experts, K = MET.top_k, DM = MET.d_model;
+  const PEX = M.per_expert, ACC = M.accounting, LB = M.load_balance, XP = M.expert_parallel;
+  /* the sparsest real model in MOE.accounting, found rather than indexed */
+  const DSV = ACC.real.reduce(function (a, b) { return b.sparsity > a.sparsity ? b : a; });
+  const INF = M.inference, ROWS = INF.rows;
+  const BF16 = T.memory.dtype_bytes.bf16;
+
+  const RIDGE = INFER.batching.ridge;
+  const RGPU  = INFER.batching.gpu;
+  const DENSE_MODEL = INFER.batching.model;
+  const DENSE_ROWS = INFER.batching.by_seq[0].rows;
+  const DENSE_SEQ  = INFER.batching.by_seq[0].seq;
+
+  /* the shape of the modelled MoE layer, recovered from the rows themselves */
+  const NEXP_INF = Math.max.apply(null, ROWS.map(function (r) { return r.experts_touched; }));
+  const TOPK_INF = ROWS[0].pairs / ROWS[0].batch;
+  const EXPERT_BYTES = ROWS[0].bytes_read / ROWS[0].experts_touched;
+  const EXPERT_PARAMS = EXPERT_BYTES / BF16;
+
+  function tokLabel(t) { return "t" + t + " “" + MET.tokens[t] + "”"; }
+
+  /* ==================================================================== */
+  /*  1 · TRAINING BATCH vs DECODE BATCH                                  */
+  /* ==================================================================== */
+  (function () {
+    const host = document.querySelector("#diffBody");
+
+    host.appendChild(el("p", { html:
+      "<a href=\"32-moe.html\">Page 32</a> showed why grouping is what makes an MoE fast: gather " +
+      "each expert's tokens into one block and run a single matmul over the block. That argument " +
+      "has a hidden premise — <b>that the blocks are big</b>. It holds in training, where a batch " +
+      "is thousands of tokens and every expert gets a healthy group. It fails in decode." }));
+
+    host.appendChild(el("p", { html:
+      "Watch it fail on the toy. " + NT + " tokens over " + NE + " experts at top-" + K +
+      " produced groups of <span class=\"kv\">[" +
+      PEX.map(function (p) { return p.n_tokens; }).join(", ") + "]</span>." }));
+
+    const box = el("div", { class: "scatterbox" });
+    PEX.forEach(function (p) {
+      box.appendChild(el("div", {
+        class: "ecell " + (p.n_tokens === 0 ? "cold" : "hit") + (p.n_tokens === 1 ? " gemv" : "")
+      }, [
+        el("div", { class: "en" }, "Expert " + p.expert),
+        el("div", { class: "ev" }, String(p.n_tokens)),
+        el("div", { class: "en" }, p.n_tokens === 0 ? "never read"
+          : p.n_tokens === 1 ? "GEMV (dashed)" : p.n_tokens + "×" + DM + " GEMM")
+      ]));
+    });
+    host.appendChild(box);
+    host.appendChild(el("div", { class: "hint" },
+      "Dashed border marks a group of one — a matrix-vector product wearing a matmul's API. " +
+      "Expert " + PEX.map(function (p) { return p.n_tokens; }).indexOf(Math.min.apply(null,
+        PEX.map(function (p) { return p.n_tokens; }))) +
+      " reads all " + ACC.toy.params_per_expert + " of its parameters to serve " +
+      Math.min.apply(null, PEX.map(function (p) { return p.n_tokens; })) + " token(s)."));
+
+    const tbl = el("table", { class: "data" });
+    tbl.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", { class: "wrap" }, ""), el("th", { class: "wrap" }, "training step"),
+      el("th", { class: "wrap" }, "decode step")
+    ])));
+    const tb = el("tbody");
+    function row(k, a, b) {
+      tb.appendChild(el("tr", {}, [el("td", { class: "wrap" }, k),
+        el("td", { class: "wrap", html: a }), el("td", { class: "wrap", html: b })]));
+    }
+    row("tokens in flight", "batch × sequence — thousands to millions",
+      "batch × <b>1</b> — one new token per sequence, by definition");
+    row("group size per expert",
+      "large; a real GEMM with an <code>m</code> worth optimising",
+      "one or two rows; a GEMV that reads a whole weight matrix");
+    row("what dominates", "arithmetic — you are near the compute roof",
+      "weight reads — you are on the memory roof and nowhere near the ridge");
+    row("what sparsity buys",
+      "real: " + fmt(DSV.sparsity, 2) + "× fewer FLOPs per token on " + DSV.name,
+      "nothing: you still read " + TOPK_INF + " whole experts per token");
+    row("capacity / dropping",
+      "a live concern — " + LB.n_dropped + " of " + (NT * K) + " slots dropped in the toy",
+      "usually disabled — dropping a user's token to save a buffer is not a trade you can make");
+    row("the collective",
+      XP.collectives_per_layer.length * 2 + " all-to-alls per MoE layer per step, bandwidth-bound",
+      XP.collectives_per_layer.length + " per layer per <b>token</b>, latency-bound (§4)");
+    tbl.appendChild(tb);
+    host.appendChild(el("div", { class: "scrollx" }, tbl));
+
+    host.appendChild(NN.callout("key", "THE ONE-SENTENCE VERSION",
+      "<p>An MoE has the <b>latency characteristics of its active parameter count</b> and the " +
+      "<b>memory footprint of its total parameter count</b>. In training, where you are compute-bound, " +
+      "that is an excellent deal. In decode, where you are memory-bound, you have kept the cost and " +
+      "given up the benefit.</p>"));
+  })();
+
+  /* ==================================================================== */
+  /*  2 · THE INTENSITY COLLAPSE                                          */
+  /* ==================================================================== */
+  (function () {
+    const host = document.querySelector("#collapseBody");
+
+    host.appendChild(el("p", { html:
+      "The model is <b>" + INF.model + "</b> — " + NEXP_INF + " experts, top-" + TOPK_INF +
+      ", each expert " + NN.count(EXPERT_PARAMS) + " parameters, " + NN.bytes(EXPERT_BYTES) +
+      " in bf16. Arithmetic intensity is FLOPs divided by bytes moved, the quantity " +
+      "<a href=\"24-prefill-decode.html\">page 24</a> introduced. Here it has a startlingly simple " +
+      "closed form." }));
+
+    host.appendChild(NN.formula({
+      rule: "intensity = FLOPs / bytes = (2 · p<sub>expert</sub> · pairs) / (experts_touched · p<sub>expert</sub> · " + BF16 + ")",
+      sub: "the expert size cancels, and so does 2 vs bf16's " + BF16 + " bytes",
+      result: "pairs / experts_touched  =  average tokens per expert", cls: "activation"
+    }));
+
+    host.appendChild(el("p", { html:
+      "So the intensity column and the average-tokens-per-expert column in the table below are the " +
+      "same column. That identity is the whole story: <b>arithmetic intensity for an MoE decode " +
+      "layer is exactly how many tokens each expert you woke up had to serve.</b> At batch 1 with " +
+      "top-" + TOPK_INF + " you wake " + ROWS[0].experts_touched + " experts and each serves one " +
+      "token, so intensity is " + fmt(ROWS[0].intensity, 3) + " FLOP/byte." }));
+
+    /* ---------------- the chart ---------------- */
+    const CW = 880, CH = 360, MG = { t: 20, r: 22, b: 46, l: 62 };
+    const iw = CW - MG.l - MG.r, ih = CH - MG.t - MG.b;
+
+    const moePts = ROWS.map(function (r) { return [r.batch, r.intensity]; });
+    const denPts = DENSE_ROWS.map(function (r) { return [r.batch, r.intensity]; });
+
+    const xs = moePts.concat(denPts).map(function (p) { return p[0]; });
+    const lx0 = Math.log10(Math.min.apply(null, xs));
+    const lx1 = Math.log10(Math.max.apply(null, xs));
+    const ymaxV = Math.max(RIDGE, Math.max.apply(null, moePts.concat(denPts).map(function (p) { return p[1]; })));
+    const ly0 = Math.log10(0.7), ly1 = Math.log10(ymaxV * 1.6);
+    const XS = function (v) { return MG.l + (Math.log10(v) - lx0) / (lx1 - lx0) * iw; };
+    const YS = function (v) { return MG.t + ih - (Math.log10(v) - ly0) / (ly1 - ly0) * ih; };
+
+    const chart = svg("svg", { class: "rchart", viewBox: "0 0 " + CW + " " + CH,
+      width: "100%", height: CH, role: "img" });
+
+    /* y gridlines at decades */
+    [1, 10, 100].forEach(function (v) {
+      if (v < Math.pow(10, ly0) || v > Math.pow(10, ly1)) return;
+      chart.appendChild(svg("line", { class: "gridline", x1: MG.l, x2: MG.l + iw, y1: YS(v), y2: YS(v) }));
+      const t = svg("text", { x: MG.l - 9, y: YS(v) + 3.5, "text-anchor": "end" });
+      t.textContent = String(v); chart.appendChild(t);
+    });
+    /* x ticks at the actual batch sizes we have rows for */
+    ROWS.forEach(function (r) {
+      chart.appendChild(svg("line", { class: "gridline", x1: XS(r.batch), x2: XS(r.batch),
+        y1: MG.t, y2: MG.t + ih, opacity: .5 }));
+      const t = svg("text", { x: XS(r.batch), y: MG.t + ih + 17, "text-anchor": "middle" });
+      t.textContent = String(r.batch); chart.appendChild(t);
+    });
+    chart.appendChild(svg("line", { class: "axis", x1: MG.l, x2: MG.l + iw, y1: MG.t + ih, y2: MG.t + ih }));
+    chart.appendChild(svg("line", { class: "axis", x1: MG.l, x2: MG.l, y1: MG.t, y2: MG.t + ih }));
+    const xl = svg("text", { x: MG.l + iw / 2, y: CH - 6, "text-anchor": "middle" });
+    xl.textContent = "batch size (log)"; chart.appendChild(xl);
+    const yl = svg("text", { x: -(MG.t + ih / 2), y: 14, transform: "rotate(-90)", "text-anchor": "middle" });
+    yl.textContent = "arithmetic intensity, FLOP/byte (log)"; chart.appendChild(yl);
+
+    /* the ridge */
+    chart.appendChild(svg("line", { class: "ridge", x1: MG.l, x2: MG.l + iw, y1: YS(RIDGE), y2: YS(RIDGE) }));
+    const rt = svg("text", { x: MG.l + iw - 4, y: YS(RIDGE) - 6, "text-anchor": "end",
+      fill: "var(--critical)" });
+    rt.textContent = RGPU + " ridge = " + fmt(RIDGE, 2) + " FLOP/byte — compute-bound above this line";
+    chart.appendChild(rt);
+
+    function path(pts) {
+      return pts.map(function (p, i) {
+        return (i ? "L" : "M") + XS(p[0]).toFixed(2) + " " + YS(p[1]).toFixed(2);
+      }).join(" ");
+    }
+    chart.appendChild(svg("path", { class: "ser dense", d: path(denPts), stroke: "var(--weight)" }));
+    chart.appendChild(svg("path", { class: "ser", d: path(moePts), stroke: "var(--activation)" }));
+
+    denPts.forEach(function (p) {
+      chart.appendChild(svg("circle", { cx: XS(p[0]), cy: YS(p[1]), r: 2.6, fill: "var(--weight)" }));
+    });
+    const moeDots = moePts.map(function (p) {
+      const c = svg("circle", { cx: XS(p[0]), cy: YS(p[1]), r: 4, fill: "var(--activation)",
+        stroke: "var(--surface-1)", "stroke-width": 2 });
+      chart.appendChild(c);
+      return c;
+    });
+    const picker = svg("circle", { class: "pick", cx: XS(moePts[0][0]), cy: YS(moePts[0][1]), r: 9 });
+    chart.appendChild(picker);
+
+    chart.addEventListener("mousemove", function (e) {
+      const r = chart.getBoundingClientRect();
+      const px = (e.clientX - r.left) / r.width * CW;
+      if (px < MG.l || px > MG.l + iw) { NN.tip.hide(); return; }
+      const bv = Math.pow(10, lx0 + (px - MG.l) / iw * (lx1 - lx0));
+      function nearest(pts) {
+        let best = pts[0], bd = Infinity;
+        pts.forEach(function (p) {
+          const d = Math.abs(Math.log10(p[0]) - Math.log10(bv));
+          if (d < bd) { bd = d; best = p; }
+        });
+        return best;
+      }
+      const a = nearest(moePts), b = nearest(denPts);
+      NN.tip.show(
+        "<div class='muted'>nearest batch</div>" +
+        "<div><span style='color:var(--activation)'>●</span> MoE, batch " + a[0] +
+        " &nbsp;<b>" + fmt(a[1], 3) + "</b> FLOP/byte &nbsp;(" +
+        fmt(a[1] / RIDGE * 100, 2) + "% of peak)</div>" +
+        "<div><span style='color:var(--weight)'>●</span> dense " + DENSE_MODEL + ", batch " + b[0] +
+        " &nbsp;<b>" + fmt(b[1], 3) + "</b> FLOP/byte &nbsp;(" +
+        fmt(b[1] / RIDGE * 100, 2) + "% of peak)</div>", e.clientX, e.clientY);
+    });
+    chart.addEventListener("mouseleave", function () { NN.tip.hide(); });
+
+    host.appendChild(chart);
+    host.appendChild(el("div", { class: "serlegend" }, [
+      el("span", {}, [el("i", { style: { borderTopColor: "var(--activation)" } }),
+        "MoE decode — " + INF.model]),
+      el("span", {}, [el("i", { style: { borderTopColor: "var(--weight)", borderTopStyle: "dashed" } }),
+        "dense decode — " + DENSE_MODEL + " at seq " + DENSE_SEQ + " (dashed)"]),
+      el("span", {}, [el("i", { style: { borderTopColor: "var(--critical)", borderTopStyle: "dashed" } }),
+        RGPU + " ridge " + fmt(RIDGE, 2)])
+    ]));
+
+    /* ---------------- the slider ---------------- */
+    const sl = el("input", { type: "range", min: "0", max: String(ROWS.length - 1), step: "1", value: "0" });
+    const slOut = el("span", { class: "kv" }, "");
+    host.appendChild(el("div", { class: "ctlrow" }, [
+      el("label", {}, ["batch", sl, slOut]),
+      el("span", { class: "hint" }, "drag to walk the MoE curve; hover the chart to compare both")
+    ]));
+
+    const detail = el("div");
+    host.appendChild(detail);
+
+    /* full table */
+    const tbl = el("table", { class: "vtable" });
+    tbl.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", { class: "r" }, "batch"), el("th", { class: "r" }, "(tok,exp) pairs"),
+      el("th", { class: "r" }, "experts woken"), el("th", { class: "r" }, "avg tok/expert"),
+      el("th", { class: "r" }, "bytes read"), el("th", { class: "r" }, "FLOPs"),
+      el("th", { class: "r" }, "intensity"), el("th", { class: "r" }, "% of peak")
+    ])));
+    const tbody = el("tbody");
+    const trs = ROWS.map(function (r) {
+      const frac = r.intensity / RIDGE;
+      const tr = el("tr", {}, [
+        el("td", { class: "r" }, String(r.batch)),
+        el("td", { class: "r" }, NN.count(r.pairs)),
+        el("td", { class: "r" }, String(r.experts_touched) + " / " + NEXP_INF),
+        el("td", { class: "r" }, fmt(r.avg_tokens_per_expert, 2)),
+        el("td", { class: "r v-weight" }, NN.bytes(r.bytes_read)),
+        el("td", { class: "r v-activation" }, NN.count(r.flops)),
+        el("td", { class: "r" }, fmt(r.intensity, 3)),
+        el("td", { class: "r " + (frac >= 1 ? "good" : "bad") }, fmt(frac * 100, 2) + "%")
+      ]);
+      tbody.appendChild(tr);
+      return tr;
+    });
+    tbl.appendChild(tbody);
+    host.appendChild(el("div", { class: "scrollx" }, tbl));
+
+    function pick(i) {
+      const r = ROWS[i];
+      slOut.textContent = "= " + r.batch;
+      picker.setAttribute("cx", XS(r.batch));
+      picker.setAttribute("cy", YS(r.intensity));
+      moeDots.forEach(function (d, k) { d.setAttribute("r", k === i ? 5.5 : 4); });
+      trs.forEach(function (tr, k) { tr.classList.toggle("now", k === i); });
+
+      const saturated = r.experts_touched >= NEXP_INF;
+      detail.innerHTML = "";
+      const left = el("div", { class: "panel" }, [
+        el("h4", {}, "batch " + r.batch + " — what actually moves"),
+        NN.formula({
+          rule: "bytes = experts_woken · p<sub>expert</sub> · " + BF16,
+          sub: r.experts_touched + " · " + NN.count(EXPERT_PARAMS) + " · " + BF16,
+          result: NN.bytes(r.bytes_read), cls: "weight"
+        }),
+        NN.formula({
+          rule: "FLOPs = 2 · p<sub>expert</sub> · pairs",
+          sub: "2 · " + NN.count(EXPERT_PARAMS) + " · " + NN.count(r.pairs),
+          result: NN.count(r.flops), cls: "activation"
+        }),
+        NN.formula({
+          rule: "intensity = pairs / experts_woken",
+          sub: NN.count(r.pairs) + " / " + r.experts_touched,
+          result: fmt(r.intensity, 3) + " FLOP/byte", cls: "activation"
+        })
+      ]);
+      const right = el("div", { class: "panel" }, [
+        el("h4", {}, "against the " + RGPU + " roof"),
+        NN.tiles([
+          { k: "intensity", v: fmt(r.intensity, 2), cls: "activation", s: "FLOP/byte" },
+          { k: "ridge", v: fmt(RIDGE, 2), s: RGPU },
+          { k: "fraction of peak FLOPs", v: fmt(r.intensity / RIDGE * 100, 2) + "%",
+            s: r.intensity < RIDGE ? "memory-bound" : "compute-bound" }
+        ]),
+        el("div", { class: "hint" }, saturated
+          ? "Every one of the " + NEXP_INF + " experts is already awake. Bytes read have stopped " +
+            "growing, so from here each extra token is nearly free — intensity climbs linearly, " +
+            "exactly like a dense model's does."
+          : "Only " + r.experts_touched + " of " + NEXP_INF + " experts are awake, and each new " +
+            "token wakes " + TOPK_INF + " more. Bytes and FLOPs grow together, so intensity does " +
+            "not move at all. Batching is buying you nothing yet."),
+        el("div", { class: "hint" },
+          "at " + fmt(r.intensity, 3) + " FLOP/byte you would need " +
+          fmt(RIDGE / r.intensity, 1) + "× more arithmetic per byte to reach the roof")
+      ]);
+      detail.appendChild(el("div", { class: "grid2" }, [left, right]));
+    }
+    sl.addEventListener("input", function () { pick(parseInt(sl.value, 10)); });
+    pick(0);
+
+    /* the honest reading of INF.why */
+    const sat = ROWS.filter(function (r) { return r.experts_touched >= NEXP_INF; })[0];
+    host.appendChild(NN.callout("why", "BATCHING HELPS MORE HERE — UNTIL IT DOESN'T",
+      "<p>" + INF.why + "</p>" +
+      "<p>Read that against the table. Below batch " + sat.batch + " every extra token wakes " +
+      TOPK_INF + " more experts, so bytes and FLOPs rise together and intensity is pinned at " +
+      fmt(ROWS[0].intensity, 3) + ". At batch " + sat.batch + " all " + NEXP_INF +
+      " experts are awake; past it the bytes stop growing and intensity rises linearly with batch — " +
+      "which is precisely dense-model behaviour (<a href=\"26-batching.html\">page 26</a>). " +
+      "The MoE spends the first " + sat.batch + " tokens of batching buying nothing, then behaves " +
+      "like a dense model with " + fmt(EXPERT_PARAMS * NEXP_INF / (EXPERT_PARAMS * TOPK_INF), 0) +
+      "× the weights.</p>" +
+      "<p class=\"hint\">One correction to the prose above: the generator's rows put batch-1 " +
+      "intensity at <b>" + fmt(ROWS[0].intensity, 3) + "</b> FLOP/byte, not 2. The arithmetic is " +
+      "in the panel — 2 FLOPs per parameter over " + BF16 + " bytes per bf16 parameter cancel " +
+      "exactly, leaving intensity = tokens per expert. " + fmt(ROWS[0].intensity / RIDGE * 100, 2) +
+      "% of peak rather than 1%; the conclusion is if anything slightly worse than stated.</p>"));
+
+    /* where the dense curve is at the same batch */
+    const dAt = {};
+    DENSE_ROWS.forEach(function (r) { dAt[r.batch] = r.intensity; });
+    const common = ROWS.filter(function (r) { return dAt[r.batch] !== undefined; });
+    if (common.length) {
+      const ct = el("table", { class: "vtable" });
+      ct.appendChild(el("thead", {}, el("tr", {}, [
+        el("th", { class: "r" }, "batch"),
+        el("th", { class: "r" }, "MoE intensity"),
+        el("th", { class: "r" }, "dense " + DENSE_MODEL),
+        el("th", { class: "r" }, "MoE penalty")
+      ])));
+      const cb = el("tbody");
+      common.forEach(function (r) {
+        cb.appendChild(el("tr", {}, [
+          el("td", { class: "r" }, String(r.batch)),
+          el("td", { class: "r v-activation" }, fmt(r.intensity, 3)),
+          el("td", { class: "r v-weight" }, fmt(dAt[r.batch], 3)),
+          el("td", { class: "r" }, fmt(dAt[r.batch] / r.intensity, 2) + "× worse")
+        ]));
+      });
+      ct.appendChild(cb);
+      host.appendChild(el("h3", {}, "Against a dense model on the same GPU"));
+      host.appendChild(el("div", { class: "scrollx" }, ct));
+      host.appendChild(el("div", { class: "hint" },
+        "Both curves start at " + fmt(ROWS[0].intensity, 1) + " — at batch 1 every model reads all " +
+        "the weights it needs to produce one token. They separate because the dense model's byte " +
+        "count is fixed while the MoE's keeps growing with the batch until the experts run out."));
+    }
+  })();
+
+  /* ==================================================================== */
+  /*  3 · THE MEMORY PROBLEM                                              */
+  /* ==================================================================== */
+  (function () {
+    const host = document.querySelector("#memBody");
+
+    const dsv = ACC.real.filter(function (r) {
+      return r.n_experts === Math.max.apply(null, ACC.real.map(function (q) { return q.n_experts; }));
+    })[0];
+    const dense = ACC.real.filter(function (r) { return r.sparsity === 1; })[0];
+    const heldB = dsv.mlp_params_total * BF16;
+    const actB = dsv.mlp_params_active * BF16;
+    const capBytes = 80 * Math.pow(2, 30);       /* the "80GB" in the H100's name, binary */
+
+    host.appendChild(el("p", { html:
+      "The router's answer is not known until the token arrives, so every expert has to be somewhere " +
+      "a GPU can reach it before the layer runs. Sparsity does not shrink the resident set; it only " +
+      "shrinks the read per token — and §2 just showed that at small batch even that saving does not " +
+      "convert into speed." }));
+
+    const strip = el("div", { class: "residbar" }, [
+      el("div", { class: "seg touched", style: { flexGrow: String(actB) } }, NN.bytes(actB)),
+      el("div", { class: "seg idle", style: { flexGrow: String(heldB - actB) } }, NN.bytes(heldB - actB))
+    ]);
+    host.appendChild(strip);
+    host.appendChild(el("div", { class: "reslegend" }, [
+      el("span", {}, [el("i", { class: "sw touched" }),
+        "read per token — " + NN.count(dsv.mlp_params_active) + " params, " + NN.bytes(actB)]),
+      el("span", {}, [el("i", { class: "sw idle" }),
+        "resident, unread — " + NN.count(dsv.mlp_params_total - dsv.mlp_params_active) +
+        " params, " + NN.bytes(heldB - actB) + " (hatched, not a fifth class)"])
+    ]));
+    host.appendChild(el("div", { class: "hint" },
+      dsv.name + ", MLP parameters only, bf16. " + dsv.note + "."));
+
+    host.appendChild(NN.tiles([
+      { k: "resident MLP weights", v: NN.bytes(heldB), cls: "weight",
+        s: NN.count(dsv.mlp_params_total) + " params" },
+      { k: "read per token", v: NN.bytes(actB), cls: "weight",
+        s: fmt(dsv.sparsity, 2) + "× less than resident" },
+      { k: "GPUs just to hold it", v: String(Math.ceil(heldB / capBytes)),
+        s: RGPU + " at " + NN.gibytes(capBytes) + " = " + NN.bytes(capBytes) + " each" },
+      { k: "a dense model of equal speed", v: NN.bytes(actB), cls: "weight",
+        s: "same per-token reads, " + Math.ceil(actB / capBytes) + " GPU(s) to hold" }
+    ]));
+
+    host.appendChild(el("p", { html:
+      "That is the trade written plainly. To serve a model whose decode latency is set by " +
+      NN.count(dsv.mlp_params_active) + " parameters, you provision HBM for " +
+      NN.count(dsv.mlp_params_total) + " — " + Math.ceil(heldB / capBytes) + " " + RGPU +
+      "s of weights alone, before the KV cache (<a href=\"25-kv-cache.html\">page 25</a>), before " +
+      "activations, before any headroom. Those GPUs are bought for their <i>capacity</i> and their " +
+      "compute sits idle, which is the exact inversion of what page 24 says decode is short of." }));
+
+    host.appendChild(el("h3", {}, "Approaches people take"));
+    host.appendChild(el("p", { class: "hint" },
+      "None of the following is simulated on this site. They are named here because a reader who " +
+      "has understood §2 and §3 will immediately ask what is done about it, and the honest answer " +
+      "is that these are engineering responses with real costs, not solved problems."));
+
+    [
+      { h: "Expert offloading",
+        b: "Keep cold experts in host memory or on NVMe and stage them into HBM on demand. It " +
+           "converts a capacity problem into a bandwidth-and-latency problem: PCIe is one to two " +
+           "orders of magnitude slower than HBM, so a miss costs far more than the " +
+           NN.bytes(EXPERT_BYTES) + " read it replaces. Viable when the routing is predictable " +
+           "enough to prefetch, or when latency is not the binding constraint." },
+      { h: "Caching hot experts",
+        b: "Routing is not uniform — §4 of <a href=\"33-moe-training.html\">page 33</a> measured a " +
+           fmt(LB.imbalance_ratio, 2) + "× imbalance on six tokens, and the auxiliary loss only " +
+           "reduces it, never removes it. Pin the experts that are chosen most often and page the " +
+           "rest. The auxiliary loss that makes training efficient makes this cache <i>less</i> " +
+           "effective, which is a real tension between the two regimes." },
+      { h: "Expert parallelism for capacity, not for speed",
+        b: "Spread the experts across GPUs purely so they fit, accepting the all-to-all as the " +
+           "price of admission. This is the common answer, and it is what makes §4 the thing that " +
+           "usually decides decode latency." },
+      { h: "Quantising the experts harder than the rest",
+        b: "Expert weights are the overwhelming majority of the bytes and are read once per token " +
+           "with no accumulation across the batch, which is exactly the profile " +
+           "<a href=\"28-quantisation.html\">page 28</a> says weight-only quantisation suits. " +
+           "Halving expert precision halves both the resident set and the per-token read." }
+    ].forEach(function (a) {
+      host.appendChild(el("div", { class: "approach" }, [
+        el("div", { class: "h" }, [a.h, el("span", { class: "notsim" }, "approach, not simulated")]),
+        el("div", { class: "b", html: a.b })
+      ]));
+    });
+  })();
+
+  /* ==================================================================== */
+  /*  4 · THE ALL-TO-ALL IN DECODE                                        */
+  /* ==================================================================== */
+  (function () {
+    const host = document.querySelector("#a2aBody");
+    const A2A = P && P.collectives
+      ? P.collectives.filter(function (c) { return c.op === "all_to_all"; })[0] : null;
+    const lat = P && P.cost_model ? P.cost_model.latency_us : null;
+
+    host.appendChild(NN.callout("warn", "WHAT THE MODEL IN §2 LEAVES OUT",
+      "<p>" + INF.caveat + "</p>"));
+
+    host.appendChild(el("p", { html:
+      "Everything in §2 counted only HBM traffic. That is the right first model for a dense " +
+      "decode step, where the weights are local and nothing crosses a wire. It is the wrong first " +
+      "model for an MoE served with expert parallelism, and the reason is a change of units." }));
+
+    const tbl = el("table", { class: "data" });
+    tbl.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", { class: "wrap" }, ""), el("th", { class: "wrap" }, "training"),
+      el("th", { class: "wrap" }, "decode")
+    ])));
+    const tb = el("tbody");
+    function row(k, a, b) {
+      tb.appendChild(el("tr", {}, [el("td", { class: "wrap" }, k),
+        el("td", { class: "wrap", html: a }), el("td", { class: "wrap", html: b })]));
+    }
+    row("payload per all-to-all",
+      "batch × seq × top-k × d_model — large, so <b>bandwidth</b> dominates",
+      "batch × 1 × top-k × d_model — tiny, so <b>latency</b> dominates");
+    row("how often",
+      XP.collectives_per_layer.length * 2 + " per MoE layer per step, amortised over thousands of tokens",
+      XP.collectives_per_layer.length + " per MoE layer per <b>generated token</b>, amortised over nothing");
+    row("can it be overlapped",
+      "partly — with the next micro-batch's compute",
+      "no — the expert GEMM cannot start before its tokens land, and there is no next micro-batch");
+    row("what it adds to the step",
+      "a bandwidth term you can compute from the shapes",
+      "a fixed latency floor, multiplied by the number of MoE layers");
+    tbl.appendChild(tb);
+    host.appendChild(el("div", { class: "scrollx" }, tbl));
+
+    if (A2A) {
+      host.appendChild(el("p", { html:
+        "The collective itself is unchanged: <code>" + A2A.op + "</code>, " + A2A.sig +
+        ", ring cost <code>" + A2A.ring_factor + "</code>. But a ring cost is a <i>bandwidth</i> " +
+        "formula, and at decode payload sizes the bandwidth term is negligible next to the fixed " +
+        "per-message cost. " +
+        (lat ? "<a href=\"16-collectives.html\">Page 16</a>'s cost model carries explicit latency " +
+               "constants for exactly this reason — " +
+               Object.keys(lat).filter(function (k) { return typeof lat[k] === "number"; })
+                 .map(function (k) { return k.replace("_", "-") + " " + lat[k] + " µs"; }).join(", ") +
+               " — and in decode those constants, not the ring factor, are the number that matters."
+             : "")
+      }));
+      if (lat) {
+        host.appendChild(el("div", { class: "hint" },
+          P.cost_model._status + " " + lat.note));
+      }
+    }
+
+    host.appendChild(el("p", { html:
+      "So the honest ordering is: §2's intensity collapse tells you the MoE cannot use the GPU it " +
+      "is sitting on, and this section tells you that in a real expert-parallel deployment you may " +
+      "not even reach that limit, because " + XP.collectives_per_layer.length +
+      " round trips per MoE layer per token got there first. Which of the two binds depends on the " +
+      "interconnect and the number of MoE layers, and it is a measurement, not a derivation." }));
+
+    host.appendChild(NN.callout("key", "THE SITE'S ONE UNUSED COLLECTIVE, TWICE OVER",
+      "<p><a href=\"33-moe-training.html\">Page 33</a> introduced the all-to-all as a " +
+      "bandwidth problem whose size you cannot predict. Here it returns as a latency problem whose " +
+      "size is irrelevant. Same collective, same routing decision underneath, two completely " +
+      "different reasons to be afraid of it. That is a fair summary of why MoE training and MoE " +
+      "inference are separate engineering disciplines rather than one topic seen twice.</p>"));
+  })();
+
+  /* ==================================================================== */
+  /*  5 · TIES                                                            */
+  /* ==================================================================== */
+  (function () {
+    const host = document.querySelector("#tiesBody");
+
+    const links = [
+      { n: "24", f: "24-prefill-decode.html", t: "Prefill vs Decode",
+        b: "Arithmetic intensity, and the two regimes it separates. Everything in §2 is that " +
+           "argument applied to a layer whose byte count depends on the router. An MoE decode " +
+           "layer is the most extreme point on that page's axis." },
+      { n: "26", f: "26-batching.html", t: "Batching",
+        b: "Why decode batching is nearly free for a dense model: the weights are read once " +
+           "regardless. For an MoE that is false below the batch at which every expert is awake — " +
+           "batch " + ROWS.filter(function (r) { return r.experts_touched >= NEXP_INF; })[0].batch +
+           " here — and true above it." },
+      { n: "30", f: "30-inference-parallelism.html", t: "Inference Parallelism",
+        b: "TP for latency, PP for throughput. EP is a third answer with a different motive again: " +
+           "not latency, not throughput, but <i>fitting</i> — and it charges " +
+           XP.collectives_per_layer.length + " all-to-alls per layer per token for the privilege." },
+      { n: "32", f: "32-moe.html", t: "Mixture of Experts",
+        b: "The architecture, the router and the proof that grouping changes nothing. The " +
+           "group sizes it printed — [" + PEX.map(function (p) { return p.n_tokens; }).join(", ") +
+           "] — are the same raggedness that shows up here as an intensity of " +
+           fmt(ROWS[0].intensity, 1) + " FLOP/byte." },
+      { n: "33", f: "33-moe-training.html", t: "MoE Training",
+        b: "Expert parallelism, the all-to-all, the auxiliary loss and capacity. Every mechanism " +
+           "there exists to make a large batch efficient, and none of them helps a batch of one." }
+    ];
+    links.forEach(function (l) {
+      host.appendChild(el("div", { class: "approach", style: { borderLeftStyle: "solid", borderLeftColor: "var(--weight)" } }, [
+        el("div", { class: "h" }, [
+          el("a", { href: l.f }, l.n + " · " + l.t)
+        ]),
+        el("div", { class: "b", html: l.b })
+      ]));
+    });
+
+    host.appendChild(NN.callout("mem", "THE SHAPE OF THE WHOLE ARGUMENT",
+      "<p>A mixture of experts decouples parameters from FLOPs. In training that is a straight " +
+      "win, paid for with an all-to-all and a load-balancing loss. In inference the decoupling " +
+      "reverses sign: you get " + fmt(DSV.sparsity, 2) + "× the parameters, " +
+      "the arithmetic of " + NN.count(DSV.mlp_params_active) + ", and — at batch " +
+      ROWS[0].batch + " — an intensity of " + fmt(ROWS[0].intensity, 3) + " FLOP/byte against a " +
+      RGPU + " ridge of " + fmt(RIDGE, 2) + ". " + fmt(ROWS[0].intensity / RIDGE * 100, 2) +
+      "% of the machine.</p>" +
+      "<p>The fix is the same one page 26 gives for every decode workload — batch harder — but an " +
+      "MoE needs a much larger batch before batching starts working at all, and the memory it " +
+      "occupies is what makes that batch hard to assemble. That circularity, not any single number " +
+      "on this page, is what makes serving a sparse model its own discipline.</p>"));
+  })();
+
+  NN.page("moeinfer");
+})();
+</script>
+</body>
+</html>
