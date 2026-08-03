@@ -237,6 +237,15 @@
         m.sub.textContent = p.sub || "";
       });
     };
+    /* Reveal points one at a time, so a section separator can carry the same
+       plot forward and add the dot this section is about. step(null) = all. */
+    root.step = function (k) {
+      marks.forEach(function (m, i) {
+        m.g.setAttribute("opacity",
+          (k === null || k === undefined || i < k) ? 1 : 0);
+      });
+    };
+    root.reset = function () { root.step(0); };
     root.ridge = ridge;
     return root;
   };
@@ -308,6 +317,8 @@
       }, ms || 55);
     };
     wrap.stop = function () { clearInterval(timer); };
+    wrap.step = function (t) { clearInterval(timer); wrap.mark(t); };
+    wrap.reset = function () { clearInterval(timer); wrap.mark(-1); };
     return wrap;
   };
 
@@ -332,8 +343,19 @@
       class: "vflow", viewBox: "0 0 " + W + " " + H, width: "100%", height: H
     });
 
+    /* A hop may carry a weight — a token count, a byte count. MoE's all-to-all
+       is RAGGED, and that is its whole difficulty: you cannot size the buffers
+       until the router has run. Equal-width arcs cannot say that, so width is
+       proportional to weight, normalised against the fattest hop. */
+    let maxW = 0;
+    hops.forEach(function (h) {
+      if (h.weight !== undefined && h.weight > maxW) maxW = h.weight;
+    });
+
     const arcs = hops.map(function (h) {
       const a = pos[h.from], b = pos[h.to];
+      const sw = (maxW && h.weight !== undefined)
+        ? 1.2 + 3.4 * (h.weight / maxW) : 2;
       const above = h.from <= h.to;
       const lane = (h.lane || 0) * 14;
       const y = above ? top - 6 - lane : top + bh + 6 + lane;
@@ -345,15 +367,20 @@
       const col = h.kind === "local" ? "var(--accent)"
                                      : viz.cls(h.cls || "activation").c;
       const path = sv("path", {
-        d: d, fill: "none", stroke: col, "stroke-width": 2, opacity: 0.22,
+        d: d, fill: "none", stroke: col, "stroke-width": sw, opacity: 0.22,
         "stroke-dasharray": h.kind === "local" ? "4 4" : null
       });
+      if (h.weight !== undefined) {
+        path.appendChild(sv("title", {}));
+        path.lastChild.textContent =
+          (h.label ? h.label + " — " : "") + h.weight + " " + (o.unit || "items");
+      }
       const dot = sv("circle", { r: 5, fill: col, opacity: 0 });
       const lab = tx({
         "text-anchor": "middle", "font-size": 10, fill: col, opacity: 0
       }, h.label || "");
       root.appendChild(path); root.appendChild(dot); root.appendChild(lab);
-      return { path: path, dot: dot, lab: lab, h: h };
+      return { path: path, dot: dot, lab: lab, h: h, sw: sw };
     });
 
     const boxes = nodes.map(function (n, i) {
@@ -379,7 +406,7 @@
       arcs.forEach(function (a, i) {
         const on = (k !== null && k !== undefined) && i === k;
         a.path.setAttribute("opacity", on ? 0.95 : 0.22);
-        a.path.setAttribute("stroke-width", on ? 3 : 2);
+        a.path.setAttribute("stroke-width", on ? a.sw + 1 : a.sw);
         a.lab.setAttribute("opacity", on ? 1 : 0);
         a.dot.setAttribute("opacity", 0);
         if (!on) return;
@@ -417,6 +444,7 @@
         b.rect.setAttribute("stroke-width", i === idx ? 3 : 1.5);
       });
     };
+    root.reset = function () { root.step(null); root.highlightNode(null); };
     root.step(null);
     if (REDUCED) root.showAll(true);
     return root;
@@ -449,28 +477,74 @@
         stroke: "var(--ink-muted)", "stroke-width": 1
       }));
     });
-    (o.values || []).forEach(function (v) {
+    const vals = o.values || [];
+    const marks = vals.map(function (v) {
       const q = levels.length
         ? levels.reduce(function (a, b) {
             return Math.abs(b - v) < Math.abs(a - v) ? b : a;
           }, levels[0])
         : v;
-      root.appendChild(sv("line", {
+      const drop = sv("line", {
         x1: X(v), x2: X(q), y1: M.t, y2: H - M.b,
-        stroke: c, "stroke-width": 1, "stroke-dasharray": "3 3", opacity: 0.55
-      }));
-      root.appendChild(sv("circle", { cx: X(v), cy: M.t, r: 4, fill: c }));
-      root.appendChild(sv("rect", {
+        stroke: c, "stroke-width": 1, "stroke-dasharray": "3 3", opacity: 0
+      });
+      const dot = sv("circle", {
+        cx: X(v), cy: M.t, r: 4, fill: c,
+        title: NN.fmt(v, 4) + " → " + NN.fmt(q, 4)
+      });
+      dot.appendChild(sv("title", {}));
+      dot.lastChild.textContent =
+        NN.fmt(v, 4) + " snaps to " + NN.fmt(q, 4) +
+        "  (error " + NN.fmt(Math.abs(v - q), 4) + ")";
+      const land = sv("rect", {
         x: X(q) - 3.2, y: H - M.b - 3.2, width: 6.4, height: 6.4, fill: c,
-        transform: "rotate(45 " + X(q) + " " + (H - M.b) + ")"
-      }));
+        opacity: 0, transform: "rotate(45 " + X(q) + " " + (H - M.b) + ")"
+      });
+      root.appendChild(drop); root.appendChild(land); root.appendChild(dot);
+      return { v: v, q: q, drop: drop, dot: dot, land: land };
     });
+
     root.appendChild(tx({
       x: M.l, y: M.t - 12, fill: "var(--ink-muted)", "font-size": 10
     }, o.topLabel || "real values"));
     root.appendChild(tx({
       x: M.l, y: H - 8, fill: "var(--ink-muted)", "font-size": 10
     }, o.bottomLabel || (levels.length + " representable levels")));
+
+    /* The landing is the whole point. A value that is merely DRAWN at its
+       quantised position has already lost the argument — the reader has to
+       see it leave the real line and arrive somewhere it did not start. */
+    root.step = function (k) {
+      const n = (k === null || k === undefined) ? marks.length : k;
+      marks.forEach(function (m, i) {
+        const landed = i < n;
+        m.drop.setAttribute("opacity", landed ? 0.55 : 0);
+        m.land.setAttribute("opacity", landed ? 1 : 0);
+        m.dot.setAttribute("cx", X(m.v));
+        m.dot.setAttribute("cy", M.t);
+        m.dot.setAttribute("opacity", landed ? 0.45 : 1);
+      });
+      if (REDUCED || n === 0 || n > marks.length) return;
+      const m = marks[n - 1];               /* animate only the newest */
+      const x0v = X(m.v), y0v = M.t, x1v = X(m.q), y1v = H - M.b;
+      m.dot.setAttribute("opacity", 1);
+      let t0 = null;
+      const dur = o.speed || 420;
+      (function frame(ts) {
+        if (t0 === null) t0 = ts;
+        const f = Math.min(1, (ts - t0) / dur);
+        const e = 1 - Math.pow(1 - f, 3);
+        m.dot.setAttribute("cx", x0v + (x1v - x0v) * e);
+        m.dot.setAttribute("cy", y0v + (y1v - y0v) * e);
+        if (f < 1) requestAnimationFrame(frame);
+        else {
+          m.dot.setAttribute("cx", x0v); m.dot.setAttribute("cy", y0v);
+          m.dot.setAttribute("opacity", 0.45);
+        }
+      })(performance.now());
+    };
+    root.reset = function () { root.step(0); };
+    root.step(REDUCED ? marks.length : (o.landed === false ? 0 : marks.length));
     return root;
   };
 
@@ -506,6 +580,7 @@
       cap.textContent = o.caption ? o.caption(acc, k)
         : (acc + " of " + k + " proposed tokens kept");
     };
+    wrap.reset = function () { wrap.step(0); };
     wrap.step(REDUCED ? els.length : 0);
     return wrap;
   };
@@ -560,6 +635,16 @@
         });
       });
     };
+    /* 0 = the whole matrix, undivided (this matters: the reader must see the
+       thing before it is cut). 1 = the partition drops in. 2+n = isolate the
+       nth owner, which is how "a GPU holds only this" gets said. */
+    wrap.step = function (k) {
+      const n = (k === null || k === undefined) ? 1 : k;
+      if (n <= 0) { wrap.show(false); wrap.isolate(null); return; }
+      wrap.show(true);
+      wrap.isolate(n >= 2 ? Math.min(n - 2, parts - 1) : null);
+    };
+    wrap.reset = function () { wrap.step(0); };
     wrap.show(REDUCED);
     return wrap;
   };
@@ -632,6 +717,21 @@
         });
       });
     };
+    /* Reveal row by row by default — a score matrix built one query at a time
+       is a causal mask being obeyed, not merely depicted. Pass by:'cell' when
+       the fill order itself is the lesson (a tile being computed). */
+    const order = o.by === "cell" ? nr * nc : nr;
+    wrap.step = function (k) {
+      const n = (k === null || k === undefined) ? order : k;
+      cells.forEach(function (r, i) {
+        r.forEach(function (c, j) {
+          const idx = o.by === "cell" ? i * nc + j : i;
+          c.classList.toggle("unseen", idx >= n);
+        });
+      });
+    };
+    wrap.reset = function () { wrap.step(0); };
+    wrap.step(order);
     return wrap;
   };
 

@@ -669,6 +669,11 @@ td.best, th.best { background: color-mix(in srgb, var(--good) 12%, transparent);
   var(--surface-3), var(--surface-3) 4px, var(--surface-2) 4px, var(--surface-2) 8px);
   color: var(--ink-muted); }
 .vheat-c.hot { outline-color: var(--ink); }
+/* Not yet revealed. An empty slot, not a zero-valued one — a masked cell is
+   hatched and a zero cell is pale, so an un-computed cell must read as
+   neither, or "not yet" and "not allowed" become the same picture. */
+.vheat-c.unseen { background: none !important; opacity: 1; color: transparent;
+  box-shadow: inset 0 0 0 1px var(--hairline); }
 .vheat-key { display: flex; align-items: center; gap: 8px; margin-top: 8px;
   font-family: var(--mono); font-size: .68rem; color: var(--ink-muted); }
 .vheat-ramp { display: flex; height: 11px; border-radius: 2px; overflow: hidden; }
