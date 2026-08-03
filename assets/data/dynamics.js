@@ -60,6 +60,7 @@ window.DYN = {
   "peak_lr": 0.5,
   "min_lr": 0.0,
   "decay_frac": 0.2,
+  "wsd_decay_start": 50,
   "curves": [
    {
     "key": "constant",
@@ -326,19 +327,19 @@ window.DYN = {
      0.5,
      0.5,
      0.5,
-     0.4591836734693878,
-     0.40816326530612246,
-     0.3571428571428574,
-     0.306122448979592,
-     0.25510204081632665,
-     0.20408163265306128,
-     0.15306122448979592,
-     0.10204081632653084,
-     0.051020408163265474,
-     1.1102230246251565e-16
+     0.5,
+     0.4444444444444444,
+     0.3888888888888889,
+     0.33333333333333337,
+     0.2777777777777778,
+     0.2222222222222222,
+     0.16666666666666669,
+     0.1111111111111111,
+     0.05555555555555558,
+     0.0
     ],
-    "mean_lr": 0.41743197278911565,
-    "final_lr": 1.1102230246251565e-16,
+    "mean_lr": 0.42083333333333334,
+    "final_lr": 0.0,
     "peak_at_step": 9
    }
   ],
@@ -362,16 +363,16 @@ window.DYN = {
     "passed": true
    },
    {
-    "claim": "cosine ends at the floor learning rate",
+    "claim": "cosine, linear and WSD all end exactly at the floor",
     "measured": 0.0,
-    "tol": 1e-12,
+    "tol": 1e-15,
     "passed": true
    },
    {
     "claim": "mean LR: constant > WSD > cosine",
     "measured": [
      0.4625,
-     0.417432,
+     0.420833,
      0.254167,
      0.254167
     ],
@@ -573,16 +574,16 @@ window.DYN = {
     0.5,
     0.5,
     0.5,
-    0.4591836734693878,
-    0.40816326530612246,
-    0.3571428571428574,
-    0.306122448979592,
-    0.25510204081632665,
-    0.20408163265306128,
-    0.15306122448979592,
-    0.10204081632653084,
-    0.051020408163265474,
-    1.1102230246251565e-16
+    0.5,
+    0.4444444444444444,
+    0.3888888888888889,
+    0.33333333333333337,
+    0.2777777777777778,
+    0.2222222222222222,
+    0.16666666666666669,
+    0.1111111111111111,
+    0.05555555555555558,
+    0.0
    ],
    "wsd_long_truncated": [
     0.05,
@@ -647,7 +648,10 @@ window.DYN = {
     0.5
    ],
    "cosine_max_gap": 0.20532395238325665,
-   "wsd_max_gap": 0.4999999999999999,
+   "wsd_max_gap": 0.5,
+   "stable_window_steps": 48,
+   "wsd_max_gap_in_stable": 0.0,
+   "cosine_max_gap_in_stable": 0.2044007872514473,
    "why": "A cosine schedule is a function of t/N. Change N and every step's learning rate changes, including steps you have already run. That is why you cannot decide to train longer halfway through a cosine run, and why WSD -- whose stable phase is a constant -- can be branched and annealed at any length from one shared trunk."
   }
  },
@@ -3111,7 +3115,7 @@ window.DYN = {
    "warmup": 0,
    "peak_lr": 0.5,
    "n_steps": 60,
-   "final_loss": 0.34920418808742837,
+   "final_loss": 0.3495955169592305,
    "peak_loss": 14.526524782990474,
    "final_live_units": 0
   },
@@ -3120,7 +3124,7 @@ window.DYN = {
    "warmup": 10,
    "peak_lr": 0.5,
    "n_steps": 60,
-   "final_loss": 0.0032267433556494108,
+   "final_loss": 0.0032966233378821518,
    "peak_loss": 1.3044740000000004,
    "final_live_units": 3
   },
@@ -3129,7 +3133,7 @@ window.DYN = {
    "warmup": 10,
    "peak_lr": 0.1,
    "n_steps": 60,
-   "final_loss": 0.001462152088077185,
+   "final_loss": 0.0016811268168571984,
    "peak_loss": 1.3044740000000004,
    "final_live_units": 4
   },
@@ -3138,7 +3142,7 @@ window.DYN = {
    "warmup": 30,
    "peak_lr": 0.8,
    "n_steps": 60,
-   "final_loss": 0.0027270499091481574,
+   "final_loss": 0.0020303111664422614,
    "peak_loss": 1.3044740000000004,
    "final_live_units": 3
   },
@@ -6349,14 +6353,14 @@ window.DYN = {
    "detail": "0.0"
   },
   {
-   "name": "schedule: cosine ends at the floor learning rate",
+   "name": "schedule: cosine, linear and WSD all end exactly at the floor",
    "passed": true,
    "detail": "0.0"
   },
   {
    "name": "schedule: mean LR: constant > WSD > cosine",
    "passed": true,
-   "detail": "[0.4625, 0.417432, 0.254167, 0.254167]"
+   "detail": "[0.4625, 0.420833, 0.254167, 0.254167]"
   },
   {
    "name": "schedule: cosine and linear decay have the same mean learning rate",

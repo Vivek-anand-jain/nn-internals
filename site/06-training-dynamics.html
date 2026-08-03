@@ -76,6 +76,8 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
             text-transform: uppercase; letter-spacing: .05em; }
 .arith td:first-child, .arith th:first-child { text-align: left; }
 .arith tr.hi td { background: var(--surface-3); }
+.arith td.wrap { white-space: normal; text-align: left; min-width: 260px;
+                 max-width: 560px; line-height: 1.5; }
 .arith td.ok { color: var(--good); }
 .arith td.bad { color: var(--critical); }
 
@@ -262,9 +264,13 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
     const p = (t - warmup) / span;
     if (kind === "cosine") return minLr + (peak - minLr) * 0.5 * (1 + Math.cos(Math.PI * p));
     if (kind === "wsd") {
-      const stable = 1 - decayFrac;
-      if (p <= stable) return peak;
-      return peak + (minLr - peak) * (p - stable) / decayFrac;
+      /* the decay boundary is counted in whole steps, exactly as
+         wsd_decay_start() does in code/dynamics.py */
+      const decaySteps = Math.max(1, Math.round((n - warmup) * decayFrac));
+      const d0 = Math.max(warmup, n - decaySteps);
+      if (t < d0) return peak;
+      const q = (t - d0) / Math.max(1, n - 1 - d0);
+      return peak * (1 - q) + minLr * q;
     }
     return peak + (minLr - peak) * p;   /* linear */
   }
@@ -398,7 +404,7 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
       ["schedule", "mean LR", "final LR", "peak reached at", "what it is for"],
       S.curves.map(function (c) {
         return [c.name, fmt(c.mean_lr, 4), fmt(c.final_lr, 4),
-                "step " + c.peak_at_step, { html: '<span class="muted">' + c.desc + "</span>" }];
+                "step " + c.peak_at_step, { cls: "wrap muted", html: c.desc }];
       })));
 
     /* ---- two facts that fall out of the numbers ---------------------- */
@@ -444,10 +450,12 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
     host.appendChild(NN.callout("key", "WHY WSD EXISTS",
       "The stable phase of a warmup-stable-decay schedule is a constant, so it does " +
       "not depend on the total step count at all: the first " +
-      Math.round(hd.short_steps * 0.6) + " steps of a " + hd.long_steps +
-      "-step WSD run are identical to the first " + Math.round(hd.short_steps * 0.6) +
-      " steps of a " + hd.short_steps + "-step one (measured gap " +
-      fmt(hd.wsd_max_gap, 1) + " inside the stable phase). That is what buys the " +
+      hd.stable_window_steps + " steps of a " + hd.long_steps +
+      "-step WSD run are identical to the first " + hd.stable_window_steps +
+      " steps of a " + hd.short_steps + "-step one — measured gap " +
+      fmt(hd.wsd_max_gap_in_stable, 1) + ", while cosine's is " +
+      fmt(hd.cosine_max_gap_in_stable, 3) + " over the same window. That is what " +
+      "buys the " +
       "practical property: one long trunk, checkpointed anywhere, with a short decay " +
       "branched off it whenever a model is wanted. Under cosine, deciding to train " +
       "longer means the schedule you already ran was the wrong one."));
@@ -637,11 +645,14 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
         "only possible with hidden units that still do something." })
     ]));
 
+    const RC = T.reference_configs;
+    const REF = RC.models.filter(function (m) { return m.name === RC.default_model; })[0];
     host.appendChild(NN.callout("key", "AT SCALE",
       "The same argument runs in a real transformer, with two differences. There is " +
-      "no floor: a 70B model whose first optimizer step is a random jump of size lr " +
-      "in every one of 70 billion coordinates does not settle into a constant " +
-      "predictor, it produces NaNs. And the jump is worse, because the variance of " +
+      "no floor: a " + REF.name + " whose first optimizer step is a jump of size lr " +
+      "in every one of " + NN.count(REF.params) + " coordinates, in a direction " +
+      "estimated from one batch, does not settle into a constant predictor — it " +
+      "produces NaNs. And the jump is worse, because the variance of " +
       "v̂ after one step is largest exactly when the batch is one sample of a very " +
       "large distribution. Every large-model recipe therefore warms up over hundreds " +
       "to thousands of steps — <b>that particular number is convention, not " +
@@ -839,7 +850,7 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
         return [s.name, fmt(s.std, 4), fmt(s.predicted_ratio_relu, 3),
                 { cls: Math.abs(Math.log(s.final_over_initial_relu)) < 0.7 ? "ok" : "bad",
                   html: mult(s.final_over_initial_relu) },
-                { html: '<span class="muted">' + s.why + "</span>" }];
+                { cls: "wrap muted", html: s.why }];
       })));
 
     /* ---- residual scaling -------------------------------------------- */
@@ -950,7 +961,13 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
     host.appendChild(el("div", { class: "legendnote", html: F.reading + " " + F.caveat }));
 
     host.appendChild(NN.callout("why", "WHY THIS IS A DEPTH PROBLEM",
-      "Each branch here contributes about " +
+      "Two things are visible. First, the cross terms are not negligible: they sum " +
+      "to " + fmt(F.cross_term_share, 2) + "× the branch terms, and three of the " +
+      "four are negative, so the branches partly cancel the stream rather than " +
+      "adding independently to it. <b>Var(x_L) = Var(x_0) + L·σ² is an " +
+      "initialisation-time statement</b> — it assumes weights drawn independently " +
+      "of the activations, and tf2.json's are deterministic hand-picked values " +
+      "instead. Second, each branch here contributes about " +
       fmt(100 * F.mean_branch_over_stream, 1) + "% of the stream's second moment, so " +
       "over " + F.n_additions + " additions the stream barely moves — it ends at " +
       fmt(F.growth, 2) + "× where it started. Multiply that by the " +
@@ -1112,10 +1129,12 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
       "would move " + NN.bytes(cm.bytes_if_full_gradient) + " per GPU for this " +
       NP + "-parameter model — still nothing, and still one latency." }));
 
+    const BIG = T.reference_configs.models[T.reference_configs.models.length - 1];
     host.appendChild(NN.callout("warn", "IT IS A BARRIER, NOT A TRANSFER",
-      "Four bytes is not a bandwidth problem and never becomes one, however large " +
-      "the model gets: the payload is one scalar whether the model has 13 parameters " +
-      "or 405 billion. What does not go away is the ordering. Backward must be " +
+      NN.bytes(cm.bytes_sent_per_gpu) + " is not a bandwidth problem and never " +
+      "becomes one, however large the model gets: the payload is one scalar whether " +
+      "the model has " + NP + " parameters or " + NN.count(BIG.params) + ". What " +
+      "does not go away is the ordering. Backward must be " +
       "finished — on every rank — before the norm is known, and the norm must be " +
       "known before any rank may scale its own shard, so the optimizer step cannot " +
       "start anywhere until it has completed everywhere. That is why frameworks fuse " +
@@ -1203,8 +1222,11 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
 
       mount(tiles, NN.tiles([
         { k: "step " + k + " ‖g‖", v: fmt(r.grad_norm[k], 3),
-          s: r.clip_ratio[k] < 1 ? "clipped to " + fmt(100 * r.clip_ratio[k], 1) + "%"
-                                 : "under the threshold" },
+          s: r.clip_ratio[k] < 1
+               ? "clipped to " + fmt(100 * r.clip_ratio[k], 1) + "% of itself"
+               : (r.grad_norm[k] > S.max_norm
+                    ? "over the threshold, and not clipped"
+                    : "under the threshold of " + fmt(S.max_norm, 2)) },
         { k: "step " + k + " loss", v: fmt(r.clean_loss[k], 5),
           s: "baseline " + fmt(S.baseline_loss, 4) },
         { k: "peak loss this run", v: fmt(Math.max.apply(null, r.clean_loss), 4),
@@ -1261,7 +1283,7 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
     host.appendChild(table(
       ["response", "what it is", "what it costs"],
       P.items.map(function (it) {
-        return [it.name, { html: '<span class="muted">' + it.what + "</span>" }, it.cost];
+        return [it.name, { cls: "wrap muted", html: it.what }, it.cost];
       })));
     host.appendChild(NN.callout("warn", "PRACTICE, NOT DERIVED", P._status +
       " Everything above this heading on this page is computed by " +

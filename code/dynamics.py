@@ -165,6 +165,12 @@ def finite(x):
 # eventually -- and the differences between them are entirely about what you
 # are allowed to do afterwards.
 
+def wsd_decay_start(n_steps, warmup, decay_frac):
+    """First step of WSD's decay phase, in whole steps."""
+    decay_steps = max(1, int(round((n_steps - warmup) * decay_frac)))
+    return max(warmup, n_steps - decay_steps)
+
+
 def lr_at(t, kind, n_steps=HORIZON, warmup=WARMUP, peak=PEAK_LR,
           min_lr=MIN_LR, decay_frac=WSD_DECAY_FRAC):
     """Learning rate at step t (0-based), for one of four schedules.
@@ -188,11 +194,13 @@ def lr_at(t, kind, n_steps=HORIZON, warmup=WARMUP, peak=PEAK_LR,
 
     if kind == "wsd":
         # Warmup-Stable-Decay: hold the peak, then decay only at the end.
-        stable_until = 1.0 - decay_frac
-        if p <= stable_until:
+        # The boundary is counted in whole STEPS rather than in a fraction of
+        # p, so the last step lands on min_lr exactly instead of on 1e-16.
+        d0 = wsd_decay_start(n_steps, warmup, decay_frac)
+        if t < d0:
             return peak
-        q = (p - stable_until) / decay_frac       # 0 -> 1 across the decay
-        return peak + (min_lr - peak) * q          # linear decay
+        q = (t - d0) / max(1, n_steps - 1 - d0)
+        return peak * (1.0 - q) + min_lr * q
 
     if kind == "linear":
         return peak + (min_lr - peak) * p
@@ -255,19 +263,21 @@ def build_schedules():
 
     # (c) WSD's stable phase really is flat.
     wsd = dict((c["key"], c) for c in curves)["wsd"]["points"]
-    stable = wsd[WARMUP:int(WARMUP + (HORIZON - WARMUP - 1) * (1 - WSD_DECAY_FRAC))]
+    d0 = wsd_decay_start(HORIZON, WARMUP, WSD_DECAY_FRAC)
+    stable = wsd[WARMUP:d0]
     spread = max(stable) - min(stable)
     checks.append({
         "claim": "WSD's stable phase is flat",
         "measured": spread, "tol": 1e-15, "passed": spread < 1e-15,
     })
 
-    # (d) cosine and linear both land on the floor; constant does not.
+    # (d) every decaying schedule lands exactly on the floor; constant does not.
     cos = dict((c["key"], c) for c in curves)["cosine"]["points"]
+    lin = dict((c["key"], c) for c in curves)["linear"]["points"]
+    ends = max(abs(cos[-1] - MIN_LR), abs(lin[-1] - MIN_LR), abs(wsd[-1] - MIN_LR))
     checks.append({
-        "claim": "cosine ends at the floor learning rate",
-        "measured": abs(cos[-1] - MIN_LR), "tol": 1e-12,
-        "passed": abs(cos[-1] - MIN_LR) < 1e-12,
+        "claim": "cosine, linear and WSD all end exactly at the floor",
+        "measured": ends, "tol": 1e-15, "passed": ends < 1e-15,
     })
 
     # (e) mean learning rate ordering. This is the practical difference:
@@ -307,18 +317,19 @@ def build_schedules():
     # it the short run has started decaying and of course the two differ.
     stable_until = int(HORIZON * (1 - WSD_DECAY_FRAC))
     wsd_gap_stable = max(abs(wsd_long[t] - wsd[t]) for t in range(stable_until))
+    cos_gap_stable = max(abs(cos_long[t] - cos[t]) for t in range(stable_until))
     checks.append({
         "claim": "cosine's shape depends on the total step count; WSD's "
                  "stable phase does not",
-        "measured": {"cosine_max_gap": cos_gap, "wsd_max_gap_in_stable":
-                     max(abs(wsd_long[t] - wsd[t]) for t in
-                         range(WARMUP, int(HORIZON * 0.6)))},
+        "measured": {"cosine_max_gap": cos_gap,
+                     "wsd_max_gap_in_stable": wsd_gap_stable},
         "passed": cos_gap > 0.05 * PEAK_LR,
     })
 
     return {
         "n_steps": HORIZON, "warmup_steps": WARMUP, "peak_lr": PEAK_LR,
         "min_lr": MIN_LR, "decay_frac": WSD_DECAY_FRAC,
+        "wsd_decay_start": d0,
         "curves": curves,
         "checks": checks,
         "horizon_dependence": {
@@ -328,6 +339,7 @@ def build_schedules():
             "cosine_max_gap": cos_gap, "wsd_max_gap": wsd_gap,
             "stable_window_steps": stable_until,
             "wsd_max_gap_in_stable": wsd_gap_stable,
+            "cosine_max_gap_in_stable": cos_gap_stable,
             "why": "A cosine schedule is a function of t/N. Change N and "
                    "every step's learning rate changes, including steps you "
                    "have already run. That is why you cannot decide to train "

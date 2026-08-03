@@ -85,9 +85,12 @@ body { background: var(--page); }
    except the phase label, and nothing is removed. The site pages keep
    design.css's roomier defaults; this is deck-local. */
 .stage .cell {
-  font-size: 15px; min-width: 60px; padding: 5px 7px; line-height: 1.3;
+  font-size: 15px; min-width: 60px; padding: 5px 6px; line-height: 1.3;
 }
 .stage .tensor { margin: 0 12px 9px 0; }
+/* In a flex row the gap already separates the matrices, and the extra 12px
+   per tensor is what tips a three-matrix chain from two rows onto three. */
+.rowflex > .tensor { margin-right: 0; }
 .stage .tensor-label { font-size: 14px; line-height: 1.35; margin-bottom: 4px; }
 .stage .tensor-shape { font-size: 13px; }
 .stage .tensor-body { padding: 5px; }
@@ -132,10 +135,12 @@ body { background: var(--page); }
 .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 26px; align-items: center; }
 .cols.wide-l { grid-template-columns: 1.35fr 1fr; }
 .cols.wide-r { grid-template-columns: 1fr 1.35fr; }
+/* left column exactly as wide as the matrix in it, everything else beside */
+.cols.fitleft { grid-template-columns: auto 1fr; align-items: start; }
 .cols3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; align-items: stretch; }
 .cols4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; align-items: stretch; }
 .stack { display: flex; flex-direction: column; gap: 11px; }
-.rowflex { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+.rowflex { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
 .rowflex.top { align-items: flex-start; }
 /* a row that must stay on ONE line: the children shrink instead of wrapping,
    which is what keeps a two-matrix comparison from becoming two stacked
@@ -201,6 +206,11 @@ body { background: var(--page); }
   flex: 0 1 auto; width: min-content; min-width: 430px; max-width: 100%;
 }
 .cutrow > .gpugrid { flex: 1 1 620px; margin: 0; }
+.cutrow > .cutkeys { flex: 1 1 100%; }
+.cutrow.wide > .cutkeys {
+  flex: 1 1 330px; order: 1; grid-template-columns: repeat(2, 1fr); gap: 10px;
+}
+.cutrow.wide > .gpugrid { order: 2; flex: 1 1 100%; }
 
 /* the READS box — the thesis of the deck */
 .readbox {
@@ -6409,12 +6419,15 @@ S({
           sub: "reads the SAVED LayerNorm output",
           result: DM + "×" + DFF, cls: "gradient" })
       ]), "f-pop"),
-      frag(d("cols wide-l", [
-        d("rowflex top", [
-          gm("dL/dW_up", GR2["L1.W1"], DM + "×" + DFF, 4),
-          gm("dL/dW_down", GR2["L1.W2"], DFF + "×" + DM, 4)
-        ]),
+      /* dL/dW_down is 8×4 — tall and narrow — and dL/dW_up is 4×8 — short
+         and wide. Stacked they cost the height of both; the tall one takes
+         its own column and the short one plus the two callouts fill the
+         space beside it. */
+      frag(d("cols fitleft", [
+        gm("dL/dW_down", GR2["L1.W2"], DFF + "×" + DM, 4),
         d("stack", [
+          gm("dL/dW_up", GR2["L1.W1"], DM + "×" + DFF, 4),
+          d("cols", [
           NN.callout("mem", "Three saved tensors for one sub-layer",
             "<span class='mono'>LN2(h)</span> (" + (SQ * DM) + " elements), " +
             "<span class='mono'>U</span> (" + (SQ * DFF) + ") and " +
@@ -6427,6 +6440,7 @@ S({
             "sub-layer. The deck re-derives all three from first principles in " +
             "JavaScript and compares: max disagreement <span class='mono'>" +
             f(XCHK, 1) + "</span> across every block.")
+          ])
         ])
       ]), "f-fade")
     ];
@@ -13979,18 +13993,21 @@ function cutSlide(o) {
                   : "→ a PARTIAL sum over every output")
         ];
       } });
-      /* Layout, not content: the whole matrix and the two shard cards are
-         both narrow, so they sit side by side in one row instead of being
-         stacked. The build order — matrix, then cards, then the arithmetic —
-         is unchanged, and so is the fragment count. */
+      /* Layout, not content: the whole matrix, the two shard cards and the
+         arithmetic used to be three full-width blocks stacked down the slide,
+         which made these the shortest-scaled slides in the deck. They are all
+         narrow objects, so they share one wrapping row instead. A matrix that
+         is wider than it is tall (W_up is 4×8) cannot sit beside the cards, so
+         on those the arithmetic takes the space beside the matrix and the
+         cards drop to the line below — `wide` switches that. The DOM order,
+         and therefore the build order and the fragment count, is unchanged. */
       return [
         kicker(o.kicker),
         title(o.title, true),
-        d("cutrow", [
+        d("cutrow" + (nc > nr ? " wide" : ""), [
           frag(d("panel w", [ctx.cap, ctx.full]), "f-fade"),
-          frag(cards, "f-pop")
-        ]),
-        frag(d("cols3", [
+          frag(cards, "f-pop"),
+          frag(d("cols3 cutkeys", [
           NN.formula({ rule: "TP mode", sub: P.tp.mode,
             result: P.shape.join("×") + "  →  " + TW + " × " +
                     P.tp.per_gpu_shape.join("×"),
@@ -14002,7 +14019,8 @@ function cutSlide(o) {
             sub: isCol ? "none — the shard is final" : "all_reduce of the output",
             result: isCol ? "0 bytes" : SQ + " × " + DM + " elements",
             cls: isCol ? "activation" : "gradient" })
-        ]), "f-fade")
+          ]), "f-fade")
+        ])
       ].concat((o.extras || function () { return []; })());
     },
     render: function (n, ctx) {
