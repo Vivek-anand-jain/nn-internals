@@ -944,7 +944,8 @@ select.picker:focus-visible { outline: 2px solid var(--weight); outline-offset: 
     "free every activation the moment the next layer has consumed it, so its activation " +
     "memory is roughly one layer deep. Training cannot free anything until the backward " +
     "pass has walked all the way back, so its activation memory is the <em>whole " +
-    "network</em> deep. Same weights, same GEMMs, wildly different memory profile.</p>"));
+    "network</em> deep. Same weights, same GEMMs, wildly different memory profile. " +
+    "<a href='24-prefill-decode.html'>Page 24</a> takes inference apart as its own machine.</p>"));
 
   /* ============================================== reference configs + UI */
   /* Shared canonical figures, so pages 02 / 09 / 10 all quote the same ones. */

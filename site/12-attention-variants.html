@@ -903,8 +903,12 @@
     });
     dSel.value = M.dtype;
 
-    /* log-spaced sequence slider: 2^10 .. 2^20 */
-    const sS = el("input", { type: "range", min: 10, max: 20, step: 1, value: 13 });
+    /* Log-spaced sequence slider, 1K .. 1M tokens. It opens at the default
+       model's own native context length rather than at an arbitrary tick. */
+    const sS = el("input", {
+      type: "range", min: 10, max: 20, step: 1,
+      value: String(Math.round(Math.log(models[Number(mSel.value)].native_seq) / Math.LN2))
+    });
     const sOut = el("span", { class: "out" });
     const bS = el("input", { type: "range", min: 1, max: 64, step: 1, value: 1 });
     const bOut = el("span", { class: "out" });

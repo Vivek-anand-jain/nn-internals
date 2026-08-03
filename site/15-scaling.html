@@ -907,7 +907,11 @@ table.data td.wrap, table.data th.wrap { white-space: normal; max-width: 280px; 
       NN.fmt(a.total / inference, 1) + x + " to " + NN.fmt(b.total / inference, 1) + x +
       "</b>. Almost all of it is the optimizer: " + fsize(a.optClass) + " of the " +
       fsize(a.total) + " total, or " + NN.fmt(100 * a.optClass / a.total, 0) + "%. " +
-      "This is why people who have only ever run inference are surprised by training clusters."));
+      "This is why people who have only ever run inference are surprised by training clusters. " +
+      "Weights-and-nothing-else is only true per token, though: serving keeps a KV cache that " +
+      "grows with context and concurrency, which is " +
+      "<a href='25-kv-cache.html'>page 25</a>, and the two regimes it is spent in are " +
+      "<a href='24-prefill-decode.html'>page 24</a>."));
 
     host.appendChild(NN.callout("mem", "The same five arrays, " + NN.count(BILL_P / T.memory.n_params) + " times bigger",
       "The toy model on this site has <b>" + T.memory.n_params + " parameters</b>. Under this exact " +
@@ -1492,8 +1496,10 @@ table.data td.wrap, table.data th.wrap { white-space: normal; max-width: 280px; 
        fsize(kvCacheBytes(RECIPE, DTB.bf16)) + " per concurrent sequence. The same model with full " +
        "multi-head attention — " + DEFAULT_MODEL.n_heads + " KV heads — would need " +
        fsize(kvCacheBytes(Object.assign({}, RECIPE, { kvRatio: 1 }), DTB.bf16)) + ", a " +
-       NN.fmt(1 / RECIPE.kvRatio, 0) + x + " difference. GQA is a memory optimisation of exactly " +
-       "the kind this page is about, applied to the one class training does not have.",
+       NN.fmt(1 / RECIPE.kvRatio, 0) + x + " difference. GQA " +
+       "(<a href='12-attention-variants.html'>page 12</a>) is a memory optimisation of exactly " +
+       "the kind this page is about, applied to the one class training does not have. " +
+       "<a href='25-kv-cache.html'>Page 25</a> budgets it properly.",
        "dominates serving at high concurrency"],
       ["SwiGLU's third matrix",
        "The MLP term here assumes the classic two-matrix MLP, so it charges " + ACT_MLP + " " + x +

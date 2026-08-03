@@ -1424,7 +1424,8 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
           "<b>replicate</b> the KV heads across groups of ranks — paying duplicate KV cache — or " +
           "cut inside a head, which breaks the locality argument above. This is a real and " +
           "commonly-hit constraint: GQA models with 8 KV heads are one of the concrete reasons " +
-          "TP is so often exactly 8."));
+          "TP is so often exactly 8. <a href='12-attention-variants.html'>Page 12</a> is where " +
+          "GQA comes from, and <a href='25-kv-cache.html'>page 25</a> is the cache it shrinks."));
       } else if (kv < m.n_heads) {
         out.appendChild(NN.callout("why", "Grouped-query attention caps TP",
           m.name + " has " + m.n_heads + " query heads but only <b>" + kv + "</b> KV heads. " +

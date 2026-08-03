@@ -183,8 +183,10 @@
 
     host.appendChild(el("p", { html:
       "and then the traffic arrives, and it looks nothing like " + NN.count(ST.max_seq) +
-      " tokens. Below is the length distribution this page assumes: " + ST.n +
-      " sequences, lognormal, median " + NN.fmt(ST.median_len, 0) + " tokens." }));
+      " tokens. Below is the length distribution this page assumes — a lognormal draw of " +
+      ST.n + " sequences whose sample median is " + NN.fmt(ST.median_len, 1) +
+      " tokens and whose mean is " + NN.fmt(ST.mean_len, 1) + ", against an advertised context " +
+      "of " + NN.count(ST.max_seq) + "." }));
 
     /* length histogram */
     const h = ST.length_hist;
@@ -234,9 +236,9 @@
       abox.innerHTML));
 
     host.appendChild(NN.tiles([
-      { k: "mean length", v: NN.fmt(ST.mean_len, 0), s: "tokens" },
-      { k: "median length", v: NN.fmt(ST.median_len, 0), s: "tokens" },
-      { k: "p90 length", v: NN.fmt(ST.p90_len, 0), s: "tokens" },
+      { k: "mean length", v: NN.fmt(ST.mean_len, 1), s: "tokens" },
+      { k: "median length", v: NN.fmt(ST.median_len, 1), s: "tokens" },
+      { k: "p90 length", v: NN.fmt(ST.p90_len, 1), s: "tokens" },
       { k: "reserved per sequence", v: NN.count(ST.max_seq),
         s: "tokens, whatever the length" },
       { k: "never touched", v: pc(ST.contiguous_waste_frac),

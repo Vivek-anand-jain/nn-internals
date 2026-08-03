@@ -147,7 +147,7 @@
 
   <h2>Reading paths</h2>
   <p class="muted">
-    Almost nobody reads 01 → 17 in order. Four routes that stand on their own,
+    Almost nobody reads 01 → 34 in order. Five routes that stand on their own,
     each one the shortest honest way to a particular question.
   </p>
   <div class="paths" id="paths"></div>
@@ -298,7 +298,8 @@
   NN.$("#classTable").appendChild(tbl);
 
   /* --------------------------------------------------------- the cards */
-  /* Pages 01-10 are the single-GPU arc; 11-17 are the distributed arc. */
+  /* Five parts, and the boundaries below are NN.PAGES': 01-07 the mechanics,
+     08-15 a real transformer, 16-23 many GPUs, 24-31 inference, 32-34 MoE. */
   const c1 = NN.$("#cards1"), c2 = NN.$("#cards2"), c3 = NN.$("#cards3"),
         c4 = NN.$("#cards4"), c5 = NN.$("#cards5");
   NN.PAGES.forEach(function (p) {
@@ -320,17 +321,20 @@
 
   const ROUTES = [
     { t: "The mechanics path",
-      b: "How a network computes and learns, MLP first and then the same argument on a real transformer. Start here if you have never traced a backward pass by hand.",
-      pages: ["01", "02", "03", "04", "05", "06", "07", "08"] },
+      b: "How a network computes and learns, MLP first and then the same argument on a real transformer — with the objective stated before the architecture. Start here if you have never traced a backward pass by hand.",
+      pages: ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10"] },
     { t: "The memory path",
       b: "What a training step costs and why it stops fitting. For anyone who already knows the maths and wants the byte budget.",
-      pages: ["01", "06", "09", "10"] },
+      pages: ["01", "07", "13", "15"] },
     { t: "The distributed path",
-      b: "Every strategy for splitting a model across GPUs. Assumes you know what a backward pass is and what a transformer block contains.",
-      pages: ["10", "11", "12", "13", "14", "15", "16", "17"] },
+      b: "Every strategy for splitting a model across GPUs, from the memory wall that forces them to the composition of all three axes. Assumes you know what a backward pass is and what a transformer block contains.",
+      pages: ["15", "16", "17", "18", "19", "20", "21", "22", "23"] },
+    { t: "The inference path",
+      b: "Serving, not training: a different machine, organised around arithmetic intensity rather than the four tensor classes. Two prerequisites first — what the model predicts, and the attention variants the KV cache drove.",
+      pages: ["08", "12", "24", "25", "26", "27", "28", "29", "30", "31"] },
     { t: "The shortest honest route to “why FSDP exists”",
       b: "Four pages: what backward keeps alive, what one iteration costs, what that becomes at 70B, and what sharding does about it.",
-      pages: ["04", "06", "10", "13"] }
+      pages: ["04", "07", "15", "18"] }
   ];
 
   const pathHost = NN.$("#paths");

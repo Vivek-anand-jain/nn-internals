@@ -1051,8 +1051,8 @@ def main():
     print()
     print("  4. KV allocation")
     st_, bd, dm = a["stats"], a["budget"], a["demo"]
-    print(f"    {st_['n']} sequences, mean length {st_['mean_len']:.0f} "
-          f"(median {st_['median_len']:.0f}), advertised context {MAX_SEQ}")
+    print(f"    {st_['n']} sequences, mean length {st_['mean_len']:.1f} "
+          f"(median {st_['median_len']:.1f}), advertised context {MAX_SEQ}")
     print(f"    contiguous: {st_['contiguous_bytes']/1e9:7.2f} GB reserved, "
           f"{st_['contiguous_waste_frac']*100:.1f}% never touched")
     print(f"    paged     : {st_['paged_bytes']/1e9:7.2f} GB allocated, "

@@ -176,6 +176,18 @@ body { background: var(--page); }
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; font-family: var(--mono); font-size: 16px; }
 .kv .k { color: var(--ink-muted); }
 
+/* ------------------------------------------------- the per-matrix cut row
+   The tensor-parallel "cut this matrix" slides used to stack four full-width
+   blocks — whole matrix, two GPU cards, a formula row, an extras block — and
+   were the shortest-scaled slides in the deck. The whole matrix and the two
+   shard cards are narrow objects, so they go SIDE BY SIDE instead. The panel
+   keeps a floor width because the caption under the title is a sentence, not
+   a label; when the whole matrix is wider than that (W_up is 4×8) the grid
+   of cards drops to its own line rather than being squeezed and clipped. */
+.cutrow { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 18px; }
+.cutrow > .panel { flex: 0 1 auto; min-width: 430px; max-width: 100%; }
+.cutrow > .gpugrid { flex: 1 1 620px; margin: 0; }
+
 /* the READS box — the thesis of the deck */
 .readbox {
   border-radius: 12px; padding: 16px 20px;

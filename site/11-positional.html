@@ -421,6 +421,9 @@
     const scoreBox = el("div");
     const verdictBox = el("div");
 
+    function identity() {
+      const a = []; for (let i = 0; i < M.seq; i++) a.push(i); return a;
+    }
     function permOf(order) { return order.slice(); }
 
     function currentX() {
@@ -537,7 +540,7 @@
       document.createTextNode("add learned position embeddings to the slots")
     ]));
     ctl.appendChild(el("button", {
-      class: "btn", onclick: function () { order = [0, 1, 2, 3].slice(0, M.seq); picked = null; redraw(); }
+      class: "btn", onclick: function () { order = identity(); picked = null; redraw(); }
     }, "Reset order"));
     ctl.appendChild(el("button", {
       class: "btn", onclick: function () { order = M.perm.slice(); picked = null; redraw(); }

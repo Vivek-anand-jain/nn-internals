@@ -735,7 +735,8 @@
     host.appendChild(h3("Where the textbook formula diverges"));
     host.appendChild(p(
       "One row per model, all " + f(R.models.length, 0) +
-      " computed the same way. The pattern is not noise: GQA pulls attention " +
+      " computed the same way. The pattern is not noise: GQA " +
+      "(<a href='12-attention-variants.html'>page 12</a>) pulls attention " +
       "<em>below</em> " + mono("4·d²") + " — it shrinks W_k and W_v to " +
       mono("n_kv_heads") + " worth of columns while W_q and W_o stay full " +
       "width — and SwiGLU pushes the MLP <em>above</em> " + mono("8·d²") +

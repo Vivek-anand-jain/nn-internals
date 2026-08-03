@@ -396,7 +396,7 @@ table.data tr.hi td:first-child { font-weight: 700; }
       const prop = el("div", { class: "tape" });
       R.drafted.forEach(function (t, i) {
         const v = R.verdicts[i];
-        let cls = "draft", badge = null, sub = "q draws";
+        let cls = "draft", badge = null, sub = "proposed";
         if (phase >= 2 && v) {
           if (v.accepted) { cls = "acc"; badge = "keep"; sub = "accepted"; }
           else { cls = "rej"; badge = "reject"; sub = "rejected"; }
@@ -790,8 +790,9 @@ table.data tr.hi td:first-child { font-weight: 700; }
         yMin: 0
       }));
       chartHost.appendChild(el("p", { class: "small muted" },
-        "Blue is the α you selected; grey are the others. Magenta marks each " +
-        "curve's maximum. There is a real interior maximum because the numerator " +
+        "Blue is the α you selected; grey are the others. Magenta traces the " +
+        "locus of maxima across the five curves. Each has a real interior " +
+        "maximum, because the numerator " +
         "saturates — every extra draft token is worth only αⁱ — while the " +
         "denominator keeps growing linearly at " +
         pct(S.timing.cost_ratio_draft_over_target, 1) + " of a target step per " +

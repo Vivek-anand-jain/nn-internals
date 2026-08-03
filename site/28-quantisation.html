@@ -683,7 +683,9 @@ table.data tr.hi td:first-child { font-weight: 700; }
         }],
         width: 900, height: 250,
         xlabel: "effective bits per weight (including the scales)",
-        ylabel: "SQNR (dB)"
+        ylabel: "SQNR (dB)",
+        yMin: Math.min.apply(null, rs.map(function (r) { return r.err.sqnr_db; })) - 1,
+        yMax: Math.max.apply(null, rs.map(function (r) { return r.err.sqnr_db; })) + 1
       }));
       const best = rs[rs.length - 1], worst = rs[0];
       chartHost.appendChild(el("p", { class: "small muted" },
@@ -801,13 +803,16 @@ table.data tr.hi td:first-child { font-weight: 700; }
       (F.range_sweep[F.range_sweep.length - 1].log10x - F.range_sweep[0].log10x).toFixed(0) +
       " decades"));
     const sw = F.range_sweep;
+    const inRange = function (st) { return st === "ok" || st === "subnormal"; };
     host.appendChild(NN.chart.line({
       series: [
         { name: "E4M3", color: "var(--activation)", dots: false,
-          points: sw.filter(function (r) { return r.rel_e4m3 !== null && r.rel_e4m3 > 0; })
+          points: sw.filter(function (r) {
+            return inRange(r.e4m3_status) && r.rel_e4m3 > 0; })
             .map(function (r) { return [r.log10x, r.rel_e4m3]; }) },
         { name: "E5M2", color: "var(--gradient)", dots: false,
-          points: sw.filter(function (r) { return r.rel_e5m2 !== null && r.rel_e5m2 > 0; })
+          points: sw.filter(function (r) {
+            return inRange(r.e5m2_status) && r.rel_e5m2 > 0; })
             .map(function (r) { return [r.log10x, r.rel_e5m2]; }) }
       ],
       width: 900, height: 260, xlabel: "log₁₀(value)",
@@ -826,16 +831,18 @@ table.data tr.hi td:first-child { font-weight: 700; }
     /* --- real tensors --- */
     host.appendChild(el("h3", {}, "Both formats on real tensors from the trace"));
     host.appendChild(table(
-      ["tensor", "n", "|max|", "|min| nonzero", "dynamic range",
-       "E4M3 rel. RMSE (scaled)", "E5M2 rel. RMSE (scaled)",
-       "E4M3 flushed to 0", "E5M2 flushed to 0"],
+      ["tensor", "n", "|max|", "|min|≠0", "range",
+       "E4M3 err", "E5M2 err", "E4M3 →0", "E5M2 →0"],
       F.tensors.map(function (r) {
         return [r.tensor, String(r.n), sci(r.absmax, 2), sci(r.absmin, 2),
           fmt(r.dynamic_range, 1) + "×",
           pct(r.e4m3.scaled.rel_rmse), pct(r.e5m2.scaled.rel_rmse),
-          r.e4m3.unscaled_flushed_to_zero + " / " + r.n,
-          r.e5m2.unscaled_flushed_to_zero + " / " + r.n];
+          r.e4m3.unscaled_flushed_to_zero + "/" + r.n,
+          r.e5m2.unscaled_flushed_to_zero + "/" + r.n];
       })));
+    host.appendChild(el("p", { class: "small muted" },
+      "“err” is relative RMSE with a per-tensor scale applied first; “→0” counts " +
+      "values flushed to zero with no scaling at all."));
     host.appendChild(el("p", { class: "small muted" },
       "The first two rows are the real weights and real gradients of layer 0. " +
       "With a per-tensor scale applied first, E4M3 wins on both — precision is " +
@@ -1027,7 +1034,7 @@ table.data tr.hi td:first-child { font-weight: 700; }
         s: "FLOP/byte — below this you are bandwidth-bound" },
       { k: "prefill intensity", v: NN.count(Math.round(base.prefill.intensity)),
         s: "FLOP/byte · " + base.prefill.bound + "-bound", cls: "activation" },
-      { k: "decode intensity", v: fmt(base.decode.intensity, 2),
+      { k: "decode intensity", v: fmt(base.decode.intensity, 3),
         s: "FLOP/byte · " + base.decode.bound + "-bound", cls: "gradient" },
       { k: "the gap", v: fmt(base.prefill.intensity / base.decode.intensity, 0) + "×",
         s: "two regimes, one model" }

@@ -476,6 +476,13 @@ mark.hl { background: var(--gradient-w); color: var(--gradient); padding: 0 3px;
       "<code>TF2.dOut</code>: max |&Delta;| = <b>" + sci(CHECK.dOut) + "</b>"));
 
     host.appendChild(el("p", { html:
+      "Squared error against a fixed target is used here because it makes the seed one line of " +
+      "arithmetic you can check by eye. A language model minimises cross-entropy over the " +
+      "vocabulary instead, which changes this seed and nothing else on the page — every step " +
+      "below takes <code>dL/dout</code> as given. <a href='08-what-it-predicts.html'>Page 08 · " +
+      "What It Predicts</a> derives that seed for the real objective." }));
+
+    host.appendChild(el("p", { html:
       "From here the job is mechanical and completely local: at every operation, take the gradient " +
       "with respect to that operation's output, and produce (a) the gradient with respect to its " +
       "inputs, to hand further back, and (b) the gradient with respect to its parameters, to keep. " +

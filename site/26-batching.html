@@ -368,8 +368,12 @@
       "<code>max(bytes ÷ " + NN.bytes(M.gpu.hbm_bw_bytes_per_s) + "/s, FLOPs ÷ (" +
       M.gpu.bf16_dense_tflops + " TFLOP/s × MFU " + M.mfu + "))</code>. " +
       "A decode-only iteration lands on the bandwidth side of that max; a prefill lands on " +
-      "the compute side. The ridge between them is " + NN.fmt(M.ridge_flops_per_byte, 1) +
-      " FLOP/byte, the same ridge <a href=\"24-prefill-decode.html\">page 24</a> uses." }));
+      "the compute side. The ridge between them is peak FLOP/s ÷ bandwidth = " +
+      NN.fmt(M.ridge_flops_per_byte, 1) + " FLOP/byte — the same figure <code>infer.js</code> " +
+      "computes independently for this device (" +
+      NN.fmt(I.roofline.filter(function (g) { return g.gpu === M.gpu.name; })[0]
+               .ridge_flops_per_byte, 1) + "), which is the number " +
+      "<a href=\"24-prefill-decode.html\">page 24</a> is about." }));
 
     host.appendChild(NN.tiles([
       { k: "requests", v: String(w.n), s: "in the queue" },

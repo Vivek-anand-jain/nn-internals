@@ -13526,7 +13526,7 @@
     {
      "label": "a small gradient",
      "value": 0.0025,
-     "why": "below E4M3's smallest normal (2^-6); E5M2 still has it as a normal",
+     "why": "below E4M3's smallest normal (2^-6), so E4M3 holds it as a subnormal and loses most of its precision; E5M2 still has it as an ordinary normal number",
      "e4m3": {
       "code": 1,
       "bits": "00000001",
@@ -13555,9 +13555,40 @@
      "rel_err_e5m2": 0.0234375
     },
     {
+     "label": "a smaller gradient",
+     "value": 0.0003,
+     "why": "E4M3 flushes this to zero -- it is below half of E4M3's smallest subnormal. E5M2 carries it as a normal, with its usual relative error. This is the underflow that makes E5M2 the gradient format.",
+     "e4m3": {
+      "code": 128,
+      "bits": "10000000",
+      "sign": "1",
+      "exponent": "0000",
+      "mantissa": "000",
+      "value": 0.0,
+      "kind": "zero",
+      "format": "e4m3",
+      "status": "underflow",
+      "exact": 0.0
+     },
+     "e5m2": {
+      "code": 13,
+      "bits": "00001101",
+      "sign": "0",
+      "exponent": "00011",
+      "mantissa": "01",
+      "value": 0.00030517578125,
+      "kind": "normal",
+      "format": "e5m2",
+      "status": "ok",
+      "exact": 0.00030517578125
+     },
+     "rel_err_e4m3": 1.0,
+     "rel_err_e5m2": 0.017252604167
+    },
+    {
      "label": "a tiny gradient",
      "value": 1e-06,
-     "why": "E4M3 flushes this to zero. E5M2 keeps it as a subnormal. This is the underflow that makes E5M2 the gradient format.",
+     "why": "past the bottom of BOTH formats. E5M2 reaches further down than E4M3 but it is still an 8-bit float, and this is why loss scaling does not go away just because you moved to FP8.",
      "e4m3": {
       "code": 128,
       "bits": "10000000",
@@ -15970,6 +16001,12 @@
      4,
      3,
      5,
+     5,
+     5,
+     2,
+     2,
+     0,
+     5,
      5
     ],
     "rounds": [
@@ -16048,6 +16085,133 @@
       "bonus": true,
       "emitted": 5,
       "n_emitted": 5
+     },
+     {
+      "drafted": [
+       1,
+       2,
+       4,
+       0
+      ],
+      "verdicts": [
+       {
+        "i": 0,
+        "token": 1,
+        "p": 0.097622059022,
+        "q": 0.22873409145,
+        "accept_prob": 0.4267927811,
+        "u": 0.66056789591,
+        "accepted": false,
+        "replacement": 5
+       }
+      ],
+      "n_accepted": 0,
+      "rejected_at": 0,
+      "bonus": false,
+      "emitted": 5,
+      "n_emitted": 1
+     },
+     {
+      "drafted": [
+       1,
+       5,
+       3,
+       4
+      ],
+      "verdicts": [
+       {
+        "i": 0,
+        "token": 1,
+        "p": 0.10593253494,
+        "q": 0.22873409145,
+        "accept_prob": 0.46312525724,
+        "u": 0.46903904763,
+        "accepted": false,
+        "replacement": 2
+       }
+      ],
+      "n_accepted": 0,
+      "rejected_at": 0,
+      "bonus": false,
+      "emitted": 2,
+      "n_emitted": 1
+     },
+     {
+      "drafted": [
+       2,
+       0,
+       1,
+       5
+      ],
+      "verdicts": [
+       {
+        "i": 0,
+        "token": 2,
+        "p": 0.17490141813,
+        "q": 0.22074444874,
+        "accept_prob": 0.79232532971,
+        "u": 0.53431002856,
+        "accepted": true
+       },
+       {
+        "i": 1,
+        "token": 0,
+        "p": 0.20484238569,
+        "q": 0.17222631415,
+        "accept_prob": 1.0,
+        "u": 0.46208668142,
+        "accepted": true
+       },
+       {
+        "i": 2,
+        "token": 1,
+        "p": 0.097746665883,
+        "q": 0.21261127646,
+        "accept_prob": 0.45974356352,
+        "u": 0.90024226306,
+        "accepted": false,
+        "replacement": 5
+       }
+      ],
+      "n_accepted": 2,
+      "rejected_at": 2,
+      "bonus": false,
+      "emitted": 5,
+      "n_emitted": 3
+     },
+     {
+      "drafted": [
+       5,
+       1,
+       1,
+       5
+      ],
+      "verdicts": [
+       {
+        "i": 0,
+        "token": 5,
+        "p": 0.2501802024,
+        "q": 0.091282259264,
+        "accept_prob": 1.0,
+        "u": 0.16081195882,
+        "accepted": true
+       },
+       {
+        "i": 1,
+        "token": 1,
+        "p": 0.12069666047,
+        "q": 0.22873409145,
+        "accept_prob": 0.52767237148,
+        "u": 0.79183911116,
+        "accepted": false,
+        "replacement": 5
+       }
+      ],
+      "n_accepted": 1,
+      "rejected_at": 1,
+      "bonus": false,
+      "emitted": 5,
+      "n_emitted": 2
      }
     ],
     "k": 4,

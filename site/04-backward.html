@@ -1107,7 +1107,9 @@ td.ok  { color: var(--good); }
       "is roughly the largest single layer, not the sum of all of them. Training holds all " +
       "of them, from the first layer's output until backward walks back to it. Same weights, " +
       "same FLOPs per token, completely different memory profile — and it is the backward " +
-      "pass reading <span class='mono'>a1</span> that causes the difference."));
+      "pass reading <span class='mono'>a1</span> that causes the difference. Inference does " +
+      "keep one thing, and only one: <a href='25-kv-cache.html'>page 25</a> is the KV cache, " +
+      "and <a href='24-prefill-decode.html'>page 24</a> is why it exists."));
   })();
 
   /* ================================================================== *

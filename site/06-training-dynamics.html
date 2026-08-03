@@ -271,13 +271,13 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
 
   function runAdam(o) {
     const n = o.n_steps, th = theta0().slice();
+    const decayFrac = o.decay === undefined ? D.schedules.decay_frac : o.decay;
     const m = new Array(NP).fill(0), v = new Array(NP).fill(0);
     const loss = [], lr = [], live = [], gn = [];
     for (let t = 0; t < n; t++) {
       const r = batchGrad(th, BATCH);
       if (!isFinite(r.loss) || r.loss > 1e12) break;
-      const rate = lrAt(t, o.kind, n, o.warmup, o.peak, D.schedules.min_lr,
-                        D.schedules.decay_frac);
+      const rate = lrAt(t, o.kind, n, o.warmup, o.peak, D.schedules.min_lr, decayFrac);
       loss.push(r.loss); lr.push(rate); live.push(r.live);
       gn.push(Math.sqrt(r.grad.reduce(function (a, g) { return a + g * g; }, 0)));
       for (let i = 0; i < NP; i++) {
@@ -657,11 +657,13 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
 
     const state = { kind: "cosine", warmup: S.warmup_steps, peak: S.peak_lr,
                     decay: S.decay_frac };
+    /* slider bounds, derived from the generator's peak rather than invented */
+    const PEAK_MAX = 2 * S.peak_lr, PEAK_MIN = S.peak_lr / 25;
 
     const pills = el("div", { class: "pillrow" });
     S.curves.forEach(function (c) {
-      const p = el("pill" === "x" ? "span" : "button",
-        { class: "pill" + (c.key === state.kind ? " on" : "") }, c.name);
+      const p = el("button", { class: "pill" + (c.key === state.kind ? " on" : "") },
+                   c.name);
       p.addEventListener("click", function () {
         state.kind = c.key;
         NN.$$(".pill", pills).forEach(function (q) { q.classList.remove("on"); });
@@ -686,8 +688,10 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
     }
 
     const ctl = el("div", { class: "ctlgrid" }, [
-      slider("warmup", "warmup steps", 0, 30, 1, function (v) { return v + " steps"; }),
-      slider("peak", "peak learning rate", 0.02, 1.2, 0.01, function (v) { return fmt(v, 3); }),
+      slider("warmup", "warmup steps", 0, Math.round(S.n_steps / 2), 1,
+             function (v) { return v + " steps"; }),
+      slider("peak", "peak learning rate", PEAK_MIN, PEAK_MAX, 0.01,
+             function (v) { return fmt(v, 3); }),
       slider("decay", "WSD decay fraction", 0.05, 0.6, 0.05,
              function (v) { return Math.round(v * 100) + "% of the run"; })
     ]);
@@ -709,11 +713,11 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
 
     function redraw() {
       const r = runAdam({ kind: state.kind, warmup: state.warmup, peak: state.peak,
-                          n_steps: S.n_steps });
+                          n_steps: S.n_steps, decay: state.decay });
       mount(lrC, NN.chart.line({
         series: [{ name: labelFor(state.kind), color: C_LR, points: pts(r.lr), dots: false }],
         width: 700, height: 180, xlabel: "step", ylabel: "learning rate",
-        xMin: 0, xMax: S.n_steps - 1, yMin: 0, yMax: 1.2
+        xMin: 0, xMax: S.n_steps - 1, yMin: 0, yMax: PEAK_MAX
       }));
       const floor = D.warmup.collapse.constant_predictor_loss;
       mount(lossC, NN.chart.line({
@@ -1367,7 +1371,7 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
     host.appendChild(NN.callout("key", "WHY THIS MATTERS AT SCALE", W.claim +
       " In a transformer the parameters with the smallest gradients are the ones L2 " +
       "would hit hardest: rarely-used embedding rows, the tail of the vocabulary, an " +
-      "expert that the router has stopped选ing. Under Adam+L2 those are decayed at " +
+      "expert the router has stopped choosing. Under Adam+L2 those are decayed at " +
       "close to a full learning rate per step regardless of λ, which is a very " +
       "efficient way to delete the parts of a model that see the least data. Every " +
       "large-model recipe uses decoupled decay, and the LayerNorm gains and biases " +

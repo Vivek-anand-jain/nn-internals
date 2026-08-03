@@ -411,6 +411,12 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       "the real one: <b>" + M.architecture + "</b>. There are no bias vectors on the four " +
       "projections or the two MLP matrices; the only biases in the model are LayerNorm's."));
 
+    host.appendChild(p(
+      "This page is about <i>how</i> the stack computes, not <i>what</i> it is computing for. " +
+      "The objective — X and Y, next-token prediction, and the cross-entropy that scores it — " +
+      "is <a href='08-what-it-predicts.html'>page 08 · What It Predicts</a>, and everything " +
+      "below assumes you have read it."));
+
     host.appendChild(NN.callout("key", "Read the convention before the matrices",
       "<p>" + M.convention + "</p>" +
       "<p>So a hidden state is a <b>row</b>: <code>x</code> is (" + SEQ + "×" + DM + "), " +
@@ -426,8 +432,10 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     host.appendChild(el("h3", {}, "The input to block 0"));
     host.appendChild(p(
       "Three tokens, four channels each. In a real model these rows come out of an embedding " +
-      "table lookup (plus positional information); here they are fixed numbers so every " +
-      "downstream value is checkable by hand."));
+      "table lookup, plus positional information — attention itself is orderless, and nothing " +
+      "on this page puts order into the stream, so the rows would be a permutation-invariant " +
+      "set without it. <a href='11-positional.html'>Page 11 · Position</a> is how order gets " +
+      "back in. Here they are fixed numbers so every downstream value is checkable by hand."));
     host.appendChild(row([
       mat({ name: "x", values: x, cls: "activation", rows: ROWTOK, cols: CHAN,
             tokenRows: true, caption: "rows = tokens, columns = the " + DM + " channels of the stream" })
@@ -1104,7 +1112,8 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       "exponentiation those entries are exactly zero and contribute nothing. This is what makes " +
       "the model causal: the prediction at “" + TOK[0] + "” cannot depend on “" +
       TOK[2] + "”, which is the only reason a single forward pass can be used to train on " +
-      "every next-token prediction in the sequence at once."));
+      "every next-token prediction in the sequence at once — the objective " +
+      "<a href='08-what-it-predicts.html'>page 08</a> sets up."));
 
     const maskM = [];
     let allowed = 0;
@@ -1880,8 +1889,10 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     host.appendChild(p(
       "Nothing on this page needed a fifth tensor class. The stream, the projections' outputs, " +
       "the attention probabilities and the MLP's hidden state are all " +
-      "activations; W_q through W2 and the LayerNorm gains are all weights. The next two pages " +
-      "add the other two colours back."));
+      "activations; W_q through W2 and the LayerNorm gains are all weights. " +
+      "<a href='10-transformer-backward.html'>Page 10</a> adds the gradients and " +
+      "<a href='13-transformer-cost.html'>page 13</a> adds the optimizer state, which puts all " +
+      "four colours back on the same block."));
     host.appendChild(NN.legend(["weight", "activation", "gradient", "optimizer"]));
   })();
 

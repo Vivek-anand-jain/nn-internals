@@ -541,10 +541,17 @@ def build_quantisation():
         (W[0][0], "L0.W1[0][0]", "a real weight from tf2.json"),
         (1.0 / 3.0, "1/3", "3 mantissa bits vs 2: the precision gap, visible"),
         (2.5e-3, "a small gradient",
-         "below E4M3's smallest normal (2^-6); E5M2 still has it as a normal"),
+         "below E4M3's smallest normal (2^-6), so E4M3 holds it as a "
+         "subnormal and loses most of its precision; E5M2 still has it as an "
+         "ordinary normal number"),
+        (3.0e-4, "a smaller gradient",
+         "E4M3 flushes this to zero -- it is below half of E4M3's smallest "
+         "subnormal. E5M2 carries it as a normal, with its usual relative "
+         "error. This is the underflow that makes E5M2 the gradient format."),
         (1.0e-6, "a tiny gradient",
-         "E4M3 flushes this to zero. E5M2 keeps it as a subnormal. This is "
-         "the underflow that makes E5M2 the gradient format."),
+         "past the bottom of BOTH formats. E5M2 reaches further down than "
+         "E4M3 but it is still an 8-bit float, and this is why loss scaling "
+         "does not go away just because you moved to FP8."),
         (5000.0, "a large activation",
          "past E4M3's maximum finite value of 448, so E4M3 saturates; E5M2 "
          "carries it as an ordinary normal number."),
@@ -1326,7 +1333,7 @@ def build_spec():
 
     # a demonstration run, for the animation
     demo_rng = random.Random(99)
-    demo_seq, demo_rounds = spec_rollout(pair, IT.PROMPT, 6, 4, demo_rng, "exact")
+    demo_seq, demo_rounds = spec_rollout(pair, IT.PROMPT, 12, 4, demo_rng, "exact")
 
     # ---------------- expected tokens per step and wall clock ------------
     # E[accepted] with i.i.d. acceptance alpha = sum_{i=1..k} alpha^i.
