@@ -52,7 +52,7 @@
           font-size: .68rem; color: var(--ink-muted); }
 .fanrow .lab { width: 74px; flex: none; }
 .fanrow .blocks { display: flex; gap: 1px; flex-wrap: nowrap; overflow: hidden; }
-.fanrow .blocks i { width: 5px; height: 11px; border-radius: 1px; display: block; }
+.fanrow .blocks i { width: 7px; height: 12px; border-radius: 1px; display: block; }
 </style>
 </head>
 <body>
@@ -246,6 +246,10 @@
       el("span", { class: "k" }, [
         el("span", { class: "sw", style: { background: C.waste, opacity: ".55" } }),
         "reserved, never touched"
+      ]),
+      el("span", { class: "k" }, [
+        el("span", { class: "sw", style: { background: C.used, opacity: ".62" } }),
+        "a sequence's partial last block"
       ]),
       el("span", { class: "k" }, [
         el("span", { class: "sw", style: { background: C.free } }), "free pool"
@@ -611,6 +615,20 @@
     wrapPic.appendChild(picHead);
     const fan = el("div", { class: "fanwrap" });
     wrapPic.appendChild(fan);
+    wrapPic.appendChild(el("div", { class: "memkey", style: { marginTop: "10px" } }, [
+      el("span", { class: "k" }, [
+        el("span", { class: "sw", style: { background: C.shared } }),
+        "shared prefix block, refcounted"
+      ]),
+      el("span", { class: "k" }, [
+        el("span", { class: "sw", style: { background: C.waste, opacity: ".85" } }),
+        "copy-on-write block at the boundary"
+      ]),
+      el("span", { class: "k" }, [
+        el("span", { class: "sw", style: { background: C.used, opacity: ".62" } }),
+        "private block"
+      ])
+    ]));
 
     /* --- slider --- */
     const maxN = PS.curve[PS.curve.length - 1][0];
@@ -641,7 +659,7 @@
         " private = " + r.blocks_with + " blocks"));
 
       fan.innerHTML = "";
-      const CAP = 60;   /* blocks drawn per row before eliding */
+      const CAP = PS.shared_full_blocks + 2;   /* blocks drawn per row before eliding */
       function row(label, kinds, note) {
         const bl = el("div", { class: "blocks" });
         kinds.slice(0, CAP).forEach(function (kd) {

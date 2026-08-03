@@ -94,6 +94,13 @@ def maxdiff(A, B):
                for i in range(len(A)) for j in range(len(A[0])))
 
 
+def flat_e(exp):
+    """Every parameter of one expert, so counts follow the actual tensors
+    rather than assuming all experts are the same size."""
+    return ([x for r in exp["W_up"] for x in r] +
+            [x for r in exp["W_down"] for x in r])
+
+
 def expert_forward(v, e):
     """One expert is just an MLP. Nothing exotic."""
     u = matvec(v, EXPERTS[e]["W_up"])
@@ -223,7 +230,7 @@ def expert_parallel(table, groups):
             "experts": mine,
             "home_tokens": [t for t in range(N_TOKENS) if home[t] == g],
             "tokens_after_dispatch": held,
-            "expert_params": sum(D_MODEL * D_FF + D_FF * D_MODEL for _ in mine),
+            "expert_params": sum(len(flat_e(EXPERTS[e])) for e in mine),
         })
 
     sent = sum(dispatch[i][j] for i in range(EP) for j in range(EP) if i != j)
@@ -296,10 +303,13 @@ def load_balance(table, groups):
                 {"expert": e, "token": item["token"], "slot": item["slot"]})
 
     # what a collapsed router would score, for contrast
-    collapsed_f = [1.0] + [0.0] * (N_EXPERTS - 1)
-    collapsed_P = [1.0] + [0.0] * (N_EXPERTS - 1)
-    aux_collapsed = N_EXPERTS * sum(collapsed_f[e] * collapsed_P[e]
-                                    for e in range(N_EXPERTS))
+    # The worst case is NOT N in general. With top-k routing every token
+    # occupies k slots spread over k DISTINCT experts, so no expert can hold
+    # more than 1/k of the slots: f_e <= 1/k, and the maximum of N * sum
+    # f_e P_e is N/k. N is reachable only at k = 1. (Caught by page 33,
+    # whose collapse slider could not reach the 4.0 this used to claim.)
+    aux_collapsed_k1 = float(N_EXPERTS)
+    aux_collapsed_at_k = N_EXPERTS / TOP_K
     uniform = N_EXPERTS * sum((1 / N_EXPERTS) * (1 / N_EXPERTS)
                               for _ in range(N_EXPERTS))
 
@@ -308,7 +318,13 @@ def load_balance(table, groups):
         "aux_loss": aux,
         "aux_loss_formula": "N * sum_e f_e * P_e",
         "aux_loss_if_uniform": uniform,
-        "aux_loss_if_collapsed": aux_collapsed,
+        "aux_loss_if_collapsed_k1": aux_collapsed_k1,
+        "aux_loss_max_at_this_k": aux_collapsed_at_k,
+        "collapsed_bound_note": "With top-k routing f_e <= 1/k, so the "
+                                "auxiliary loss is bounded by N/k, not N. "
+                                "At k=" + str(TOP_K) + " the ceiling is " +
+                                str(N_EXPERTS / TOP_K) + "; the full N is "
+                                "only reachable at k=1.",
         "aux_gradient_note": "Only P_e is differentiable. f_e is a hard "
                              "token count with no gradient, so the loss "
                              "pushes the router's PROBABILITIES toward "
@@ -411,12 +427,20 @@ def inference_view():
     return {
         "rows": rows,
         "model": "one DeepSeek-V3-shaped MoE layer, 256 experts, top-8",
-        "why": "At batch 1 you read eight whole experts to do eight tokens' "
-               "worth of arithmetic. Intensity is about 2 FLOP/byte against "
-               "an H100 ridge near 148, so you are at roughly 1% of peak. "
-               "Batching helps more here than in a dense model, because it "
-               "raises the tokens-per-expert count -- but only until you are "
-               "touching all the experts anyway.",
+        "identity": "intensity == avg_tokens_per_expert, exactly. flops is "
+                    "2*pe*pairs and bytes is experts_touched*pe*2, so pe and "
+                    "the factor of 2 cancel and only the ratio survives. The "
+                    "two columns in `rows` are the same number, which is "
+                    "worth showing rather than hiding: an expert's arithmetic "
+                    "intensity IS how many tokens it got.",
+        "why": "At batch 1, top-8 routing touches 8 experts with 1 token "
+               "each, so intensity is exactly 1.0 FLOP/byte against an H100 "
+               "ridge of 147.76 -- about 0.7% of peak. You read eight entire "
+               "expert weight matrices to do eight tokens of arithmetic. "
+               "Batching helps more here than in a dense model because it "
+               "raises tokens-per-expert -- but only until you are touching "
+               "every expert anyway, after which it behaves like a dense "
+               "model of the ACTIVE parameter count.",
         "caveat": "This ignores the expert-parallel all-to-all, which in "
                   "decode is a latency cost paid per token and is often the "
                   "real bottleneck rather than the weight reads.",

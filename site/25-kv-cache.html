@@ -961,9 +961,10 @@
         "the <code>n_kv_heads</code> term in the formula above. They are the reason " +
         gb(rLong.mha_bytes_if_no_gqa) + " became " + gb(rLong.bytes_per_sequence) + "." }),
       el("li", { html: "<b>" + plink("quant") + "</b> — the cache can be stored in fewer bytes per " +
-        "element too, but note the difference: quantising the <em>weights</em> keeps the answer " +
-        "exact-ish for a fixed rounding, while quantising the <em>cache</em> gives up the proof in " +
-        "section 3. That is a real trade, not a free one." }),
+        "element too, and the dtype selector above prices it. But note what changes: quantising " +
+        "the <em>weights</em> perturbs the model once, identically for every request. Quantising " +
+        "the <em>cache</em> perturbs each request's own history, and the equality proven in " +
+        "section 3 stops holding. Same arithmetic saving, different guarantee." }),
       el("li", { html: "<b>" + plink("flash") + "</b> — FlashAttention never materialises the " +
         "seq" + MUL + "seq score matrix; the KV cache is the orthogonal saving, on the inputs to " +
         "that matrix rather than the matrix itself. Both are exact, and both were proven exact " +

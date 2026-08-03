@@ -451,8 +451,8 @@ table.data td.good { color: var(--good); }
       out.appendChild(el("div", { class: "scrollx" }, t));
 
       out.appendChild(el("p", { class: "small muted", html:
-        "<b>MODEL, NOT MEASUREMENT.</b> " + code("PARALLEL.cost_model._status") + ": " +
-        COST._status + " The interference term is this page's own closed form and it is " +
+        "<b>" + code("PARALLEL.cost_model._status") + ": " + COST._status + "</b> " +
+        "The interference term is this page's own closed form and it is " +
         "deliberately crude: it charges prefill work to decode at full rate and assumes " +
         "perfect steady state, no queueing, and no chunking. Chunked prefill " +
         "(<a href='26-batching.html'>page 26</a>) is exactly the technique that softens this " +
@@ -777,7 +777,8 @@ table.data td.good { color: var(--good); }
         "Source: " + P.interconnects._source + "." }));
 
       out.appendChild(el("p", { class: "small muted", html:
-        "<b>MODEL, NOT MEASUREMENT.</b> " + COST._status + " This transfer is priced with " +
+        "<b>" + code("PARALLEL.cost_model._status") + ": " + COST._status + "</b> " +
+        "This transfer is priced with " +
         code(COST.time_bytes) + " at " + code("achieved_fraction") + " = " +
         COST.achieved_fraction + " (" + COST.achieved_note + ") plus one link latency. It " +
         "assumes the copy is one contiguous stream that overlaps nothing. Real " +

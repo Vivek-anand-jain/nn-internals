@@ -1,0 +1,1156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 12 Attention Variants</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+  /* Page-local layout only. No new tensor hues, no raw hex.
+     weight     = parameters (W_q, W_k, W_v, W_o, W_dkv, W_uk, W_uv)
+     activation = anything computed and kept — K, V, the latent c, the
+                  probabilities, the outputs, and therefore the KV CACHE
+     --accent / --warning / --critical carry status, never a tensor class. */
+
+  section.block { scroll-margin-top: 74px; }
+
+  /* ------------------------------------------------------------ matrices */
+  .matwrap { display: inline-block; vertical-align: top; margin: 0 16px 14px 0; }
+  .matname {
+    font-family: var(--mono); font-size: .78rem; margin-bottom: 5px;
+    display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  }
+  .matname b { font-weight: 700; }
+  .matname .sh { color: var(--ink-muted); font-size: .72rem; font-weight: 400; }
+  .matgrid { display: grid; gap: 2px; }
+  .mc {
+    font-family: var(--mono); font-size: .72rem; text-align: right;
+    font-variant-numeric: tabular-nums; padding: 4px 6px; border-radius: 3px;
+    background: var(--surface-3); color: var(--ink);
+    border: 1px solid transparent; white-space: nowrap;
+  }
+  .mc.hdr {
+    background: transparent; color: var(--ink-muted); font-size: .64rem;
+    text-align: center; padding: 2px 4px;
+  }
+  .mc.rowhdr { text-align: left; }
+  .mc.is-activation { background: var(--activation-w); color: var(--activation); }
+  .mc.is-weight     { background: var(--weight-w);     color: var(--weight); }
+  .mc.zero { opacity: .4; }
+  .mc.hatch {
+    background-image: repeating-linear-gradient(45deg,
+      var(--surface-3), var(--surface-3) 3px,
+      var(--surface-1) 3px, var(--surface-1) 7px);
+    background-color: var(--surface-2);
+    color: var(--ink-muted); text-align: center;
+  }
+
+  /* ------------------------------------------------------------- panels */
+  .panel {
+    background: var(--surface-2); border: 1px solid var(--hairline);
+    border-radius: 8px; padding: 12px 14px; margin: 12px 0;
+  }
+  .panel .ph {
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    font-family: var(--mono); font-size: .8rem; font-weight: 700;
+    margin-bottom: 8px;
+  }
+  .kvlist {
+    display: grid; grid-template-columns: 210px 1fr; gap: 3px 12px;
+    font-family: var(--mono); font-size: .76rem;
+  }
+  .kvlist .k { color: var(--ink-muted); }
+  .kvlist .v { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  .verdict {
+    display: flex; align-items: flex-start; gap: 9px; margin: 10px 0;
+    font-family: var(--mono); font-size: .82rem; color: var(--good);
+    line-height: 1.5;
+  }
+  .verdict.bad { color: var(--critical); }
+  .verdict .tick { font-size: 1rem; line-height: 1.2; }
+
+  .badge {
+    font-family: var(--mono); font-size: .62rem; font-weight: 700;
+    letter-spacing: .08em; text-transform: uppercase;
+    padding: 2px 7px; border-radius: 20px;
+    border: 1px solid var(--hairline); color: var(--ink-muted);
+    white-space: nowrap;
+  }
+  .badge.lit { border-color: var(--warning); color: var(--warning); }
+  .badge.derived { border-color: var(--activation); color: var(--activation); }
+
+  /* ------------------------------------------------------- head sharing */
+  .morphwrap { display: block; width: 100%; overflow-x: auto; }
+  .morph { display: block; margin: 0 auto; }
+  .morph text { font-family: var(--mono); fill: var(--ink-2); }
+  .morph .lbl { font-size: 11px; }
+  .morph .sub { font-size: 9px; fill: var(--ink-muted); }
+  .morph .big { font-size: 12px; font-weight: 700; }
+
+  /* ------------------------------------------------------------- inputs */
+  .sliderrow {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    margin: 9px 0; font-family: var(--mono); font-size: .78rem;
+  }
+  .sliderrow label { color: var(--ink-muted); min-width: 122px; }
+  .sliderrow input[type=range] { flex: 1; min-width: 150px; accent-color: var(--activation); }
+  .sliderrow .out {
+    min-width: 108px; text-align: right; font-variant-numeric: tabular-nums;
+    color: var(--ink); font-weight: 700;
+  }
+  select.nn {
+    font-family: var(--mono); font-size: .76rem; padding: 5px 8px;
+    background: var(--surface-3); color: var(--ink);
+    border: 1px solid var(--hairline); border-radius: 6px;
+  }
+  .selrow { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; margin: 10px 0; }
+  .selrow span.k {
+    font-family: var(--mono); font-size: .72rem; color: var(--ink-muted);
+  }
+
+  /* --------------------------------------------------------------- misc */
+  .twocol { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+  @media (max-width: 900px) { .twocol { grid-template-columns: 1fr; } }
+  .scrollx { overflow-x: auto; padding-bottom: 4px; }
+  table.data tr.lit td { background: var(--surface-2); }
+  .keyrow { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 0; }
+  .keyrow span {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: var(--mono); font-size: .72rem; color: var(--ink-2);
+  }
+  .keyrow i {
+    width: 20px; height: 13px; border-radius: 3px; display: inline-block;
+    border: 1px solid var(--hairline-2);
+  }
+  .eq { font-family: var(--mono); font-size: .86rem; }
+  .varchips { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+  .varchip {
+    font-family: var(--mono); font-size: .76rem; padding: 6px 12px;
+    border-radius: 7px; background: var(--surface-3);
+    border: 1px solid var(--hairline); cursor: pointer; user-select: none;
+    transition: border-color .2s, background .2s, color .2s;
+  }
+  .varchip.on { border-color: var(--activation); background: var(--activation-w); color: var(--activation); }
+</style>
+</head>
+
+<body>
+
+<noscript>
+  <div class="wrap" style="padding-top:24px">
+    <div class="callout warn"><div class="t">JavaScript required</div>
+    Every number on this page is rendered from the generated traces
+    <code>assets/data/attnvar.js</code> and <code>assets/data/trace.js</code>.
+    With JS disabled there is nothing to read.</div>
+  </div>
+</noscript>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 12</div>
+    <h1>Attention Variants</h1>
+    <p class="lede" id="lede"></p>
+  </div>
+
+  <section class="block" id="cost"></section>
+  <section class="block" id="same"></section>
+  <section class="block" id="sharing"></section>
+  <section class="block" id="rank"></section>
+  <section class="block" id="mla"></section>
+  <section class="block" id="calc"></section>
+  <section class="block" id="real"></section>
+  <section class="block" id="tradeoff"></section>
+  <section class="block" id="next"></section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/attnvar.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T = NN.T;                 /* trace.js — reference configs, dtypes    */
+  const A = window.ATTNVAR;       /* code/attention_variants.py              */
+
+  if (!A) {
+    document.body.insertBefore(
+      NN.el("div", { class: "wrap" }, [
+        NN.callout("warn", "attnvar.js did not load",
+          "Run <code>python3 code/attention_variants.py</code> to regenerate " +
+          "<code>assets/data/attnvar.js</code>.")
+      ]), document.body.firstChild);
+    return;
+  }
+
+  /* ===================================================================== */
+  /*  helpers                                                              */
+  /* ===================================================================== */
+  const el = NN.el, f = NN.fmt;
+  const M = A.meta;
+  const ORDER = M.variant_order;
+
+  function h2(t) { return el("h2", {}, t); }
+  function h3(t) { return el("h3", {}, t); }
+  function p(html) { return el("p", { html: html }); }
+  function small(html) { return el("p", { class: "small muted", html: html }); }
+  function code(x) { return "<code>" + x + "</code>"; }
+  function sci(x) { return x === 0 ? "0 (exact)" : Number(x).toExponential(3); }
+  function verdict(pass, text, detail) {
+    return el("div", { class: "verdict" + (pass ? "" : " bad") }, [
+      el("span", { class: "tick" }, pass ? "✓" : "✗"),
+      el("span", { html: text + (detail ? ' <span class="muted">' + detail + "</span>" : "") })
+    ]);
+  }
+  function badge(kind, txt) { return el("span", { class: "badge " + kind }, txt); }
+
+  function mat(o) {
+    const vals = o.values, nr = vals.length, nc = vals[0].length;
+    const rl = o.rowLabels, cl = o.colLabels;
+    const g = el("div", {
+      class: "matgrid",
+      style: { gridTemplateColumns: (rl ? "auto " : "") + "repeat(" + nc + ", auto)" }
+    });
+    if (cl) {
+      if (rl) g.appendChild(el("div", { class: "mc hdr" }, ""));
+      cl.forEach(function (c) { g.appendChild(el("div", { class: "mc hdr" }, c)); });
+    }
+    for (let i = 0; i < nr; i++) {
+      if (rl) g.appendChild(el("div", { class: "mc hdr rowhdr" }, rl[i]));
+      for (let j = 0; j < nc; j++) {
+        const v = vals[i][j];
+        if (v === null || v === undefined) {
+          g.appendChild(el("div", {
+            class: "mc hatch", title: "masked — key " + j + " is in the future of query " + i
+          }, "✕ mask"));
+        } else {
+          g.appendChild(el("div", {
+            class: "mc" + (o.cls ? " is-" + o.cls : "") + (v === 0 ? " zero" : ""),
+            title: (o.name || "") + "[" + i + "][" + j + "] = " + v
+          }, o.signed ? NN.fmtSigned(v, o.digits) : f(v, o.digits)));
+        }
+      }
+    }
+    return el("div", { class: "matwrap" }, [
+      el("div", { class: "matname" }, [
+        el("b", { class: o.cls ? "v-" + o.cls : "", html: o.name || "" }),
+        el("span", { class: "sh" }, "(" + nr + "×" + nc + ")" + (o.note ? " · " + o.note : ""))
+      ]),
+      g
+    ]);
+  }
+
+  const SVGNS = "http://www.w3.org/2000/svg";
+  function sv(tag, attrs) {
+    const e = document.createElementNS(SVGNS, tag);
+    for (const k in attrs) if (attrs[k] !== null && attrs[k] !== undefined) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+  function lerp(a, b, t) { return a + (b - a) * t; }
+
+  /* Cache bytes for one sequence, derived — never typed. Every variant is
+     the same expression with a different KV-head count, which is the point. */
+  function cacheBytes(model, variant, seq, batch, dtypeBytes) {
+    const L = model.n_layers, dh = model.d_head;
+    const lat = A.deepseek.cache_elements_per_token_per_layer;
+    let perTokenPerLayer;
+    if (variant === "MHA") perTokenPerLayer = 2 * model.n_heads * dh;
+    else if (variant === "GQA") perTokenPerLayer = 2 * model.n_kv_heads * dh;
+    else if (variant === "MQA") perTokenPerLayer = 2 * 1 * dh;
+    else perTokenPerLayer = lat;
+    return perTokenPerLayer * L * seq * batch * dtypeBytes;
+  }
+
+  /* ===================================================================== */
+  /*  lede                                                                 */
+  /* ===================================================================== */
+  (function () {
+    const ref = A.real.models.filter(function (m) { return m.name === A.real.default_model; })[0]
+              || A.real.models[A.real.models.length - 1];
+    const row = ref.rows[ref.rows.length - 1];
+    NN.$("#lede").innerHTML =
+      "MHA, MQA, GQA and MLA all compute attention — proven below on the same " +
+      M.seq + " tokens. They differ in one number: how much key/value state a " +
+      "token leaves behind. On " + ref.name + " at " + NN.count(row.seq) +
+      " tokens that is " + NN.bytes(row.mha_bytes) + " of KV cache under MHA and " +
+      NN.bytes(row.gqa_bytes) + " under the GQA it actually ships — a " +
+      f(ref.kv_reduction_vs_mha, 0) + "× reduction, for one sequence.";
+  })();
+
+  /* ===================================================================== */
+  /*  1 — THE AXIS THAT MATTERS                                            */
+  /* ===================================================================== */
+  (function () {
+    const S = NN.$("#cost");
+    const ref = A.real.models.filter(function (m) { return m.name === A.real.default_model; })[0]
+              || A.real.models[A.real.models.length - 1];
+
+    S.appendChild(h2("Why there are four of these"));
+    S.appendChild(p(
+      "Page 11 ended with a key being rotated and stored. This page is about " +
+      "the storing. During decode, K and V for token j depend only on token j, " +
+      "and causality means nothing later can change them — so they are computed " +
+      "once and kept. That cache is exact memoisation, not an approximation, " +
+      "and it is also the single largest per-request cost in serving."));
+    S.appendChild(NN.formula({
+      rule: "KV bytes = 2 · n_layers · seq · n_kv_heads · d_head · dtype_bytes",
+      sub: "the 2 is K and V; " + code("n_kv_heads") + " is the <b>only</b> term " +
+           "any variant on this page touches",
+      cls: "activation"
+    }));
+    S.appendChild(p(
+      "Two properties make it hurt. It scales <em>linearly with sequence " +
+      "length</em>, so it grows without bound as a conversation continues; and " +
+      "it is re-read <em>in full on every generated token</em>, so its size is " +
+      "a bandwidth cost paid per output token rather than once. Weights are a " +
+      "fixed cost you amortise. The cache is not."));
+
+    S.appendChild(NN.legend(["weight", "activation"]));
+
+    const bars = ref.rows.map(function (r) {
+      return { label: NN.count(r.seq) + " tokens", value: r.mha_bytes / 1e9,
+               color: "var(--activation)",
+               sub: "GQA " + NN.bytes(r.gqa_bytes) };
+    });
+    S.appendChild(h3(ref.name + ": one sequence of KV cache, if it had used MHA"));
+    S.appendChild(NN.chart.bars({
+      items: bars, unit: "GB",
+      limit: { value: ref.weights_bytes_bf16 / 1e9, label: "all model weights, bf16" }
+    }));
+    S.appendChild(small(
+      "The red line is the entire model — " + NN.count(ref.params) + " parameters " +
+      "at " + M.dtype + ", " + NN.bytes(ref.weights_bytes_bf16) + ". With plain " +
+      "multi-head attention a single " +
+      NN.count(ref.rows[ref.rows.length - 1].seq) + "-token sequence would need " +
+      NN.bytes(ref.rows[ref.rows.length - 1].mha_bytes) + " of cache — " +
+      f(ref.rows[ref.rows.length - 1].mha_bytes / ref.weights_bytes_bf16, 1) +
+      "× the weights, for one user. That is the pressure the rest of this page " +
+      "is a response to."));
+
+    S.appendChild(NN.tiles([
+      { k: "query heads", v: String(ref.n_heads), s: ref.name },
+      { k: "KV heads", v: String(ref.n_kv_heads), cls: "activation",
+        s: ref.queries_per_kv_head + " queries share each" },
+      { k: "KV reduction", v: f(ref.kv_reduction_vs_mha, 0) + "×",
+        s: "vs one KV head per query head" },
+      { k: "bytes / token", v: NN.bytes(ref.per_token.gqa_bytes), cls: "activation",
+        s: "was " + NN.bytes(ref.per_token.mha_bytes) + " under MHA" }
+    ]));
+  })();
+
+  /* ===================================================================== */
+  /*  2 — ALL FOUR, SAME INPUT                                             */
+  /* ===================================================================== */
+  (function () {
+    const S = NN.$("#same");
+
+    S.appendChild(h2("All four, on the same " + M.seq + " tokens"));
+    S.appendChild(p(
+      code("d_model = " + M.d_model) + ", " + code(M.n_heads + " query heads") +
+      ", " + code("d_head = " + M.d_head) + ", causal mask on, " +
+      code("d_c = " + M.d_latent) + " for MLA. Every variant routes through " +
+      "<em>one</em> attention implementation in " +
+      code("code/attention_variants.py") + " — only the shape of W<sub>k</sub>/" +
+      "W<sub>v</sub> and the head→KV map change. That matters: if each variant " +
+      "had its own code, “they all compute valid attention” would be a claim " +
+      "about four implementations rather than about four weight layouts."));
+
+    const tb = el("table", { class: "data" });
+    tb.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "variant"), el("th", {}, "query heads"), el("th", {}, "KV heads"),
+      el("th", {}, "queries per KV head"), el("th", {}, "head → KV"),
+      el("th", {}, "params"), el("th", {}, "cache el / token / layer"),
+      el("th", {}, "cache bytes")
+    ])));
+    const tbb = el("tbody");
+    ORDER.forEach(function (k) {
+      const c = A.variants[k].cost;
+      tbb.appendChild(el("tr", {}, [
+        el("td", {}, k),
+        el("td", { class: "n" }, String(c.n_query_heads)),
+        el("td", { class: "n" }, String(c.n_kv_heads)),
+        el("td", { class: "n" }, String(c.queries_per_kv_head)),
+        el("td", { class: "n" }, "[" + c.head_map.join(",") + "]"),
+        el("td", { class: "n v-weight" }, String(c.params)),
+        el("td", { class: "n v-activation" },
+           String(c.cache_elements_per_token_per_layer) +
+           (k === "MLA" ? " (the latent)" : "")),
+        el("td", { class: "n v-activation" }, String(c.cache_bytes_per_token_per_layer) + " B")
+      ]));
+    });
+    tb.appendChild(tbb);
+    S.appendChild(el("div", { class: "scrollx" }, tb));
+    S.appendChild(small(
+      "Cache bytes are elements × " + M.dtype_bytes + " (" + M.dtype + "). MLA's " +
+      "row is not “2 × something”: it caches one latent from which both K and V " +
+      "are decompressed, so the factor of 2 disappears along with the head count."));
+
+    S.appendChild(h3("Each one is still attention"));
+    S.appendChild(p(
+      "Three properties, all checkable, none optional: every probability row " +
+      "sums to one; every masked entry is exactly 0.0 (an equality test — " +
+      "exp(−∞) is exactly zero in IEEE arithmetic); and every output element " +
+      "lies between the smallest and largest value element it was allowed to " +
+      "read. That last one is what makes attention an <em>average</em>: a convex " +
+      "combination cannot leave the hull of its inputs."));
+
+    const tb2 = el("table", { class: "data" });
+    tb2.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "variant"), el("th", {}, "max |Σp − 1|"), el("th", {}, "min p"),
+      el("th", {}, "max |p| on masked"), el("th", {}, "convex-hull violations"),
+      el("th", {}, "")
+    ])));
+    const tb2b = el("tbody");
+    ORDER.forEach(function (k) {
+      const v = A.variants[k].validity;
+      tb2b.appendChild(el("tr", {}, [
+        el("td", {}, k),
+        el("td", { class: "n" }, sci(v.row_sum_max_abs_err)),
+        el("td", { class: "n" }, sci(v.min_probability)),
+        el("td", { class: "n" }, sci(v.masked_max_abs)),
+        el("td", { class: "n" }, String(v.convex_hull_violations)),
+        el("td", { class: "n", style: { color: v.passed ? "var(--good)" : "var(--critical)", fontWeight: 700 } },
+           v.passed ? "PASS" : "FAIL")
+      ]));
+    });
+    tb2.appendChild(tb2b);
+    S.appendChild(el("div", { class: "scrollx" }, tb2));
+
+    /* one head of each, side by side */
+    S.appendChild(h3("Head 0's attention, in each layout"));
+    const row = el("div", { class: "scrollx" });
+    ORDER.forEach(function (k) {
+      const H = A.variants[k].heads[0];
+      row.appendChild(mat({
+        name: k + " · head 0 → KV " + H.kv_head, values: H.probs, cls: "activation",
+        digits: 3, colLabels: M.tokens, rowLabels: M.tokens,
+        note: "rows sum to 1"
+      }));
+    });
+    S.appendChild(row);
+    S.appendChild(small(
+      "Lower-triangular because the mask is causal: token <em>i</em> may only " +
+      "read <em>j ≤ i</em>, which is exactly why K and V for token j can be " +
+      "cached and never revisited. The numbers differ between variants because " +
+      "the keys differ — but every row still sums to one."));
+  })();
+
+  /* ===================================================================== */
+  /*  3 — THE HEAD-SHARING MORPH                                           */
+  /* ===================================================================== */
+  (function () {
+    const S = NN.$("#sharing");
+
+    S.appendChild(h2("Same picture, four configurations"));
+    S.appendChild(p(
+      "There is one diagram behind all of this. On the left, " + M.n_heads +
+      " query heads — that number never changes, because it is what gives " +
+      "attention its capacity. On the right, the key/value state those heads " +
+      "read. MHA gives every query head its own; GQA groups them; MQA collapses " +
+      "them to one; MLA keeps them all distinct but stores only the low-rank " +
+      "latent they are decompressed from. Step through and watch the boxes move."));
+
+    /* -------------------------------------------------- geometry ------- */
+    const W = 880, H = 300;
+    const QX = 130, KX = 470, LX = 300, BW = 92, BH = 34;
+    const topPad = 54;
+    const gapQ = (H - topPad - 34) / M.n_heads;
+
+    const svg = sv("svg", { viewBox: "0 0 " + W + " " + H, width: W, height: H, class: "morph" });
+
+    /* column captions */
+    const capQ = sv("text", { x: QX + BW / 2, y: 24, "text-anchor": "middle", class: "big" });
+    capQ.textContent = "query heads";
+    const capK = sv("text", { x: KX + BW / 2, y: 24, "text-anchor": "middle", class: "big" });
+    capK.textContent = "key / value state";
+    svg.appendChild(capQ); svg.appendChild(capK);
+    const capL = sv("text", { x: LX + BW / 2, y: 24, "text-anchor": "middle", class: "big", opacity: 0 });
+    capL.textContent = "latent c";
+    svg.appendChild(capL);
+
+    /* the cached-region outline is drawn first so boxes sit on top */
+    const cacheBox = sv("rect", {
+      x: KX - 16, y: topPad - 14, width: BW + 32, height: H - topPad - 20,
+      rx: 10, fill: "none", stroke: "var(--activation)", "stroke-width": 2,
+      "stroke-dasharray": "6 4", opacity: .85
+    });
+    svg.appendChild(cacheBox);
+    const cacheLbl = sv("text", { x: KX + BW / 2, y: H - 6, "text-anchor": "middle", class: "sub" });
+    svg.appendChild(cacheLbl);
+
+    /* links: one per query head */
+    const links = [];
+    for (let h = 0; h < M.n_heads; h++) {
+      const pth = sv("path", {
+        d: "", fill: "none", stroke: "var(--accent)", "stroke-width": 2, opacity: .75
+      });
+      svg.appendChild(pth); links.push(pth);
+    }
+    /* decompression links, only for MLA */
+    const dlinks = [];
+    for (let h = 0; h < M.n_heads; h++) {
+      const pth = sv("path", {
+        d: "", fill: "none", stroke: "var(--weight)", "stroke-width": 1.5,
+        opacity: 0, "stroke-dasharray": "4 3"
+      });
+      svg.appendChild(pth); dlinks.push(pth);
+    }
+
+    /* query boxes (static) */
+    const qy = [];
+    for (let h = 0; h < M.n_heads; h++) {
+      const y = topPad + h * gapQ;
+      qy.push(y + BH / 2);
+      svg.appendChild(sv("rect", {
+        x: QX, y: y, width: BW, height: BH, rx: 6,
+        fill: "var(--activation-w)", stroke: "var(--activation)", "stroke-width": 1.5
+      }));
+      const t = sv("text", { x: QX + BW / 2, y: y + BH / 2 + 4, "text-anchor": "middle", class: "lbl" });
+      t.textContent = "Q head " + h;
+      svg.appendChild(t);
+    }
+
+    /* KV boxes: always n_heads of them. Variants that share simply move
+       several boxes onto the same coordinates, so they overlap into one —
+       which is what "sharing" looks like, and it keeps the element count
+       constant so the morph is a plain interpolation. */
+    const kvBoxes = [], kvLabels = [];
+    for (let h = 0; h < M.n_heads; h++) {
+      const r = sv("rect", {
+        x: KX, y: topPad + h * gapQ, width: BW, height: BH, rx: 6,
+        fill: "var(--activation-w)", stroke: "var(--activation)", "stroke-width": 1.5
+      });
+      svg.appendChild(r); kvBoxes.push(r);
+      const t = sv("text", { x: KX + BW / 2, y: 0, "text-anchor": "middle", class: "lbl" });
+      svg.appendChild(t); kvLabels.push(t);
+    }
+    /* the MLA latent box */
+    const latRect = sv("rect", {
+      x: LX, y: 0, width: BW, height: BH, rx: 6,
+      fill: "var(--activation-w)", stroke: "var(--activation)", "stroke-width": 2, opacity: 0
+    });
+    svg.appendChild(latRect);
+    const latText = sv("text", { x: LX + BW / 2, y: 0, "text-anchor": "middle", class: "lbl", opacity: 0 });
+    latText.textContent = "c (d_c=" + M.d_latent + ")";
+    svg.appendChild(latText);
+
+    /* -------------------------------------------------- layouts -------- */
+    function layoutFor(k) {
+      const c = A.variants[k].cost;
+      const map = c.head_map;
+      /* each KV box sits at the mean y of the query heads it serves */
+      const groups = {};
+      map.forEach(function (g, h) { (groups[g] = groups[g] || []).push(h); });
+      const y = map.map(function (g) {
+        const mem = groups[g];
+        let s = 0; mem.forEach(function (h) { s += qy[h]; });
+        return s / mem.length - BH / 2;
+      });
+      const isMLA = k === "MLA";
+      return {
+        variant: k, y: y, map: map,
+        nDistinct: Object.keys(groups).length,
+        latent: isMLA ? 1 : 0,
+        cacheX: isMLA ? LX : KX,
+        labels: map.map(function (g) { return isMLA ? "K,V head " + g : "K,V " + g; }),
+        cacheEl: c.cache_elements_per_token_per_layer,
+        cacheB: c.cache_bytes_per_token_per_layer
+      };
+    }
+    const LAYOUTS = {};
+    ORDER.forEach(function (k) { LAYOUTS[k] = layoutFor(k); });
+
+    function draw(a, b, t) {
+      const y = a.y.map(function (v, i) { return lerp(v, b.y[i], t); });
+      const lat = lerp(a.latent, b.latent, t);
+      const cx = lerp(a.cacheX, b.cacheX, t);
+
+      for (let h = 0; h < M.n_heads; h++) {
+        kvBoxes[h].setAttribute("y", y[h]);
+        kvLabels[h].setAttribute("y", y[h] + BH / 2 + 4);
+        kvLabels[h].textContent = (t < 0.5 ? a.labels[h] : b.labels[h]);
+        /* query -> its KV box */
+        const x1 = QX + BW, y1 = qy[h], x2 = KX, y2 = y[h] + BH / 2;
+        links[h].setAttribute("d",
+          "M" + x1 + " " + y1 + " C" + (x1 + 70) + " " + y1 + " " +
+          (x2 - 70) + " " + y2 + " " + x2 + " " + y2);
+        /* latent -> KV box (decompression) */
+        const lx = LX + BW, ly = H / 2 + 6;
+        dlinks[h].setAttribute("d",
+          "M" + lx + " " + ly + " C" + (lx + 40) + " " + ly + " " +
+          (x2 - 40) + " " + y2 + " " + x2 + " " + y2);
+        dlinks[h].setAttribute("opacity", 0.75 * lat);
+      }
+      latRect.setAttribute("y", H / 2 - BH / 2 + 6);
+      latRect.setAttribute("opacity", lat);
+      latText.setAttribute("y", H / 2 + 10);
+      latText.setAttribute("opacity", lat);
+      capL.setAttribute("opacity", lat);
+
+      cacheBox.setAttribute("x", cx - 16);
+      cacheBox.setAttribute("width", BW + 32);
+      const cur = t < 0.5 ? a : b;
+      cacheLbl.textContent = "CACHED: " + cur.cacheEl + " elements = " +
+        cur.cacheB + " B per token per layer";
+      cacheLbl.setAttribute("x", cx + BW / 2);
+    }
+
+    /* -------------------------------------------------- controls ------- */
+    const chips = el("div", { class: "varchips" });
+    const info = el("div", { class: "kvlist" });
+    const mount = el("div");
+    let cur = 0, anim = null;
+
+    function setInfo(k) {
+      const c = A.variants[k].cost;
+      const rows = [
+        ["variant", "<b>" + k + "</b>"],
+        ["query heads", String(c.n_query_heads)],
+        ["distinct KV heads", '<b class="v-activation">' + c.n_kv_heads + "</b>"],
+        ["queries per KV head", String(c.queries_per_kv_head)],
+        ["cache / token / layer",
+          '<b class="v-activation">' + c.cache_elements_per_token_per_layer +
+          " elements = " + c.cache_bytes_per_token_per_layer + " B</b>"],
+        ["vs MHA",
+          f(A.variants.MHA.cost.cache_elements_per_token_per_layer /
+            c.cache_elements_per_token_per_layer, 2) + "× smaller"],
+        ["parameters", '<span class="v-weight">' + c.params + "</span>"],
+        ["rank of effective W_k", String(c.key_projection_rank) + " of " + M.d_model],
+        ["what is shared", c.notes.shares]
+      ];
+      info.innerHTML = "";
+      rows.forEach(function (r) {
+        info.appendChild(el("div", { class: "k" }, r[0]));
+        info.appendChild(el("div", { class: "v", html: r[1] }));
+      });
+    }
+
+    function goTo(idx) {
+      const from = LAYOUTS[ORDER[cur]], to = LAYOUTS[ORDER[idx]];
+      cur = idx;
+      NN.$$(".varchip", chips).forEach(function (c, i) { c.classList.toggle("on", i === idx); });
+      setInfo(ORDER[idx]);
+      if (anim) cancelAnimationFrame(anim);
+      const t0 = performance.now(), DUR = 520;
+      const tick = function (now) {
+        const t = NN.clamp((now - t0) / DUR, 0, 1);
+        /* ease-in-out so the merge reads as a deliberate movement */
+        const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+        draw(from, to, e);
+        if (t < 1) anim = requestAnimationFrame(tick); else anim = null;
+      };
+      anim = requestAnimationFrame(tick);
+    }
+
+    ORDER.forEach(function (k, i) {
+      const c = el("div", { class: "varchip" + (i === 0 ? " on" : "") }, k);
+      c.addEventListener("click", function () { stepper.pause(); stepper.go(i); });
+      chips.appendChild(c);
+    });
+
+    S.appendChild(el("div", { class: "panel" }, [
+      el("div", { class: "ph" }, [
+        el("span", {}, "Interactive · morph between the four layouts"),
+        badge("derived", "head maps from attnvar.variants[*].cost.head_map")
+      ]),
+      chips,
+      el("div", { class: "morphwrap" }, svg),
+      el("div", { class: "keyrow" }, [
+        el("span", {}, [el("i", { style: { background: "var(--activation-w)", borderColor: "var(--activation)" } }),
+                        document.createTextNode("query head / KV state — activations")]),
+        el("span", {}, [el("i", { style: { borderColor: "var(--activation)", borderStyle: "dashed" } }),
+                        document.createTextNode("what actually goes in the cache")]),
+        el("span", {}, [el("i", { style: { background: "var(--weight)" } }),
+                        document.createTextNode("decompression by a weight matrix (MLA only)")])
+      ]),
+      mount,
+      info
+    ]));
+
+    const stepper = new NN.Stepper({
+      mount: mount, count: ORDER.length,
+      labels: ORDER.map(function (k) {
+        const c = A.variants[k].cost;
+        return k + " — " + c.n_kv_heads + " KV head" + (c.n_kv_heads > 1 ? "s" : "") +
+               ", " + c.cache_elements_per_token_per_layer + " el/token/layer";
+      }),
+      onStep: function (i) { goTo(i); },
+      autoplayMs: 1500
+    });
+
+    draw(LAYOUTS[ORDER[0]], LAYOUTS[ORDER[0]], 0);
+    setInfo(ORDER[0]);
+
+    S.appendChild(small(
+      "Notice what does not move: the left-hand column. All four keep " +
+      M.n_heads + " query heads, because query heads are where the capacity " +
+      "lives and nobody wanted to give those up. The saving is taken entirely " +
+      "on the right."));
+  })();
+
+  /* ===================================================================== */
+  /*  4 — THE UNIFYING STATEMENT                                           */
+  /* ===================================================================== */
+  (function () {
+    const S = NN.$("#rank");
+
+    S.appendChild(h2("They are all one mechanism with a rank limit"));
+    S.appendChild(p(
+      "GQA and MQA are usually described as “sharing”, MLA as “compressing”. " +
+      "Both descriptions are the same statement about the effective " +
+      code("d_model → d_model") + " key projection, and it can be measured."));
+    S.appendChild(p(
+      "Take a GQA layout and write out the full-width W<sub>k</sub> it is " +
+      "equivalent to: the same " + code("d_head") + " columns repeated once per " +
+      "query head in the group. That matrix is rank-deficient <em>by " +
+      "construction</em>. Run the identical MHA code on it:"));
+
+    const tb = el("table", { class: "data" });
+    tb.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "claim"), el("th", {}, "max |Δ| vs MHA output"), el("th", {}, "")
+    ])));
+    const tbb = el("tbody");
+    A.equivalences.forEach(function (e) {
+      tbb.appendChild(el("tr", {}, [
+        el("td", { style: { textAlign: "left" } }, e.claim),
+        el("td", { class: "n" }, sci(e.max_abs_err)),
+        el("td", { class: "n", style: { color: e.passed ? "var(--good)" : "var(--critical)", fontWeight: 700 } },
+           e.passed ? "PASS" : "FAIL")
+      ]));
+    });
+    tbb.appendChild(el("tr", {}, [
+      el("td", { style: { textAlign: "left" } }, A.variants.MLA.factorisation.claim),
+      el("td", { class: "n" }, "rank " + A.variants.MLA.factorisation.rank_Wk_eq),
+      el("td", { class: "n", style: { color: A.variants.MLA.factorisation.passed ? "var(--good)" : "var(--critical)", fontWeight: 700 } },
+         A.variants.MLA.factorisation.passed ? "PASS" : "FAIL")
+    ]));
+    tb.appendChild(tbb);
+    S.appendChild(el("div", { class: "scrollx" }, tb));
+
+    S.appendChild(h3("The ladder"));
+    const tb2 = el("table", { class: "data" });
+    tb2.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "variant"), el("th", {}, "rank of effective W_k"),
+      el("th", {}, "of full rank"), el("th", {}, "cache elements / token / layer"),
+      el("th", {}, "cache per unit of rank")
+    ])));
+    const tb2b = el("tbody");
+    A.ranks.rows.forEach(function (r) {
+      tb2b.appendChild(el("tr", { class: r.variant === "MLA" ? "lit" : null }, [
+        el("td", {}, r.variant),
+        el("td", { class: "n v-weight" }, String(r.rank)),
+        el("td", { class: "n" }, String(r.full_rank)),
+        el("td", { class: "n v-activation" }, String(r.cache_elements)),
+        el("td", { class: "n" }, f(r.cache_elements / r.rank, 2))
+      ]));
+    });
+    tb2.appendChild(tb2b);
+    S.appendChild(el("div", { class: "scrollx" }, tb2));
+
+    S.appendChild(p(
+      "The last column is the interesting one. MHA, GQA and MQA all pay " +
+      "<b>2 elements of cache per unit of rank</b>, because they store K and V " +
+      "separately. MLA pays <b>" +
+      f(A.ranks.rows[3].cache_elements / A.ranks.rows[3].rank, 2) + "</b> — it " +
+      "stores the bottleneck itself, once, and decompresses into both. That is " +
+      "the structural reason it wins, and it is visible in a " + M.d_model +
+      "-dimensional toy."));
+
+    S.appendChild(NN.callout("key", "SHARING AND COMPRESSING ARE THE SAME MOVE",
+      A.ranks.claim));
+  })();
+
+  /* ===================================================================== */
+  /*  5 — MLA                                                              */
+  /* ===================================================================== */
+  (function () {
+    const S = NN.$("#mla");
+    const V = A.variants.MLA;
+    const D = A.deepseek;
+
+    S.appendChild(h2("MLA: cache the bottleneck, not the output"));
+    S.appendChild(NN.formula({
+      rule: "c<sub>n</sub> = x<sub>n</sub> W<sub>dkv</sub> &nbsp;&nbsp;&nbsp; " +
+            "K = c W<sub>uk</sub> &nbsp;&nbsp;&nbsp; V = c W<sub>uv</sub>",
+      sub: "only <b>c</b> is stored; K and V are rebuilt on use",
+      cls: "activation"
+    }));
+    S.appendChild(p(
+      "Substituting gives K = X(W<sub>dkv</sub>W<sub>uk</sub>), so this is " +
+      "multi-head attention whose key projection happens to be a product of two " +
+      "thin matrices. Nothing about the attention changes — only the " +
+      "factorisation of the projection, and therefore what is worth storing."));
+
+    const r = el("div", { class: "scrollx" });
+    r.appendChild(mat({ name: "W_dkv", values: V.W_dkv, cls: "weight", digits: 3,
+                        signed: true, note: "down: d_model → d_c" }));
+    r.appendChild(mat({ name: "c = X W_dkv", values: V.C, cls: "activation", digits: 3,
+                        signed: true, note: "THIS is the cache" }));
+    r.appendChild(mat({ name: "W_uk", values: V.W_uk, cls: "weight", digits: 3,
+                        signed: true, note: "up: d_c → n_heads·d_head" }));
+    r.appendChild(mat({ name: "K = c W_uk", values: V.K, cls: "activation", digits: 3,
+                        signed: true, note: "rebuilt, never stored" }));
+    S.appendChild(r);
+
+    S.appendChild(NN.tiles([
+      { k: "cached per token", v: M.d_latent + " el", cls: "activation",
+        s: "one latent, K and V both come from it" },
+      { k: "MHA would cache", v: A.variants.MHA.cost.cache_elements_per_token_per_layer + " el",
+        cls: "activation", s: "2 × " + M.n_heads + " heads × " + M.d_head },
+      { k: "compression", v: f(A.variants.MHA.cost.cache_elements_per_token_per_layer / M.d_latent, 2) + "×",
+        s: "in this toy" },
+      { k: "rank(W_dkv W_uk)", v: String(V.factorisation.rank_Wk_eq), cls: "weight",
+        s: "of a possible " + M.d_model }
+    ]));
+
+    S.appendChild(h3("The identity that makes it worth doing"));
+    S.appendChild(p(
+      "Decompressing K on every step would move the cost from bandwidth to " +
+      "compute and partly defeat the point. It is not necessary. The " +
+      "up-projection is a fixed matrix, so it folds into the query once per " +
+      "step instead of being applied to every cached token:"));
+    S.appendChild(NN.formula({
+      rule: "q · (c W<sub>uk</sub>) = (q W<sub>uk</sub><sup>T</sup>) · c",
+      sub: "checked for every head and every (m, n) pair",
+      result: "max |Δ| = " + sci(V.absorption.max_abs_err),
+      cls: "activation"
+    }));
+    S.appendChild(verdict(V.absorption.passed, V.absorption.claim));
+
+    S.appendChild(h3("At real scale"));
+    S.appendChild(p(
+      code(D.config.name) + " caches " +
+      code(D.config.kv_lora_rank + " + " + D.config.qk_rope_head_dim + " = " +
+           D.cache_elements_per_token_per_layer) +
+      " elements per token per layer. The first term is the latent; the second " +
+      "is a small key carrying RoPE, kept separate and shared by all heads. " +
+      "That decoupling is forced by page 11: RoPE is position-dependent, so it " +
+      "cannot be absorbed into a position-independent up-projection."));
+    S.appendChild(el("div", { class: "kvlist" }, (function () {
+      const rows = [
+        ["d_model", String(D.config.d_model)],
+        ["layers", String(D.config.n_layers)],
+        ["heads", String(D.config.n_heads)],
+        ["kv_lora_rank (d_c)", String(D.config.kv_lora_rank)],
+        ["qk_rope_head_dim", String(D.config.qk_rope_head_dim)],
+        ["cached / token / layer", '<b class="v-activation">' +
+          D.cache_elements_per_token_per_layer + " elements</b>"],
+        ["same geometry as MHA", D.mha_equivalent_elements + " elements"],
+        ["compression", "<b>" + f(D.compression_ratio, 1) + "×</b> (" +
+          f(D.reduction_percent, 1) + "% less)"],
+        ["bytes / token, all layers", '<b class="v-activation">' +
+          NN.bytes(D.bytes_per_token) + "</b> vs " + NN.bytes(D.mha_bytes_per_token)]
+      ];
+      const out = [];
+      rows.forEach(function (x) {
+        out.push(el("div", { class: "k" }, x[0]));
+        out.push(el("div", { class: "v", html: x[1] }));
+      });
+      return out;
+    })()));
+    S.appendChild(el("div", { class: "keyrow" }, [badge("lit", "config quoted"),
+      el("span", { class: "muted" }, D.config._source)]));
+
+    S.appendChild(NN.callout("warn", "BE PRECISE ABOUT WHAT IT TRADES",
+      D.extra_flops_note + " It is not a free lunch, and the comparison above " +
+      "is against what <em>this same geometry</em> would have cost as plain MHA, " +
+      "which is a different question from the published headline number — see " +
+      "the literature section."));
+  })();
+
+  /* ===================================================================== */
+  /*  6 — THE CALCULATOR                                                   */
+  /* ===================================================================== */
+  (function () {
+    const S = NN.$("#calc");
+    const models = A.real.models;
+    const gpus = T.reference_configs.gpus;
+    const dtypes = T.memory.dtype_bytes;
+
+    S.appendChild(h2("KV cache calculator"));
+    S.appendChild(p(
+      "Every number below is the same expression with a different KV-head " +
+      "count, evaluated live: " + code(A.cache_formula.real) + ". MLA uses the " +
+      code(A.deepseek.cache_elements_per_token_per_layer) + "-element latent " +
+      "from " + A.deepseek.config.name + " applied to the selected model's " +
+      "layer count — a hypothetical, since none of these models ships MLA, and " +
+      "marked as one."));
+
+    const mSel = el("select", { class: "nn" });
+    models.forEach(function (m, i) {
+      mSel.appendChild(el("option", { value: String(i) }, m.name));
+    });
+    mSel.value = String(Math.max(0, models.findIndex(function (m) {
+      return m.name === A.real.default_model;
+    })));
+
+    const gSel = el("select", { class: "nn" });
+    gpus.forEach(function (g, i) { gSel.appendChild(el("option", { value: String(i) }, g.name)); });
+    gSel.value = String(Math.max(0, gpus.findIndex(function (g) {
+      return g.name === T.reference_configs.default_gpu;
+    })));
+
+    const dSel = el("select", { class: "nn" });
+    Object.keys(dtypes).forEach(function (k) {
+      dSel.appendChild(el("option", { value: k }, k + " (" + dtypes[k] + " B)"));
+    });
+    dSel.value = M.dtype;
+
+    /* log-spaced sequence slider: 2^10 .. 2^20 */
+    const sS = el("input", { type: "range", min: 10, max: 20, step: 1, value: 13 });
+    const sOut = el("span", { class: "out" });
+    const bS = el("input", { type: "range", min: 1, max: 64, step: 1, value: 1 });
+    const bOut = el("span", { class: "out" });
+
+    const barHost = el("div");
+    const tileHost = el("div");
+    const noteHost = el("div");
+
+    function recompute() {
+      const m = models[Number(mSel.value)];
+      const gpu = gpus[Number(gSel.value)];
+      const db = dtypes[dSel.value];
+      const seq = Math.pow(2, Number(sS.value));
+      const batch = Number(bS.value);
+      sOut.textContent = NN.count(seq) + " tok";
+      bOut.textContent = batch + " seq";
+
+      const vals = ORDER.map(function (k) {
+        return { variant: k, bytes: cacheBytes(m, k, seq, batch, db) };
+      });
+      const weights = m.params * db;
+      const hbm = gpu.hbm_bytes;
+
+      barHost.innerHTML = "";
+      barHost.appendChild(NN.chart.bars({
+        items: vals.map(function (v) {
+          return {
+            label: v.variant + (v.variant === "MLA" ? " (hypothetical)" : ""),
+            value: v.bytes / 1e9, color: "var(--activation)",
+            sub: f(100 * v.bytes / hbm, 1) + "% of one " + gpu.name
+          };
+        }).concat([{
+          label: "model weights at " + dSel.value, value: weights / 1e9,
+          color: "var(--weight)", sub: NN.count(m.params) + " params"
+        }]),
+        unit: "GB",
+        limit: { value: hbm / 1e9, label: gpu.name + " HBM (" + NN.gibytes(hbm) + ")" }
+      }));
+
+      const gqa = vals[1].bytes, mha = vals[0].bytes;
+      tileHost.innerHTML = "";
+      tileHost.appendChild(NN.tiles([
+        { k: "shipped layout", v: "GQA " + m.n_heads + "→" + m.n_kv_heads,
+          cls: "activation", s: NN.bytes(gqa) },
+        { k: "if it were MHA", v: NN.bytes(mha),
+          s: f(mha / gqa, 1) + "× more" },
+        { k: "cache ÷ weights", v: f(gqa / weights, 3) + "×",
+          s: "weights " + NN.bytes(weights) },
+        { k: "sequences per GPU", v: f(Math.max(0, hbm - weights) / (gqa / batch), 1),
+          s: "after weights, on one " + gpu.name }
+      ]));
+
+      noteHost.innerHTML = "";
+      noteHost.appendChild(small(
+        "GPU capacity is quoted in <b>GiB</b> (" + NN.gibytes(hbm) + " = " +
+        NN.bytes(hbm) + " decimal); cache and weights are in decimal GB, which " +
+        "is how model memory is universally quoted. Both are shown so the " +
+        "comparison is honest. Per-token cost at this configuration: " +
+        NN.bytes(cacheBytes(m, "GQA", 1, batch, db)) + " for GQA, " +
+        NN.bytes(cacheBytes(m, "MHA", 1, batch, db)) + " for MHA, " +
+        NN.bytes(cacheBytes(m, "MQA", 1, batch, db)) + " for MQA."));
+    }
+
+    [mSel, gSel, dSel].forEach(function (e) { e.addEventListener("change", recompute); });
+    [sS, bS].forEach(function (e) { e.addEventListener("input", recompute); });
+
+    S.appendChild(el("div", { class: "panel" }, [
+      el("div", { class: "ph" }, [
+        el("span", {}, "Interactive · four variants, one formula"),
+        badge("derived", "geometry from NN.T.reference_configs")
+      ]),
+      el("div", { class: "selrow" }, [
+        el("span", { class: "k" }, "model"), mSel,
+        el("span", { class: "k" }, "GPU"), gSel,
+        el("span", { class: "k" }, "dtype"), dSel
+      ]),
+      el("div", { class: "sliderrow" }, [el("label", {}, "context length"), sS, sOut]),
+      el("div", { class: "sliderrow" }, [el("label", {}, "concurrent sequences"), bS, bOut]),
+      tileHost, barHost, noteHost
+    ]));
+    recompute();
+
+    S.appendChild(NN.callout("mem", "WHY MQA IS NOT SIMPLY THE ANSWER",
+      "Slide the context out and MQA's bar all but vanishes — one KV head is " +
+      "the smallest cache anyone has shipped. It is also the most aggressive " +
+      "rank constraint on the table: every query head is forced to read the " +
+      "same " + M.d_head + "-dimensional key. The measured quantities on this " +
+      "page (bytes, rank, validity) cannot tell you what that costs in quality. " +
+      "The literature below can, and it is why GQA rather than MQA became the " +
+      "default."));
+  })();
+
+  /* ===================================================================== */
+  /*  7 — REAL MODELS                                                      */
+  /* ===================================================================== */
+  (function () {
+    const S = NN.$("#real");
+
+    S.appendChild(h2("The real table"));
+    S.appendChild(small(
+      "Geometry from " + code("NN.T.reference_configs") + " — " +
+      A.real._source + ". " + code("d_head") + " is derived as d_model / " +
+      "n_heads; every byte count below is computed from it."));
+
+    A.real.models.forEach(function (m) {
+      const tb = el("table", { class: "data" });
+      tb.appendChild(el("thead", {}, el("tr", {}, [
+        el("th", {}, "context"), el("th", {}, "MHA"), el("th", {}, "GQA (shipped)"),
+        el("th", {}, "MQA"), el("th", {}, "MLA-style latent"),
+        el("th", {}, "GQA ÷ weights")
+      ])));
+      const tbb = el("tbody");
+      m.rows.forEach(function (r) {
+        tbb.appendChild(el("tr", { class: r.seq === m.native_seq ? "lit" : null }, [
+          el("td", {}, NN.count(r.seq) + (r.seq === m.native_seq ? " ← native" : "")),
+          el("td", { class: "n" }, NN.bytes(r.mha_bytes)),
+          el("td", { class: "n v-activation" }, NN.bytes(r.gqa_bytes)),
+          el("td", { class: "n" }, NN.bytes(r.mqa_bytes)),
+          el("td", { class: "n" }, NN.bytes(r.mla_bytes_hypothetical)),
+          el("td", { class: "n" }, f(r.gqa_bytes / m.weights_bytes_bf16, 3) + "×")
+        ]));
+      });
+      tb.appendChild(tbb);
+      S.appendChild(el("div", { class: "panel" }, [
+        el("div", { class: "ph" }, [
+          el("span", {}, m.name),
+          el("span", { class: "muted", style: { fontWeight: 400 } },
+             m.n_heads + " query heads · " + m.n_kv_heads + " KV heads · d_head " +
+             m.d_head + " · " + m.n_layers + " layers · " +
+             NN.bytes(m.weights_bytes_bf16) + " of weights"),
+          badge("derived", f(m.kv_reduction_vs_mha, 0) + "× KV reduction")
+        ]),
+        el("div", { class: "scrollx" }, tb)
+      ]));
+    });
+
+    S.appendChild(h3("Cross-checked against page 25's table"));
+    S.appendChild(p(
+      "The KV-cache rows on the inference page come from a different generator, " +
+      code("code/inference_toy.py") + ", written earlier. If the two disagreed " +
+      "the site would contradict itself two pages apart, so " +
+      code("code/attention_variants.py") + " reads that file and recomputes " +
+      "every published row from the model geometry:"));
+    const x = A.crosscheck_infer;
+    S.appendChild(verdict(x.passed,
+      "<b>" + x.checked + "</b> rows recomputed, max |Δ| = <b>" +
+      f(x.max_abs_err, 0) + " bytes</b>",
+      "— exact integer agreement on both the GQA figure and the MHA counterfactual"));
+    if (x.rows && x.rows.length) {
+      const tb = el("table", { class: "data" });
+      tb.appendChild(el("thead", {}, el("tr", {}, [
+        el("th", {}, "model"), el("th", {}, "seq"),
+        el("th", {}, "this page, GQA"), el("th", {}, "infer.json"),
+        el("th", {}, "this page, MHA"), el("th", {}, "infer.json"), el("th", {}, "Δ")
+      ])));
+      const tbb = el("tbody");
+      x.rows.forEach(function (r) {
+        tbb.appendChild(el("tr", {}, [
+          el("td", {}, r.model), el("td", { class: "n" }, NN.count(r.seq)),
+          el("td", { class: "n" }, NN.bytes(r.mine_gqa)),
+          el("td", { class: "n muted" }, NN.bytes(r.infer_gqa)),
+          el("td", { class: "n" }, NN.bytes(r.mine_mha)),
+          el("td", { class: "n muted" }, NN.bytes(r.infer_mha)),
+          el("td", { class: "n" }, String(r.delta))
+        ]));
+      });
+      tb.appendChild(tbb);
+      S.appendChild(el("div", { class: "scrollx" }, tb));
+    }
+    S.appendChild(small(x.formula ? "The formula both files evaluate: " +
+      code(x.formula) + "." : ""));
+  })();
+
+  /* ===================================================================== */
+  /*  8 — QUALITY, AS LITERATURE                                           */
+  /* ===================================================================== */
+  (function () {
+    const S = NN.$("#tradeoff");
+    S.appendChild(h2("The quality side, stated as literature"));
+    S.appendChild(p(
+      "Everything above is measured: bytes, ranks, exact equalities on a " +
+      M.seq + "-token input. None of it says whether a variant makes a model " +
+      "<em>worse</em>, and a toy cannot. Those are other people's experiments " +
+      "and are labelled as such."));
+    A.literature.items.forEach(function (it) {
+      S.appendChild(el("div", { class: "panel" }, [
+        el("div", { class: "ph" }, [
+          el("span", {}, it.variant),
+          badge(it.source === "this file" ? "derived" : "lit",
+                it.source === "this file" ? "scope note" : "quoted")
+        ]),
+        el("div", { class: "small", html: it.claim }),
+        el("div", { class: "small muted", style: { marginTop: "5px" } }, it.source)
+      ]));
+    });
+    S.appendChild(small(A.literature._source + "."));
+
+    S.appendChild(NN.callout("why", "THE SHAPE OF THE TRADE",
+      "Going down the ladder MHA → GQA → MQA cuts the cache by cutting rank, " +
+      "and the reported quality cost rises with how much rank you cut. MLA " +
+      "moves along a different axis: it keeps every query head's own K and V, " +
+      "and buys the saving with arithmetic at decode time instead. On hardware " +
+      "where decode is bound by bytes rather than FLOPs — which page 24 " +
+      "quantifies — spending FLOPs to move fewer bytes is the right direction."));
+  })();
+
+  /* ===================================================================== */
+  /*  9 — WHAT WAS PROVEN                                                  */
+  /* ===================================================================== */
+  (function () {
+    const S = NN.$("#next");
+    S.appendChild(h2("What this page proved"));
+
+    const tb = el("table", { class: "data" });
+    tb.appendChild(el("thead", {}, el("tr", {}, [
+      el("th", {}, "check"), el("th", {}, "claim"), el("th", {}, "measured"),
+      el("th", {}, "bound"), el("th", {}, "")
+    ])));
+    const tbb = el("tbody");
+    A.checks.forEach(function (c) {
+      tbb.appendChild(el("tr", {}, [
+        el("td", {}, c.id),
+        el("td", { style: { textAlign: "left" } }, c.what),
+        el("td", { class: "n" }, sci(c.metric)),
+        el("td", { class: "n" }, "< " + Number(c.tol).toExponential(0)),
+        el("td", {
+          class: "n",
+          style: { color: c.passed ? "var(--good)" : "var(--critical)", fontWeight: 700 }
+        }, c.passed ? "PASS" : "FAIL")
+      ]));
+    });
+    tb.appendChild(tbb);
+    S.appendChild(el("div", { class: "scrollx" }, tb));
+
+    S.appendChild(verdict(A.passed,
+      "<b>" + A.checks.filter(function (c) { return c.passed; }).length + " / " +
+      A.checks.length + "</b> checks pass in " + code("code/attention_variants.py"),
+      "— the generator exits non-zero if any of them does not"));
+
+    S.appendChild(NN.callout("why", "NEXT: WHAT THE WHOLE BLOCK COSTS",
+      "The KV cache is one line of the bill. Page 13 counts the rest: parameter " +
+      "counts per matrix, activation memory through a block, and the seq² term " +
+      "that FlashAttention later removes."));
+  })();
+
+  NN.page("attnvariants");
+})();
+</script>
+</body>
+</html>

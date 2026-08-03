@@ -1137,7 +1137,9 @@
   "aux_loss": 1.0529982828108977,
   "aux_loss_formula": "N * sum_e f_e * P_e",
   "aux_loss_if_uniform": 1.0,
-  "aux_loss_if_collapsed": 4.0,
+  "aux_loss_if_collapsed_k1": 4.0,
+  "aux_loss_max_at_this_k": 2.0,
+  "collapsed_bound_note": "With top-k routing f_e <= 1/k, so the auxiliary loss is bounded by N/k, not N. At k=2 the ceiling is 2.0; the full N is only reachable at k=1.",
   "aux_gradient_note": "Only P_e is differentiable. f_e is a hard token count with no gradient, so the loss pushes the router's PROBABILITIES toward balance rather than trying to differentiate through the argmax.",
   "ideal_per_expert": 3.0,
   "max_load": 6,
@@ -1320,7 +1322,8 @@
    }
   ],
   "model": "one DeepSeek-V3-shaped MoE layer, 256 experts, top-8",
-  "why": "At batch 1 you read eight whole experts to do eight tokens' worth of arithmetic. Intensity is about 2 FLOP/byte against an H100 ridge near 148, so you are at roughly 1% of peak. Batching helps more here than in a dense model, because it raises the tokens-per-expert count -- but only until you are touching all the experts anyway.",
+  "identity": "intensity == avg_tokens_per_expert, exactly. flops is 2*pe*pairs and bytes is experts_touched*pe*2, so pe and the factor of 2 cancel and only the ratio survives. The two columns in `rows` are the same number, which is worth showing rather than hiding: an expert's arithmetic intensity IS how many tokens it got.",
+  "why": "At batch 1, top-8 routing touches 8 experts with 1 token each, so intensity is exactly 1.0 FLOP/byte against an H100 ridge of 147.76 -- about 0.7% of peak. You read eight entire expert weight matrices to do eight tokens of arithmetic. Batching helps more here than in a dense model because it raises tokens-per-expert -- but only until you are touching every expert anyway, after which it behaves like a dense model of the ACTIVE parameter count.",
   "caveat": "This ignores the expert-parallel all-to-all, which in decode is a latency cost paid per token and is often the real bottleneck rather than the weight reads."
  }
 }
