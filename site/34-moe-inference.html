@@ -200,7 +200,8 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       "Expert " + PEX.map(function (p) { return p.n_tokens; }).indexOf(Math.min.apply(null,
         PEX.map(function (p) { return p.n_tokens; }))) +
       " reads all " + ACC.toy.params_per_expert + " of its parameters to serve " +
-      Math.min.apply(null, PEX.map(function (p) { return p.n_tokens; })) + " token(s)."));
+      (function (n) { return n + (n === 1 ? " token" : " tokens"); })(
+        Math.min.apply(null, PEX.map(function (p) { return p.n_tokens; }))) + "."));
 
     const tbl = el("table", { class: "data" });
     tbl.appendChild(el("thead", {}, el("tr", {}, [

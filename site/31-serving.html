@@ -354,6 +354,12 @@ table.data td.good { color: var(--good); }
           NN.bytes(S.gpu.hbm_bytes - weightBytes(S.model) / PER_NODE) + " per GPU for KV.")
       ])
     ]));
+    host.appendChild(el("div", { class: "hint", html:
+      "The default configuration deliberately <b>fails</b> — " + S.batch + " sequences, " +
+      NN.count(S.prompt) + "-token prompts, " + NN.count(S.out) +
+      "-token answers is a realistic shape and a colocated pool cannot hold the ITL target at " +
+      "it. Pull the batch down or the output length up and watch the verdict flip. Section 2 " +
+      "is about fixing it without giving up the batch." }));
     host.appendChild(out);
 
     function render() {
@@ -721,7 +727,7 @@ table.data td.good { color: var(--good); }
       row("÷ " + lanes + " parallel link" + (lanes === 1 ? "" : "s") +
         (S.sharded ? " (TP-sharded, rank to matching rank)" : ""), NN.bytes(perLane));
       row("÷ " + link.name + " " + link.per_dir_GBps + " GB/s per direction " + x + " " +
-        Math.round(S.eff * 100) + " %", ms(tWire));
+        Math.round(S.eff * 100) + "%", ms(tWire));
       row("+ " + (link.scope === "intra-node" ? COST.latency_us.intra_node
                                               : COST.latency_us.inter_node) +
         " µs of " + link.scope + " latency", ms(alpha));

@@ -454,7 +454,7 @@ table.data td.good { color: var(--good); }
     let head = "<thead><tr><th>term</th>";
     const cols = [2, 4, 8, 16];
     cols.forEach(function (n) {
-      head += "<th>TP = " + n + (n > PER_NODE ? " ✗" : "") + "</th>";
+      head += "<th>TP = " + n + (n > PER_NODE ? "<br><span class='muted'>cross-node</span>" : "") + "</th>";
     });
     head += "</tr></thead>";
     const rowsSpec = [
@@ -831,10 +831,13 @@ table.data td.good { color: var(--good); }
     host.appendChild(NN.callout("key", "PIPELINE PARALLELISM DOES NOT REDUCE PER-TOKEN LATENCY. AT ALL.",
       "Split " + M.n_layers + " layers across P stages and each stage holds " + M.n_layers +
       "/P of the weights, so each stage's HBM read is 1/P as long. But a token has to pass " +
-      "through <em>all P stages, in order</em>. The stage times sum back to exactly the " +
-      "single-GPU time — and then you add P−1 hops of wire on top. PP is the one axis that " +
-      "makes latency strictly worse than not doing it, ignoring the fact that without it the " +
-      "model may not fit at all."));
+      "through <em>all P stages, in order</em>. The division by P and the multiplication by P " +
+      "cancel exactly: the stage times sum back to the single-GPU time, and then you add P−1 " +
+      "hops of wire on top. Compare the fifth and sixth tiles below — the same GPUs arranged " +
+      "as a TP group cut the token time by most of an order of magnitude; arranged as a " +
+      "pipeline they cut it by nothing at all. PP is the one axis that makes latency worse " +
+      "than not doing it, and the only reason to accept that is that without it the model may " +
+      "not fit anywhere."));
 
     /* hop-by-hop accumulation */
     const PMAX = 4;
@@ -879,15 +882,18 @@ table.data td.good { color: var(--good); }
         }
         hopHost.appendChild(strip);
 
+        const sameGpusTp = decodeStep(S, Math.min(Pn, PER_NODE));
         tileHost.innerHTML = "";
         tileHost.appendChild(NN.tiles([
           { k: "stages P", v: String(Pn), s: Math.round(M.n_layers / Pn) + " layers each" },
           { k: "per-stage HBM read", v: ms(tStage), s: NN.bytes(perStageBytes + kvBytesAll / Pn), cls: "weight" },
           { k: "P " + x + " stage time", v: ms(Pn * tStage),
-            s: "identical to TP = 1 (" + ms(single.tMem) + ")" },
-          { k: "P−1 hops", v: ms((Pn - 1) * tHop), s: "pure addition to the token's latency", cls: "activation" },
-          { k: "token latency", v: ms(total),
-            s: fmt(total / single.itl, 2) + x + " the single-GPU time" },
+            s: "identical to one GPU (" + ms(single.tMem) + ") — the division cancels" },
+          { k: "P−1 hops", v: ms((Pn - 1) * tHop), s: "pure addition, never a subtraction", cls: "activation" },
+          { k: "token latency under PP", v: ms(total),
+            s: fmt(total / single.itl, 3) + x + " the single-GPU time" },
+          { k: "the same " + Pn + " GPUs under TP", v: ms(sameGpusTp.itl),
+            s: fmt(total / sameGpusTp.itl, 1) + x + " faster than the pipeline" },
           { k: "steady-state throughput", v: fmt(S.batch / tStage, 0) + " tok/s",
             s: "one token leaves every " + ms(tStage) + ", not every " + ms(total) }
         ]));
@@ -1068,13 +1074,17 @@ table.data td.good { color: var(--good); }
     rows.forEach(function (n) {
       const wpg = weightBytes(M, BF16) / n;
       const free = G.hbm_bytes - wpg;
-      const groupKv = free * n;
+      /* only min(TP, n_kv_heads) DISTINCT shards exist; past that the cache is
+         replicated across ranks and the extra memory buys no extra capacity. */
+      const shards = Math.min(n, M.n_kv_heads);
+      const groupKv = free * shards;
       const seqs = groupKv / kv1;
       const heads = M.n_kv_heads / n;
       h += "<tr" + (n === PER_NODE ? " class='hi'" : "") + "><td>" + n + "</td>" +
         "<td class='n'>" + NN.bytes(wpg) + "</td>" +
         "<td class='n'>" + NN.bytes(free) + "</td>" +
-        "<td class='n'>" + NN.bytes(groupKv) + "</td>" +
+        "<td class='n'>" + NN.bytes(groupKv) +
+        (shards < n ? " <span class='muted'>(" + shards + " distinct shards)</span>" : "") + "</td>" +
         "<td class='n'>" + fmt(seqs, 0) + "</td>" +
         "<td class='n " + (heads >= 1 ? "good" : "bad") + "'>" + fmt(heads, 2) +
         (heads >= 1 ? "" : " — replicated") + "</td></tr>";
@@ -1114,8 +1124,8 @@ table.data td.good { color: var(--good); }
       fmt(((G.hbm_bytes - w8) * PER_NODE) / ((G.hbm_bytes - w2) * 2), 1) + x +
       " the concurrent sequences, from " + fmt((G.hbm_bytes - w2) * 2 / kv1, 0) + " to " +
       fmt((G.hbm_bytes - w8) * PER_NODE / kv1, 0) + " at " + NN.count(M.seq) +
-      " context. Concurrency is the lever on decode throughput (" + INF.batching.why +
-      "), so TP buys throughput through the memory door even where the latency argument is " +
+      " context. Concurrency is the lever on decode throughput — " + INF.batching.why +
+      " — so TP buys throughput through the memory door even where the latency argument is " +
       "marginal. <a href='27-paged-attention.html'>Page 27</a> is about not wasting the " +
       "capacity this table just bought you."));
   })();

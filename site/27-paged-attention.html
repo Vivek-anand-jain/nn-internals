@@ -1,0 +1,832 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 27 PagedAttention</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* page-local layout only; every colour comes from design.css custom properties */
+.panel { background: var(--surface-2); border: 1px solid var(--hairline);
+         border-radius: 8px; padding: 12px 14px; }
+.panel h4 { margin: 0 0 8px; font-family: var(--mono); font-size: .7rem; letter-spacing: .13em;
+            text-transform: uppercase; color: var(--ink-muted); font-weight: 700;
+            display: flex; justify-content: space-between; gap: 8px; }
+.panel h4 .r { color: var(--ink-2); letter-spacing: .04em; text-transform: none;
+               font-weight: 600; }
+
+.transport { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 14px 0 8px; }
+.transport input[type="range"] { flex: 1; min-width: 170px; accent-color: var(--weight); }
+.tclock { font-family: var(--mono); font-size: .82rem; color: var(--ink-2);
+          white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+.memkey { display: flex; flex-wrap: wrap; gap: 8px 14px; margin: 10px 0 6px; }
+.memkey .k { display: inline-flex; align-items: center; gap: 6px;
+             font-family: var(--mono); font-size: .74rem; color: var(--ink-2); }
+.memkey .sw { width: 15px; height: 15px; border-radius: 3px; border: 1px solid var(--hairline); }
+
+.btab { font-family: var(--mono); font-size: .72rem; }
+.btab table { border-collapse: collapse; width: 100%; }
+.btab td, .btab th { padding: 2px 6px; text-align: right; white-space: nowrap; }
+.btab th { color: var(--ink-muted); font-size: .64rem; text-transform: uppercase;
+           letter-spacing: .07em; border-bottom: 1px solid var(--hairline); }
+.btab td.l, .btab th.l { text-align: left; }
+.btab tr.more td { color: var(--ink-muted); }
+
+.verdict { border-radius: 8px; padding: 13px 16px; margin: 14px 0; border: 1px solid var(--hairline);
+           border-left: 4px solid var(--activation); background: var(--surface-2);
+           display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 20px; }
+.verdict .big { font-size: 1.55rem; font-weight: 800; letter-spacing: -.02em;
+                color: var(--activation); line-height: 1.15; }
+.verdict .det { font-family: var(--mono); font-size: .82rem; color: var(--ink-2); }
+
+.osmap { width: 100%; border-collapse: collapse; font-size: .86rem; margin: 8px 0 0; }
+.osmap td { padding: 5px 10px 5px 0; border-bottom: 1px solid var(--hairline-2); }
+.osmap td.a { font-family: var(--mono); font-size: .78rem; color: var(--ink-muted); width: 34%; }
+.osmap td.b { font-family: var(--mono); font-size: .78rem; color: var(--ink); width: 38%; }
+.osmap td.c { color: var(--ink-2); font-size: .82rem; }
+
+.fanwrap { display: grid; grid-template-columns: 1fr; gap: 4px; }
+.fanrow { display: flex; align-items: center; gap: 6px; font-family: var(--mono);
+          font-size: .68rem; color: var(--ink-muted); }
+.fanrow .lab { width: 74px; flex: none; }
+.fanrow .blocks { display: flex; gap: 1px; flex-wrap: nowrap; overflow: hidden; }
+.fanrow .blocks i { width: 5px; height: 11px; border-radius: 1px; display: block; }
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 27</div>
+    <h1>PagedAttention: the KV cache needed an operating system</h1>
+    <p class="lede">The KV cache is per-sequence, it grows one token at a time, and nobody knows how
+      long it will get. A contiguous allocator has exactly one safe move — reserve the advertised
+      context up front — and on realistic traffic most of that reservation is never touched.
+      PagedAttention replaces it with fixed-size blocks, a block table per sequence and allocation
+      on demand. This page allocates the same requests both ways, block by block, and counts what
+      the change is worth.</p>
+    <noscript><p class="callout warn">This page computes and animates every number in the browser.
+      With JavaScript disabled you will see an empty shell.</p></noscript>
+  </div>
+
+  <section class="block" id="problem">
+    <h2>1 · The problem: you must reserve for a length you cannot know</h2>
+    <div id="probBody"></div>
+  </section>
+
+  <section class="block" id="map">
+    <h2>2 · The same memory, allocated both ways</h2>
+    <div id="mapBody"></div>
+  </section>
+
+  <section class="block" id="os">
+    <h2>3 · This is virtual memory</h2>
+    <div id="osBody"></div>
+  </section>
+
+  <section class="block" id="budget">
+    <h2>4 · What it buys at a fixed memory budget</h2>
+    <div id="budgetBody"></div>
+  </section>
+
+  <section class="block" id="prefix">
+    <h2>5 · Copy-on-write: one system prompt, N users</h2>
+    <div id="prefixBody"></div>
+  </section>
+
+  <section class="block" id="close">
+    <h2>6 · What paging does not fix</h2>
+    <div id="closeBody"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/infer.js"></script>
+<script src="../assets/data/serving.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T = NN.T;
+  const S = window.SERVING;
+  const I = window.INFER;
+  const el = NN.el, svg = NN.svg;
+  const M = S.meta;
+  const A = S.allocator;
+  const ST = A.stats, BD = A.budget, DM = A.demo;
+  const PS = S.prefix_sharing;
+
+  function pc(x, d) { return NN.fmt(x * 100, d === undefined ? 1 : d) + "%"; }
+  function xfmt(x) { return NN.fmt(x, 2) + "×"; }
+  function kib(b) { return NN.fmt(b / 1024, 0) + " KiB"; }
+
+  /* Colour grammar for a memory map.
+       KV cache that actually holds tokens  -> activation (green): it IS an
+         activation, born in the forward pass and read on every step after.
+       Reserved-but-never-touched, and free pool -> --accent, the neutral for
+         everything that is not a tensor. No fifth hue, no tensor hue for
+         emptiness. Every region is labelled in the key and in the tooltip. */
+  const C = {
+    used:  "var(--activation)",
+    waste: "var(--accent)",
+    free:  "var(--surface-3)",
+    shared: "var(--activation)"
+  };
+
+  /* ======================================================================
+     1 · THE PROBLEM
+     ====================================================================== */
+  (function problem() {
+    const host = NN.$("#probBody");
+
+    const kvRow = I.kv_cache.rows.filter(function (r) {
+      return r.model === M.model.name && r.seq === 1024;
+    })[0];
+
+    host.appendChild(el("p", { html:
+      "One token of KV cache for <b>" + M.model.name + "</b> is " +
+      "<code>2 (K and V) × " + M.model.n_layers + " layers × " + M.model.n_kv_heads +
+      " KV heads × " + (M.model.d_model / M.model.n_heads) + " head dim × 2 bytes</code> = <b>" +
+      kib(ST.bytes_per_token) + "</b>. That is the same figure " +
+      "<a href=\"25-kv-cache.html\">page 25</a> arrives at from the other direction: " +
+      "<code>infer.js</code> puts a " + NN.count(kvRow.seq) + "-token sequence at " +
+      NN.bytes(kvRow.bytes_per_sequence) + ", which divided by " + NN.count(kvRow.seq) +
+      " tokens is " + kib(kvRow.bytes_per_sequence / kvRow.seq) + " per token." }));
+
+    host.appendChild(el("p", { html:
+      "Now the allocator's problem. A sequence's KV cache grows by one token per decode step, " +
+      "and attention kernels want it in one contiguous range. The final length is not known when " +
+      "the request arrives — it is whatever the model decides to stop at. So a contiguous " +
+      "allocator reserves the advertised context, " + NN.count(ST.max_seq) + " tokens, which is" }));
+
+    host.appendChild(NN.formula({
+      rule: "reservation = max_seq_len × bytes_per_token",
+      sub: NN.count(ST.max_seq) + " × " + kib(ST.bytes_per_token),
+      result: NN.bytes(BD.reservation_bytes) + " per sequence",
+      cls: "activation"
+    }));
+
+    host.appendChild(el("p", { html:
+      "and then the traffic arrives, and it looks nothing like " + NN.count(ST.max_seq) +
+      " tokens. Below is the length distribution this page assumes: " + ST.n +
+      " sequences, lognormal, median " + NN.fmt(ST.median_len, 0) + " tokens." }));
+
+    /* length histogram */
+    const h = ST.length_hist;
+    const hmax = Math.max.apply(null, h.counts);
+    const box = el("div", { class: "panel" });
+    box.appendChild(el("h4", {}, [
+      el("span", {}, "sequence length, tokens"),
+      el("span", { class: "r" }, "advertised context " + NN.count(ST.max_seq))
+    ]));
+    h.labels.forEach(function (lab, i) {
+      const n = h.counts[i];
+      box.appendChild(el("div", {
+        style: { display: "grid", gridTemplateColumns: "90px 1fr", gap: "10px",
+                 alignItems: "center", margin: "4px 0", fontFamily: "var(--mono)",
+                 fontSize: ".74rem" }
+      }, [
+        el("span", { class: "muted" }, lab),
+        el("div", { style: { display: "flex", alignItems: "center", gap: "6px", height: "13px" } }, [
+          el("i", { style: { display: "block", height: "100%", borderRadius: "2px",
+                             width: (n / hmax * 100) + "%", background: C.used,
+                             minWidth: n ? "2px" : "0" } }),
+          el("span", { class: "muted", style: { fontSize: ".68rem" } }, String(n))
+        ])
+      ]));
+    });
+    host.appendChild(box);
+
+    host.appendChild(NN.callout("warn", "THIS DISTRIBUTION IS AN ASSUMPTION",
+      "Fragmentation is a function of the length distribution, so the distribution is stated " +
+      "rather than hidden: <b>" + M.assumptions.filter(function (a) {
+        return a.k.indexOf("length distribution") === 0; })[0].v + "</b>. " +
+      "It is a model of served traffic, not a measurement of it — most requests far shorter " +
+      "than the advertised context, with a tail that reaches it. Shorten the tail and paging " +
+      "wins by more; make every request " + NN.count(ST.max_seq) +
+      " tokens long and paging wins by nothing at all."));
+
+    host.appendChild(NN.tiles([
+      { k: "mean length", v: NN.fmt(ST.mean_len, 0), s: "tokens" },
+      { k: "median length", v: NN.fmt(ST.median_len, 0), s: "tokens" },
+      { k: "p90 length", v: NN.fmt(ST.p90_len, 0), s: "tokens" },
+      { k: "reserved per sequence", v: NN.count(ST.max_seq),
+        s: "tokens, whatever the length" },
+      { k: "never touched", v: pc(ST.contiguous_waste_frac),
+        s: "of every contiguous reservation" }
+    ]));
+  })();
+
+  /* ======================================================================
+     2 · THE MEMORY MAP, BOTH WAYS, SAME POOL
+     ====================================================================== */
+  (function map() {
+    const host = NN.$("#mapBody");
+    const POOL = DM.pool_blocks;
+    const ROWS = DM.contiguous_seqs;               /* 8 reservations */
+    const COLS = DM.blocks_per_reservation;        /* 128 blocks each */
+
+    host.appendChild(el("p", { html:
+      "Here is one pool of <b>" + POOL + " blocks</b> — " + ROWS + " contiguous reservations' " +
+      "worth, " + NN.bytes(POOL * DM.block_bytes) + " of HBM — drawn twice, cell for cell. " +
+      "Each cell is one " + DM.block + "-token block (" + NN.bytes(DM.block_bytes) + "). " +
+      "The same stream of arriving requests is fed to both allocators. Press play." }));
+
+    host.appendChild(el("div", { class: "memkey" }, [
+      el("span", { class: "k" }, [
+        el("span", { class: "sw", style: { background: C.used } }), "KV cache holding tokens"
+      ]),
+      el("span", { class: "k" }, [
+        el("span", { class: "sw", style: { background: C.waste, opacity: ".55" } }),
+        "reserved, never touched"
+      ]),
+      el("span", { class: "k" }, [
+        el("span", { class: "sw", style: { background: C.free } }), "free pool"
+      ])
+    ]));
+    host.appendChild(el("p", { class: "small muted" },
+      "Green is the KV cache, which is an activation — the same green page 01 gives every " +
+      "activation. Everything that is not holding a token is the neutral accent, never a " +
+      "tensor hue. Hover any cell."));
+
+    /* ---------------- a grid of POOL cells, ROWS x COLS ---------------- */
+    function grid(o) {
+      /* viewBox as wide as the panel, height left to CSS: the map fills the
+         width rather than letterboxing, so both maps are drawn at exactly the
+         same scale and can be compared cell for cell. */
+      const W = 1040, padL = 4, padT = 4, gap = 0.7;
+      const cw = (W - 2 * padL) / COLS;
+      const chh = 15;
+      const H = padT * 2 + ROWS * (chh + 2);
+      const root = svg("svg", {
+        viewBox: "0 0 " + W + " " + H, width: "100%",
+        style: "height:auto;display:block",
+        class: "chart", role: "img", "aria-label": o.aria
+      });
+      const cells = [];
+      for (let p = 0; p < POOL; p++) {
+        const r = Math.floor(p / COLS), c = p % COLS;
+        const rect = svg("rect", {
+          x: padL + c * cw, y: padT + r * (chh + 2),
+          width: Math.max(0.8, cw - gap), height: chh, rx: 1,
+          fill: C.free, opacity: .55
+        });
+        root.appendChild(rect);
+        cells.push(rect);
+      }
+      root.addEventListener("mousemove", function (e) {
+        const rr = root.getBoundingClientRect();
+        const px = (e.clientX - rr.left) / rr.width * W;
+        const py = (e.clientY - rr.top) / rr.height * H;
+        const c = Math.floor((px - padL) / cw), r = Math.floor((py - padT) / (chh + 2));
+        if (c < 0 || c >= COLS || r < 0 || r >= ROWS) { NN.tip.hide(); return; }
+        const p = r * COLS + c;
+        NN.tip.show(o.describe(p), e.clientX, e.clientY);
+      });
+      root.addEventListener("mouseleave", function () { NN.tip.hide(); });
+      root.cells = cells;
+      return root;
+    }
+
+    /* ---------------- contiguous ---------------- */
+    const contState = new Array(POOL).fill(null);   /* per block: null|'used'|'waste' */
+    const contOwner = new Array(POOL).fill(null);
+    const contGrid = grid({
+      aria: "contiguous KV allocation map",
+      describe: function (p) {
+        const seq = Math.floor(p / COLS);
+        const cInfo = DM.contiguous[seq];
+        const logical = p % COLS;
+        const st = contState[p];
+        return "<div class='muted'>reservation " + seq + " · block " + logical +
+          " of " + COLS + "</div>" +
+          (st === null ? "<div>not yet allocated</div>"
+           : st === "used"
+             ? "<div><b>holding tokens</b> " + (logical * DM.block) + "–" +
+               Math.min(cInfo.len, (logical + 1) * DM.block) + " of sequence " + seq + "</div>"
+             : "<div><b>reserved, never touched</b></div>") +
+          "<div class='muted'>sequence " + seq + " ran to " + cInfo.len + " of " +
+          NN.count(ST.max_seq) + " tokens (" + pc(cInfo.waste_frac, 0) + " of its " +
+          "reservation wasted)</div>";
+      }
+    });
+
+    /* ---------------- paged ---------------- */
+    const pagedOwner = new Array(POOL).fill(null);
+    DM.events.forEach(function (e) { pagedOwner[e[1]] = e; });
+    const pagedGrid = grid({
+      aria: "paged KV allocation map",
+      describe: function (p) {
+        const e = pagedOwner[p];
+        if (!e) return "<div class='muted'>physical block " + p + "</div><div>free</div>";
+        const seqIdx = DM.paged.map(function (x) { return x.seq; }).indexOf(e[0]);
+        const tbl = DM.tables[seqIdx] || [];
+        const logical = tbl.indexOf(p);
+        return "<div class='muted'>physical block " + p + "</div>" +
+          "<div><b>sequence " + e[0] + "</b>, logical block " + logical + "</div>" +
+          "<div class='muted'>" + e[2] + " of " + DM.block + " token slots used</div>";
+      }
+    });
+
+    /* per-panel headers and readouts */
+    function panel(title, gridEl) {
+      const r = el("span", { class: "r" });
+      const p = el("div", { class: "panel" }, [
+        el("h4", {}, [el("span", {}, title), r]), gridEl
+      ]);
+      p.readout = r;
+      return p;
+    }
+    const contPanel = panel("CONTIGUOUS — reserve " + NN.count(ST.max_seq) +
+                            " tokens per sequence", contGrid);
+    const pagedPanel = panel("PAGED — " + DM.block + "-token blocks on demand", pagedGrid);
+
+    /* the block table beside the paged map */
+    const tableHost = el("div", { class: "btab" });
+
+    /* ---------------- the shared cursor: sequences admitted ------------- */
+    const NSEQ = DM.paged_seqs;
+    const contSeqs = DM.contiguous;
+
+    function render(k) {
+      /* k = number of sequences admitted so far, 0..NSEQ */
+      /* --- contiguous: the first ROWS sequences get a reservation; the rest
+             are rejected outright, because there is no range left. --- */
+      let usedBlocks = 0, wasteBlocks = 0;
+      for (let p = 0; p < POOL; p++) { contState[p] = null; }
+      const nCont = Math.min(k, ROWS);
+      for (let s = 0; s < nCont; s++) {
+        const c = contSeqs[s];
+        for (let b = 0; b < COLS; b++) {
+          const p = s * COLS + b;
+          contState[p] = b < c.used_blocks ? "used" : "waste";
+          if (b < c.used_blocks) usedBlocks++; else wasteBlocks++;
+        }
+      }
+      contGrid.cells.forEach(function (rect, p) {
+        const st = contState[p];
+        rect.setAttribute("fill", st === "used" ? C.used : st === "waste" ? C.waste : C.free);
+        rect.setAttribute("opacity", st === "used" ? 1 : st === "waste" ? .55 : .5);
+      });
+      const rejected = Math.max(0, k - ROWS);
+      contPanel.readout.textContent =
+        nCont + " admitted" + (rejected ? " · " + rejected + " REJECTED, pool full" : "") +
+        " · " + pc(nCont ? wasteBlocks / (nCont * COLS) : 0, 0) + " of the reservations idle";
+
+      /* --- paged: allocate on demand, sequence by sequence --- */
+      let alloc = 0;
+      for (let s = 0; s < k; s++) alloc += DM.paged[s].blocks;
+      pagedGrid.cells.forEach(function (rect, p) {
+        const on = p < alloc;
+        const e = pagedOwner[p];
+        rect.setAttribute("fill", on ? C.used : C.free);
+        rect.setAttribute("opacity", on ? (e && e[2] < DM.block ? .62 : 1) : .5);
+      });
+      pagedPanel.readout.textContent =
+        k + " admitted · " + alloc + " of " + POOL + " blocks · " +
+        (POOL - alloc) + " free";
+
+      /* --- the block table for the newest sequence --- */
+      const idx = Math.max(0, Math.min(k - 1, NSEQ - 1));
+      const seq = DM.paged[idx], tbl = DM.tables[idx];
+      const t = el("table", {});
+      t.appendChild(el("thead", {}, [el("tr", {}, [
+        el("th", { class: "l" }, "logical block"), el("th", {}, "→ physical"),
+        el("th", {}, "tokens")
+      ])]));
+      const tb = el("tbody", {});
+      const show = Math.min(tbl.length, 6);
+      for (let b = 0; b < show; b++) {
+        tb.appendChild(el("tr", {}, [
+          el("td", { class: "l" }, "block " + b + "  (tok " + (b * DM.block) + "–" +
+            Math.min(seq.len, (b + 1) * DM.block) + ")"),
+          el("td", {}, "#" + tbl[b]),
+          el("td", {}, b === tbl.length - 1 ? String(seq.tokens_in_last_block)
+                                            : String(DM.block))
+        ]));
+      }
+      if (tbl.length > show) {
+        tb.appendChild(el("tr", { class: "more" }, [
+          el("td", { class: "l" }, "… " + (tbl.length - show) + " more"),
+          el("td", {}, "#" + tbl[tbl.length - 1]),
+          el("td", {}, String(seq.tokens_in_last_block))
+        ]));
+      }
+      t.appendChild(tb);
+      tableHost.innerHTML = "";
+      tableHost.appendChild(el("div", { class: "panel" }, [
+        el("h4", {}, [
+          el("span", {}, "block table · sequence " + seq.seq),
+          el("span", { class: "r" }, seq.len + " tokens → " + tbl.length + " blocks")
+        ]),
+        t,
+        el("p", { class: "small muted", style: { margin: "8px 0 0" } },
+          "The attention kernel walks this table instead of striding through one range. " +
+          "Physical blocks need not be adjacent and never have to move; the last block holds " +
+          seq.tokens_in_last_block + " of " + DM.block + " token slots, and that partial block " +
+          "is the entire internal fragmentation of this sequence.")
+      ]));
+    }
+
+    /* transport */
+    const btn = el("button", { class: "btn primary" }, "▶ Play");
+    const rng = el("input", {
+      type: "range", min: "0", max: String(NSEQ), value: String(NSEQ), step: "1",
+      "aria-label": "sequences admitted"
+    });
+    const clock = el("span", { class: "tclock" });
+    let k = NSEQ, playing = false, acc = 0, last = 0;
+    function apply() {
+      rng.value = String(k);
+      clock.textContent = k + " / " + NSEQ + " sequences admitted";
+      render(k);
+    }
+    function frame(now) {
+      if (!playing) return;
+      const dt = Math.min(64, now - last); last = now;
+      acc += dt / 1000 * (NSEQ / 9);
+      if (acc >= 1) { k = Math.min(NSEQ, k + Math.floor(acc)); acc -= Math.floor(acc); apply(); }
+      if (k >= NSEQ) { playing = false; btn.textContent = "▶ Replay"; return; }
+      requestAnimationFrame(frame);
+    }
+    btn.addEventListener("click", function () {
+      if (playing) { playing = false; btn.textContent = "▶ Play"; return; }
+      if (k >= NSEQ) { k = 0; apply(); }
+      playing = true; btn.textContent = "⏸ Pause"; last = performance.now(); acc = 0;
+      requestAnimationFrame(frame);
+    });
+    rng.addEventListener("input", function () {
+      playing = false; btn.textContent = "▶ Play";
+      k = Number(rng.value); apply();
+    });
+
+    host.appendChild(el("div", { class: "transport" }, [btn, rng, clock]));
+    host.appendChild(el("div", { style: { marginBottom: "12px" } }, [contPanel]));
+    host.appendChild(el("div", { style: { marginBottom: "12px" } }, [pagedPanel]));
+    host.appendChild(tableHost);
+    apply();
+
+    host.appendChild(el("div", { class: "verdict" }, [
+      el("span", { class: "big" }, DM.contiguous_seqs + " → " + DM.paged_seqs + " sequences"),
+      el("span", { class: "det" },
+        "same " + POOL + " blocks (" + NN.bytes(POOL * DM.block_bytes) + "), same requests, " +
+        xfmt(DM.fit_ratio) + " the concurrency, " + DM.paged_free_blocks +
+        " blocks still free at the end")
+    ]));
+
+    host.appendChild(NN.callout("key", "THE WASTE IS INTERNAL, AND IT IS MOST OF THE POOL",
+      "Across the full " + ST.n + "-sequence population the contiguous allocator asks for " +
+      NN.bytes(ST.contiguous_bytes) + " and " + NN.bytes(ST.contiguous_waste_bytes) + " of it — " +
+      "<b>" + pc(ST.contiguous_waste_frac) + "</b> — is reserved and never written. The paged " +
+      "allocator asks for " + NN.bytes(ST.paged_bytes) + " and wastes " +
+      NN.bytes(ST.paged_waste_bytes) + ", <b>" + pc(ST.paged_waste_frac) + "</b>, because the " +
+      "waste is bounded above by one partial block per sequence: at most " +
+      (DM.block - 1) + " token slots, " + NN.bytes((DM.block - 1) * ST.bytes_per_token) +
+      ", however long the sequence runs. That bound is the whole design."));
+  })();
+
+  /* ======================================================================
+     3 · THE OS ANALOGY
+     ====================================================================== */
+  (function os() {
+    const host = NN.$("#osBody");
+    const tab = el("table", { class: "osmap" });
+    [["page", "KV block (" + DM.block + " tokens)",
+      "fixed size, so any free one fits any request"],
+     ["page table", "block table per sequence",
+      "logical block → physical block; the kernel indexes through it"],
+     ["demand paging", "allocate a block when the sequence needs it",
+      "no reservation, so no internal fragmentation beyond one block"],
+     ["copy-on-write fork", "shared prefix blocks, refcounted",
+      "several sequences point at one physical block until one writes"],
+     ["swap out", "preempt and recompute or offload a sequence",
+      "when the pool is full the scheduler evicts, exactly like a page-out"]
+    ].forEach(function (r) {
+      tab.appendChild(el("tr", {}, [
+        el("td", { class: "a" }, r[0]), el("td", { class: "b" }, r[1]),
+        el("td", { class: "c" }, r[2])
+      ]));
+    });
+    host.appendChild(el("p", { html:
+      "None of this is new. It is 1960s operating systems applied to a tensor, term for term:" }));
+    host.appendChild(tab);
+    host.appendChild(el("p", { class: "small muted", style: { marginTop: "12px" } },
+      A.os_analogy));
+  })();
+
+  /* ======================================================================
+     4 · THE BUDGET
+     ====================================================================== */
+  (function budget() {
+    const host = NN.$("#budgetBody");
+
+    host.appendChild(el("p", { html:
+      "The demo pool was chosen to be drawable. Here is the real one. A " +
+      NN.gibytes(BD.hbm_bytes) + " " + M.gpu.name + " holds " + NN.bytes(BD.weight_bytes) +
+      " of bf16 weights and needs roughly " + NN.bytes(BD.workspace_bytes) +
+      " for activations and kernel workspace, which leaves" }));
+
+    host.appendChild(NN.memstrip([
+      { cls: "weight", bytes: BD.weight_bytes, label: "weights" },
+      { cls: "activation", bytes: BD.workspace_bytes, label: "workspace" },
+      { cls: "activation", bytes: BD.kv_budget_bytes, label: "KV cache budget" }
+    ], BD.hbm_bytes));
+    host.appendChild(NN.legend(["weight", "activation"]));
+    host.appendChild(el("p", { class: "small muted" },
+      "Device capacity is quoted in binary units — " + NN.gibytes(BD.hbm_bytes) +
+      " is " + NN.bytes(BD.hbm_bytes) + " decimal, and every other figure on this page is " +
+      "decimal. The KV budget is " + NN.bytes(BD.kv_budget_bytes) + "."));
+
+    host.appendChild(NN.formula({
+      rule: "concurrent sequences = KV budget ÷ bytes per sequence",
+      sub: NN.bytes(BD.kv_budget_bytes) + " ÷ " + NN.bytes(BD.reservation_bytes) +
+           " (contiguous)   vs   " + NN.bytes(BD.kv_budget_bytes) + " ÷ " +
+           NN.bytes(BD.mean_paged_bytes_per_seq) + " (paged, mean " +
+           NN.fmt(BD.mean_blocks_per_seq, 1) + " blocks)",
+      result: BD.concurrent_contiguous + "  vs  " + BD.concurrent_paged,
+      cls: "activation"
+    }));
+
+    host.appendChild(NN.tiles([
+      { k: "contiguous", v: String(BD.concurrent_contiguous), s: "concurrent sequences" },
+      { k: "paged", v: String(BD.concurrent_paged), s: "concurrent sequences",
+        cls: "activation" },
+      { k: "more sequences", v: xfmt(BD.ratio), s: "at the same budget" },
+      { k: "per sequence", v: NN.bytes(BD.mean_paged_bytes_per_seq),
+        s: "paged mean, vs " + NN.bytes(BD.reservation_bytes) + " reserved" }
+    ]));
+
+    /* tie back to page 26: concurrency is what batching wanted */
+    const db = S.decode_batching.by_seq[1];
+    const rows = db.rows;
+    const nearest = rows.reduce(function (a, r) {
+      return Math.abs(r.batch - BD.concurrent_paged) < Math.abs(a.batch - BD.concurrent_paged)
+        ? r : a;
+    }, rows[0]);
+    const nearestC = rows.reduce(function (a, r) {
+      return Math.abs(r.batch - BD.concurrent_contiguous) <
+             Math.abs(a.batch - BD.concurrent_contiguous) ? r : a;
+    }, rows[0]);
+
+    host.appendChild(NN.callout("why", "CONCURRENCY IS THE THING PAGE 26 WAS ASKING FOR",
+      "<a href=\"26-batching.html\">Page 26</a> showed that intensity climbs with batch size " +
+      "because the weight read is fixed per step. Paging is what makes a large batch physically " +
+      "possible. On the same cost model, at " + NN.count(db.seq) + " tokens of context, batch " +
+      nearestC.batch + " runs at " + NN.fmt(nearestC.intensity, 1) + " FLOP/byte and batch " +
+      nearest.batch + " runs at " + NN.fmt(nearest.intensity, 1) + " — " +
+      pc(nearestC.flops_utilisation, 2) + " of peak FLOPs against " +
+      pc(nearest.flops_utilisation, 2) + ". The allocator is not a memory optimisation that " +
+      "happens to be nice; it is the thing that lets the scheduler do its job."));
+  })();
+
+  /* ======================================================================
+     5 · PREFIX SHARING
+     ====================================================================== */
+  (function prefix() {
+    const host = NN.$("#prefixBody");
+
+    host.appendChild(el("p", { html:
+      "Every request to a deployed assistant starts with the same system prompt. Every one of " +
+      "those sequences computes identical K and V for it, because K and V for a token depend " +
+      "only on that token and everything before it — the same fact that makes the KV cache " +
+      "exact in the first place (<a href=\"25-kv-cache.html\">page 25</a>). Under paging those " +
+      "blocks can simply be <em>shared</em>: N block tables pointing at one set of physical " +
+      "blocks, refcounted." }));
+
+    host.appendChild(el("p", { html:
+      "The model here: a <b>" + PS.system_prompt_tokens + "-token</b> system prompt, then each " +
+      "user adds " + PS.user_in_tokens + " tokens of their own and generates " +
+      PS.user_out_tokens + ". " + PS.note }));
+
+    /* --- the picture --- */
+    const wrapPic = el("div", { class: "panel" });
+    const picHead = el("h4", {});
+    wrapPic.appendChild(picHead);
+    const fan = el("div", { class: "fanwrap" });
+    wrapPic.appendChild(fan);
+
+    /* --- slider --- */
+    const maxN = PS.curve[PS.curve.length - 1][0];
+    const rng = el("input", {
+      type: "range", min: "1", max: String(maxN), value: "16", step: "1",
+      style: { flex: "1", minWidth: "180px", accentColor: "var(--weight)" },
+      "aria-label": "number of users sharing the prefix"
+    });
+    const out = el("div", {});
+    const chartHost = el("div", {});
+
+    function nearestRow(n) {
+      const c = PS.curve[n - 1];
+      return { n: n, blocks_without: c[1], blocks_with: c[2],
+               bytes_without: c[1] * PS.block_bytes,
+               bytes_with: c[2] * PS.block_bytes,
+               saving: (c[1] - c[2]) / c[1], ratio: c[1] / c[2] };
+    }
+
+    function paint() {
+      const n = Number(rng.value);
+      const r = nearestRow(n);
+
+      picHead.innerHTML = "";
+      picHead.appendChild(el("span", {}, "block layout at fan-out " + n));
+      picHead.appendChild(el("span", { class: "r" },
+        PS.shared_full_blocks + " shared + " + n + " × " + PS.private_blocks_per_seq +
+        " private = " + r.blocks_with + " blocks"));
+
+      fan.innerHTML = "";
+      const CAP = 60;   /* blocks drawn per row before eliding */
+      function row(label, kinds, note) {
+        const bl = el("div", { class: "blocks" });
+        kinds.slice(0, CAP).forEach(function (kd) {
+          bl.appendChild(el("i", {
+            style: {
+              background: kd === "shared" ? C.shared : kd === "cow" ? C.waste : C.used,
+              opacity: kd === "shared" ? "1" : kd === "cow" ? ".85" : ".62"
+            },
+            title: kd === "shared" ? "shared prefix block, refcount " + n
+                   : kd === "cow" ? "copy-on-write block: shared and private tokens together"
+                   : "private block"
+          }));
+        });
+        fan.appendChild(el("div", { class: "fanrow" }, [
+          el("span", { class: "lab" }, label), bl,
+          el("span", {}, note + (kinds.length > CAP ? "  (+" + (kinds.length - CAP) + " not drawn)" : ""))
+        ]));
+      }
+      const sharedKinds = new Array(PS.shared_full_blocks).fill("shared");
+      row("PREFIX", sharedKinds, PS.shared_full_blocks + " blocks, one copy");
+      const priv = ["cow"].concat(new Array(PS.private_blocks_per_seq - 1).fill("private"));
+      const drawUsers = Math.min(n, 6);
+      for (let u = 0; u < drawUsers; u++) {
+        row("user " + u, priv, PS.private_blocks_per_seq + " blocks");
+      }
+      if (n > drawUsers) {
+        fan.appendChild(el("div", { class: "fanrow" }, [
+          el("span", { class: "lab" }, "…"),
+          el("span", {}, (n - drawUsers) + " more users, " +
+            (n - drawUsers) * PS.private_blocks_per_seq + " more private blocks")
+        ]));
+      }
+
+      out.innerHTML = "";
+      out.appendChild(NN.tiles([
+        { k: "without sharing", v: NN.bytes(r.bytes_without),
+          s: r.blocks_without + " blocks" },
+        { k: "with sharing", v: NN.bytes(r.bytes_with), s: r.blocks_with + " blocks",
+          cls: "activation" },
+        { k: "saved", v: pc(r.saving), s: NN.bytes(r.bytes_without - r.bytes_with) },
+        { k: "ratio", v: xfmt(r.ratio), s: "KV cache per fan-out" }
+      ]));
+      out.appendChild(el("p", { class: "small muted" },
+        "At fan-out " + n + " the un-shared layout stores the same " +
+        PS.system_prompt_tokens + "-token prefix " + n + " times over. Sharing stores it once " +
+        "and pays " + PS.private_blocks_per_seq + " blocks per user — one of which is the " +
+        "copy-on-write block straddling the prefix boundary, holding " +
+        PS.boundary_block_shared_tokens + " shared tokens and " +
+        (PS.block - PS.boundary_block_shared_tokens) + " private ones."));
+    }
+
+    /* the curve */
+    (function drawCurve() {
+      const W = 660, H = 250, m = { t: 14, r: 14, b: 36, l: 62 };
+      const iw = W - m.l - m.r, ih = H - m.t - m.b;
+      const ymax = PS.curve[PS.curve.length - 1][1] * PS.block_bytes * 1.06;
+      const X = function (n) { return m.l + (n - 1) / (maxN - 1) * iw; };
+      const Y = function (b) { return m.t + ih - b / ymax * ih; };
+      const root = svg("svg", {
+        viewBox: "0 0 " + W + " " + H, width: "100%", height: H, class: "chart",
+        role: "img", "aria-label": "KV cache bytes versus fan-out, shared and un-shared"
+      });
+      for (let k = 0; k <= 4; k++) {
+        const v = ymax * k / 4, yy = Y(v);
+        root.appendChild(svg("line", { class: "gridline", x1: m.l, x2: m.l + iw, y1: yy, y2: yy }));
+        root.appendChild(svg("text", { x: m.l - 8, y: yy + 3.5, "text-anchor": "end" }))
+          .textContent = NN.bytes(v);
+      }
+      [1, 32, 64, 96, 128].forEach(function (n) {
+        if (n > maxN) return;
+        root.appendChild(svg("text", { x: X(n), y: m.t + ih + 16, "text-anchor": "middle" }))
+          .textContent = String(n);
+      });
+      root.appendChild(svg("line", { class: "axis", x1: m.l, x2: m.l + iw, y1: m.t + ih, y2: m.t + ih }));
+      root.appendChild(svg("line", { class: "axis", x1: m.l, x2: m.l, y1: m.t, y2: m.t + ih }));
+      root.appendChild(svg("text", { x: m.l + iw / 2, y: H - 5, "text-anchor": "middle" }))
+        .textContent = "users sharing the system prompt";
+      const yl = svg("text", {
+        x: -(m.t + ih / 2), y: 13, transform: "rotate(-90)", "text-anchor": "middle"
+      });
+      yl.textContent = "KV cache"; root.appendChild(yl);
+
+      function path(idx, colour, dash) {
+        const d = PS.curve.map(function (c, i) {
+          return (i ? "L" : "M") + X(c[0]).toFixed(2) + " " +
+                 Y(c[idx] * PS.block_bytes).toFixed(2);
+        }).join(" ");
+        root.appendChild(svg("path", {
+          class: "series", d: d, stroke: colour, "stroke-width": 2.2,
+          "stroke-dasharray": dash || null
+        }));
+      }
+      path(1, "var(--accent)", "5 4");
+      path(2, "var(--activation)");
+
+      const cur = svg("line", {
+        x1: X(16), x2: X(16), y1: m.t, y2: m.t + ih,
+        stroke: "var(--ink)", "stroke-width": 1, opacity: .6
+      });
+      root.appendChild(cur);
+      root.setN = function (n) { cur.setAttribute("x1", X(n)); cur.setAttribute("x2", X(n)); };
+
+      const lab1 = svg("text", { x: m.l + iw - 4, y: Y(PS.curve[maxN - 1][1] * PS.block_bytes) - 6,
+                                 "text-anchor": "end", fill: "var(--accent)" });
+      lab1.textContent = "no sharing";
+      root.appendChild(lab1);
+      const lab2 = svg("text", { x: m.l + iw - 4, y: Y(PS.curve[maxN - 1][2] * PS.block_bytes) - 6,
+                                 "text-anchor": "end", fill: "var(--activation)" });
+      lab2.textContent = "shared prefix";
+      root.appendChild(lab2);
+      chartHost.appendChild(root);
+      chartHost.curve = root;
+    })();
+
+    rng.addEventListener("input", function () {
+      paint();
+      if (chartHost.curve) chartHost.curve.setN(Number(rng.value));
+    });
+
+    host.appendChild(el("div", { class: "transport" }, [
+      el("span", { class: "tclock" }, "fan-out"), rng,
+      el("span", { class: "tclock", id: "fanN" }, "")
+    ]));
+    host.appendChild(wrapPic);
+    host.appendChild(out);
+    host.appendChild(chartHost);
+    paint();
+    rng.addEventListener("input", function () {
+      const e = NN.$("#fanN"); if (e) e.textContent = rng.value + " users";
+    });
+    NN.$("#fanN").textContent = rng.value + " users";
+
+    const big = PS.rows[PS.rows.length - 1];
+    host.appendChild(el("div", { class: "verdict" }, [
+      el("span", { class: "big" }, pc(big.saving_frac) + " saved at fan-out " + big.n),
+      el("span", { class: "det" },
+        NN.bytes(big.bytes_without) + " → " + NN.bytes(big.bytes_with) + "  (" +
+        xfmt(big.ratio) + ")")
+    ]));
+
+    host.appendChild(NN.callout("mem", "WHY IT IS COPY-ON-WRITE AND NOT JUST SHARING",
+      "The prefix is " + PS.system_prompt_tokens + " tokens and a block is " + PS.block +
+      ", so the prefix does not end on a block boundary. " + PS.shared_full_blocks +
+      " blocks lie wholly inside it and are shared by reference with a refcount. The block at " +
+      "the boundary holds " + PS.boundary_block_shared_tokens + " prefix tokens and then the " +
+      "first " + (PS.block - PS.boundary_block_shared_tokens) + " tokens of whatever this " +
+      "particular user said, so the first write into it forces a copy — one block per " +
+      "sequence, " + NN.bytes(PS.block_bytes) + ". Align the prompt to the block size and even " +
+      "that goes away. This is <code>fork()</code>, and the boundary block is the page that " +
+      "gets copied when the child writes to it."));
+  })();
+
+  /* ======================================================================
+     6 · CLOSE
+     ====================================================================== */
+  (function close_() {
+    const host = NN.$("#closeBody");
+    const db = S.decode_batching.by_seq[1];
+
+    host.appendChild(el("p", { html:
+      "Paging removes waste. It does not remove the cache. Every resident sequence still needs " +
+      kib(ST.bytes_per_token) + " per token of real, written, re-read-every-step KV cache, and " +
+      "at " + NN.count(db.seq) + " tokens of context that is " +
+      NN.bytes(db.kv_bytes_per_seq) + " each — which is why the intensity curve on " +
+      "<a href=\"26-batching.html\">page 26</a> still bends over at batch " +
+      NN.fmt(db.kv_crossover_batch, 0) + " no matter how the blocks are arranged. " +
+      "Fragmentation was an allocator problem and paging solved it. The size of the cache is an " +
+      "architecture problem, and the answer to that one was grouped-query attention " +
+      "(<a href=\"12-attention-variants.html\">page 12</a>) and quantisation " +
+      "(<a href=\"28-quantisation.html\">page 28</a>)." }));
+
+    host.appendChild(NN.callout("why", "THE SAME FOUR CLASSES, STILL",
+      "The block pool is activation memory. It is green on this page for exactly the reason it " +
+      "is green on <a href=\"01-memory.html\">page 01</a>: K and V are computed in the forward " +
+      "pass from the input, and they are kept because something later reads them. The " +
+      T.param_names.length + "-parameter model there keeps <code>a1</code> for the backward " +
+      "pass and frees it a few microseconds later — " +
+      NN.bytes(T.memory.by_class.activation.bytes_fp32) + " of it — and a served " +
+      NN.count(M.model.params) + "-parameter model keeps K and V for the whole conversation. " +
+      "Same class, same reason, eleven orders of magnitude apart. The difference is that at " +
+      "this scale you need an allocator for it."));
+  })();
+
+  NN.page("paged");
+})();
+</script>
+</body>
+</html>

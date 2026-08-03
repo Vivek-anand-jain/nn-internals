@@ -286,16 +286,30 @@ def train(P, X, Y, steps=N_STEPS):
     """
     import copy
     P = copy.deepcopy(P)
-    hist = []
+    hist, snapshots = [], []
     keys = [k for k in P]
     for s in range(steps):
         L, per_pos, _, _ = loss_and_grad(P, X, Y)
+        # Full distributions per step, not just p[target]. Page 08 wanted to
+        # animate the whole 9-bar distribution SHARPENING over training,
+        # which is the strongest visual the data can support, and could not
+        # because only the target's probability was recorded.
         hist.append({
             "step": s, "loss": L, "perplexity": math.exp(L),
             "n_correct": sum(1 for x in per_pos if x["correct"]),
             "predictions": [x["predicted"] for x in per_pos],
             "target_probs": [x["prob_of_target"] for x in per_pos],
+            "probs": [x["probs"] for x in per_pos],
+            "entropy": [-sum(q * math.log(max(q, 1e-30)) for q in x["probs"])
+                        for x in per_pos],
         })
+        # Snapshot what the model GENERATES part-way through, so the page can
+        # show output quality improving rather than only endpoints.
+        if s in (0, 5, 10, 20, 39):
+            snapshots.append({
+                "step": s, "loss": L,
+                "generated": generate(P, [STOI["the"]], 4)["final_str"],
+            })
         if s == steps - 1:
             break
         h = 1e-4
@@ -318,7 +332,7 @@ def train(P, X, Y, steps=N_STEPS):
                     v[a] = o - h
                     lm = loss_and_grad(P, X, Y)[0]
                     v[a] = o - LR * (lp - lm) / (2 * h)
-    return P, hist
+    return P, hist, snapshots
 
 
 # ============================================================================
@@ -398,7 +412,7 @@ def build():
     X, Y = make_xy(IDS)
     L0, per_pos0, dlog0, logits0 = loss_and_grad(P, X, Y)
     deriv = cross_entropy_derivation(P, X, Y)
-    trained, hist = train(P, X, Y)
+    trained, hist, snapshots = train(P, X, Y)
     L1, per_pos1, _, _ = loss_and_grad(trained, X, Y)
 
     gen_untrained = generate(P, [STOI["the"]], 4)
@@ -440,6 +454,7 @@ def build():
                   "per_position": per_pos1},
         "cross_entropy_gradient": deriv,
         "training_history": hist,
+        "generation_snapshots": snapshots,
         "trained_params": {k: trained[k] for k in sorted(trained)},
         "inference": {
             "untrained": gen_untrained,

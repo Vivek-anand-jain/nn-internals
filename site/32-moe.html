@@ -14,7 +14,9 @@
 .hint { font-size: .7rem; color: var(--ink-muted); font-family: var(--mono); line-height: 1.55; }
 
 /* --- router --- */
-.rtwrap { display: grid; grid-template-columns: 248px 1fr 262px; gap: 13px; margin: 14px 0; align-items: start; }
+.rtwrap { display: grid; grid-template-columns: 264px 1fr 262px; gap: 13px; margin: 14px 0; align-items: start; }
+.rtwrap .cell { min-width: 48px; padding: 5px 6px; font-size: .74rem; }
+.rtwrap .tensor { margin: 0 0 8px; }
 @media (max-width: 900px) { .rtwrap { grid-template-columns: 1fr; } }
 .tokbadge { display: inline-flex; align-items: baseline; gap: 8px; font-family: var(--mono);
             border: 1px solid var(--activation); border-radius: 7px; padding: 4px 10px;

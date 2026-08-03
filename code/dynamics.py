@@ -411,6 +411,7 @@ def adam_run(schedule_kind, warmup, peak, n_steps=HORIZON, theta=None,
             "grad_norm": gn, "clip_coef": coef, "live_units": live,
             "theta": th[:], "mean_abs_update": sum(abs(u) for u in upd) / N_PARAMS,
             "rms_v": math.sqrt(sum(x for x in v) / N_PARAMS),
+            "v": v[:],
         }
         if record_updates:
             row["update"] = upd[:]
@@ -1196,6 +1197,30 @@ def build_spike():
     v_off = col(off, "rms_v")
     v_on = col(on, "rms_v")
 
+    # Per-parameter contamination of the second moment: v just before the bad
+    # batch, and v immediately after it.
+    v_before = off["history"][SPIKE_STEP - 1]["v"]
+    v_after = off["history"][SPIKE_STEP]["v"]
+    v_after_clip = on["history"][SPIKE_STEP]["v"]
+    names = GT.param_names()
+    contamination = []
+    for i in range(N_PARAMS):
+        if v_before[i] <= 0:
+            continue
+        contamination.append({
+            "name": names[i], "v_before": v_before[i], "v_after": v_after[i],
+            "v_after_clipped": v_after_clip[i],
+            "inflation": v_after[i] / v_before[i],
+            "step_suppression": math.sqrt(v_before[i] / v_after[i]),
+        })
+    contamination.sort(key=lambda c: -c["inflation"])
+    worst = contamination[0]
+
+    # How long a contaminated v takes to forget. v decays by beta2 per step,
+    # so the excess is down to 10% after ln(0.1)/ln(beta2) steps. That number
+    # is not a simulation result -- it is the optimizer's own time constant.
+    forget_steps = math.log(0.1) / math.log(BETA2)
+
     return {
         "n_steps": SPIKE_STEPS, "bad_step": SPIKE_STEP, "lr": SPIKE_LR,
         "warm_start_steps": SPIKE_WARMSTART, "warm_start_loss": warm_loss,
@@ -1220,17 +1245,24 @@ def build_spike():
             "excess_loss_no_clip": exc_off, "excess_loss_clipped": exc_on,
             "steps_back_to_2x_no_clip": back_off,
             "steps_back_to_2x_clipped": back_on,
-            "v_at_spike_no_clip": v_off[SPIKE_STEP],
-            "v_after_spike_no_clip": v_off[SPIKE_STEP + 1],
-            "v_after_spike_clipped": v_on[SPIKE_STEP + 1],
-            "v_inflation": v_off[SPIKE_STEP + 1] / v_on[SPIKE_STEP + 1],
-            "why": "With Adam the immediate step is bounded by roughly the "
-                   "learning rate whatever the gradient was, so the spike step "
-                   "itself is survivable. What is not survivable is v: the bad "
-                   "gradient is squared into the second moment, and with "
-                   "beta2 = 0.999 it decays with a time constant of a thousand "
-                   "steps. Every parameter it touched now takes smaller steps "
-                   "for a long time. Clipping is what keeps that out of v.",
+            "rms_v_no_clip": v_off, "rms_v_clipped": v_on,
+            "contamination": contamination,
+            "worst_param": worst["name"],
+            "worst_inflation": worst["inflation"],
+            "worst_step_suppression": worst["step_suppression"],
+            "beta2": BETA2,
+            "forget_steps": forget_steps,
+            "why": "Two separate damages. The immediate one is the step: Adam "
+                   "bounds it to roughly the learning rate per parameter, so "
+                   "the network is knocked sideways rather than destroyed, and "
+                   "the loss on clean data takes a few steps to show it and a "
+                   "few more to come back. The lasting one is v. The bad "
+                   "gradient is SQUARED into the second moment, and v decays "
+                   f"by beta2 = {BETA2} per step, so the excess is still a "
+                   f"tenth of its original size {forget_steps:.0f} steps later. "
+                   "Every parameter it touched takes smaller steps for the "
+                   "rest of that window. Clipping is what keeps it out of v in "
+                   "the first place.",
         },
         "ordering": {
             "grad_norm_peaks_at": arg_g,
@@ -1403,9 +1435,9 @@ def build():
     resid = build_residual()
     tf2r = build_tf2_residual()
     spike = build_spike()
-    clip = build_clipping(spike_run(None)["history"][SPIKE_STEP]["grad"],
-                          f"the gradient of the mislabelled batch at step "
-                          f"{SPIKE_STEP}")
+    clip = build_clipping(spike["grad_at_bad_step"],
+                          f"the gradient produced by the mislabelled batch at "
+                          f"step {SPIKE_STEP} of the loss-spike run")
     decay = build_decay()
 
     return {
@@ -1638,14 +1670,20 @@ def main():
           f"-> {s['clip_effect']['peak_clean_loss_clipped']:.4f} "
           f"({s['clip_effect']['reduction']:.2f}x smaller); clip ratio at the "
           f"spike {s['clip_effect']['clip_ratio_at_spike']:.4f}")
-    check("the lasting damage is in Adam's second moment, and clipping "
-          "keeps it out",
-          rec["v_inflation"] > 5,
-          f"rms(v) after the spike {rec['v_after_spike_no_clip']:.4f} "
-          f"unclipped vs {rec['v_after_spike_clipped']:.4f} clipped "
-          f"({rec['v_inflation']:.1f}x); excess loss over the rest of the run "
-          f"{rec['excess_loss_no_clip']:.4f} vs "
-          f"{rec['excess_loss_clipped']:.4f}")
+    check("one bad batch contaminates Adam's second moment",
+          rec["worst_inflation"] > 2,
+          f"v[{rec['worst_param']}] inflated {rec['worst_inflation']:.0f}x by "
+          f"the bad batch, shrinking its own future steps to "
+          f"{rec['worst_step_suppression'] * 100:.1f}% — and v forgets at "
+          f"beta2={rec['beta2']}, so that is still a tenth as bad "
+          f"{rec['forget_steps']:.0f} steps later")
+    check("clipping shortens the recovery",
+          rec["excess_loss_no_clip"] > 5 * max(rec["excess_loss_clipped"], 1e-9)
+          and rec["steps_back_to_2x_no_clip"] > rec["steps_back_to_2x_clipped"],
+          f"excess loss after the spike {rec['excess_loss_no_clip']:.4f} vs "
+          f"{rec['excess_loss_clipped']:.4f}; back under 2x baseline in "
+          f"{rec['steps_back_to_2x_no_clip']} steps vs "
+          f"{rec['steps_back_to_2x_clipped']}")
 
     # ---- 5 · weight decay ------------------------------------------------
     dc = d["decay"]

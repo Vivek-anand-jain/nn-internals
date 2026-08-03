@@ -1,0 +1,1213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 28 Quantisation</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* page-local layout only; every colour comes from design.css custom properties */
+.ctlbar { display: flex; flex-wrap: wrap; gap: 16px 22px; align-items: flex-end;
+          background: var(--surface-2); border: 1px solid var(--hairline);
+          border-radius: 8px; padding: 12px 15px; margin: 16px 0; }
+.fld { min-width: 150px; }
+.fld > label { display: flex; justify-content: space-between; align-items: baseline; gap: 10px;
+               font-family: var(--mono); font-size: .72rem; color: var(--ink-muted);
+               text-transform: uppercase; letter-spacing: .09em; margin-bottom: 4px; }
+.fld > label b { color: var(--ink); font-size: .86rem; letter-spacing: 0; text-transform: none; }
+.fld input[type="range"] { width: 100%; accent-color: var(--weight); }
+.segs { display: flex; flex-wrap: wrap; gap: 4px; }
+.segs button { font-family: var(--mono); font-size: .74rem; padding: 4px 9px; border-radius: 6px;
+               border: 1px solid var(--hairline); background: var(--surface-1); color: var(--ink-2);
+               cursor: pointer; }
+.segs button:hover { border-color: var(--ink-muted); color: var(--ink); }
+.segs button.on { background: var(--weight); border-color: var(--weight); color: #fff; font-weight: 700; }
+.segs.act button.on { background: var(--activation); border-color: var(--activation); }
+.segs.grd button.on { background: var(--gradient); border-color: var(--gradient); }
+
+.panel { background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 8px;
+         padding: 13px 15px; }
+.panel h4 { margin: 0 0 9px; font-family: var(--mono); font-size: .68rem; letter-spacing: .13em;
+            text-transform: uppercase; color: var(--ink-muted); font-weight: 700; }
+
+.ladder { display: block; width: 100%; }
+.ladder .lvl { stroke: var(--accent); stroke-width: 1; opacity: 0; transition: opacity .45s; }
+.ladder.show-grid .lvl { opacity: .55; }
+.ladder .axis { stroke: var(--hairline); stroke-width: 1; }
+.ladder .dotg { transition: transform .7s cubic-bezier(.4,0,.2,1); }
+.ladder .resid { stroke: var(--critical); stroke-width: 1.5; opacity: 0; transition: opacity .4s; }
+.ladder.show-err .resid { opacity: .85; }
+.ladder text { fill: var(--ink-muted); font-family: var(--mono); font-size: 10px; }
+
+.kv { font-family: var(--mono); font-size: .8rem; font-variant-numeric: tabular-nums; }
+.kv div { display: flex; justify-content: space-between; gap: 14px; padding: 3px 0;
+          border-bottom: 1px solid var(--hairline-2); }
+.kv div:last-child { border-bottom: none; }
+.kv span.k { color: var(--ink-muted); }
+.kv span.v { color: var(--ink); font-weight: 600; }
+
+table.data { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .78rem;
+             font-variant-numeric: tabular-nums; }
+table.data th, table.data td { padding: 5px 9px; border-bottom: 1px solid var(--hairline-2);
+                               text-align: right; white-space: nowrap; }
+table.data th:first-child, table.data td:first-child { text-align: left; }
+table.data th { font-size: .63rem; letter-spacing: .1em; text-transform: uppercase;
+                color: var(--ink-muted); font-weight: 700; }
+table.data tr.hi td { background: var(--surface-3); }
+table.data tr.hi td:first-child { font-weight: 700; }
+
+.bitrow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 7px 0; }
+.bitrow .nm { font-family: var(--mono); font-size: .74rem; color: var(--ink-2); min-width: 62px; }
+.bitrow .val { font-family: var(--mono); font-size: .74rem; color: var(--ink); }
+.tag { display: inline-block; font-family: var(--mono); font-size: .58rem; letter-spacing: .07em;
+       text-transform: uppercase; font-weight: 700; padding: 1px 6px; border-radius: 99px;
+       border: 1px solid var(--hairline); color: var(--ink-muted); }
+.tag.bad { color: var(--critical); border-color: var(--critical); }
+.tag.warnt { color: var(--warning); border-color: var(--warning); }
+.tag.ok { color: var(--good); border-color: var(--good); }
+
+.chanbars { display: grid; grid-template-columns: 46px 1fr 1fr; gap: 3px 9px; align-items: center;
+            font-family: var(--mono); font-size: .68rem; }
+.chanbars .hd { color: var(--ink-muted); font-size: .6rem; letter-spacing: .1em;
+                text-transform: uppercase; padding-bottom: 3px; }
+.cbar { height: 13px; background: var(--surface-3); border-radius: 3px; overflow: hidden;
+        position: relative; }
+.cbar i { display: block; height: 100%; border-radius: 0 3px 3px 0;
+          transition: width .5s cubic-bezier(.4,0,.2,1); }
+.cbar b { position: absolute; right: 4px; top: 0; line-height: 13px; font-size: .58rem;
+          font-weight: 700; color: var(--ink); font-style: normal; }
+
+.verdict { border-radius: 8px; padding: 13px 17px; margin: 15px 0; border: 1px solid var(--hairline);
+           border-left: 4px solid var(--accent); background: var(--surface-2);
+           display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 22px; }
+.verdict .big { font-size: 1.45rem; font-weight: 800; letter-spacing: -.02em; line-height: 1.2; }
+.verdict .det { font-family: var(--mono); font-size: .8rem; color: var(--ink-2); }
+.verdict.ok  { border-left-color: var(--good); }     .verdict.ok .big  { color: var(--good); }
+.verdict.bad { border-left-color: var(--critical); } .verdict.bad .big { color: var(--critical); }
+
+.chklist { list-style: none; padding: 0; margin: 12px 0 0; }
+.chklist li { display: grid; grid-template-columns: 58px 1fr; gap: 12px; padding: 8px 0;
+              border-top: 1px solid var(--hairline-2); }
+.chklist .st { font-family: var(--mono); font-size: .66rem; font-weight: 700; letter-spacing: .08em; }
+.chklist .st.p { color: var(--good); }
+.chklist .st.f { color: var(--critical); }
+.chklist .nm2 { font-weight: 600; }
+.chklist .dt { font-family: var(--mono); font-size: .72rem; color: var(--ink-muted);
+               line-height: 1.55; word-break: break-word; }
+
+.notelist { margin: 10px 0 0; padding-left: 20px; }
+.notelist li { margin: 6px 0; color: var(--ink-2); font-size: .9rem; line-height: 1.6; }
+
+.grid2b { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.grid12 { display: grid; grid-template-columns: 1.35fr 1fr; gap: 18px; }
+@media (max-width: 900px) { .grid2b, .grid12 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 28</div>
+    <h1>Quantisation</h1>
+    <p class="lede">A quantised weight is not a smaller float. It is an integer plus a scale, and
+      every question that matters — per-tensor or per-channel, how big a group, INT4 or FP8, why the
+      outliers ruin everything — is a question about which grid you snapped onto and what you chose
+      to set its spacing. This page builds the grids and measures the damage. Then it shows the
+      thing that makes quantisation an <em>inference</em> technique: the win lands almost entirely
+      on decode, because decode is bandwidth-bound and prefill is not.</p>
+    <noscript><p class="callout warn">This page derives every grid, error and timing in the browser
+      from <code>assets/data/quant.js</code>. With JavaScript disabled you will see an empty
+      shell.</p></noscript>
+  </div>
+
+  <section class="block" id="grid">
+    <h2>1 · The grid</h2>
+    <div id="gridBody"></div>
+  </section>
+
+  <section class="block" id="channel">
+    <h2>2 · One scale for the whole tensor, or one per channel</h2>
+    <div id="chanBody"></div>
+  </section>
+
+  <section class="block" id="groups">
+    <h2>3 · INT4, and how big a group</h2>
+    <div id="groupBody"></div>
+  </section>
+
+  <section class="block" id="fp8">
+    <h2>4 · FP8: two different 8-bit floats</h2>
+    <div id="fp8Body"></div>
+  </section>
+
+  <section class="block" id="smooth">
+    <h2>5 · The outlier problem, and moving it somewhere else</h2>
+    <div id="smoothBody"></div>
+  </section>
+
+  <section class="block" id="asym">
+    <h2>6 · Why this is a decode technique</h2>
+    <div id="asymBody"></div>
+  </section>
+
+  <section class="block" id="proof">
+    <h2>7 · What was measured, and what was assumed</h2>
+    <div id="proofBody"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/quant.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+  const T = NN.T;
+  const Q = window.QUANT;
+  const QU = Q.quant;
+  const el = NN.el, fmt = NN.fmt;
+
+  /* ------------------------------------------------------------ helpers */
+
+  function sci(x, d) {
+    if (x === null || x === undefined) return "–";
+    if (x === 0) return "0";
+    return x.toExponential(d === undefined ? 2 : d);
+  }
+  function pct(x, d) { return fmt(x * 100, d === undefined ? 2 : d) + "%"; }
+  function db(x) { return x === null ? "∞" : fmt(x, 2) + " dB"; }
+
+  /** Every value an integer grid can represent: (i − zp) · scale. Derived
+      here rather than carried in the payload. */
+  function levelsOf(scale, zp, qmin, qmax) {
+    const out = [];
+    for (let i = qmin; i <= qmax; i++) out.push((i - zp) * scale);
+    return out;
+  }
+
+  function seg(opts, cur, onPick, extraClass) {
+    const wrap = el("div", { class: "segs " + (extraClass || "") });
+    const btns = opts.map(function (o) {
+      const b = el("button", { class: o.value === cur ? "on" : "" }, o.label);
+      b.addEventListener("click", function () {
+        NN.$$("button", wrap).forEach(function (x) { x.classList.remove("on"); });
+        b.classList.add("on");
+        onPick(o.value);
+      });
+      wrap.appendChild(b);
+      return b;
+    });
+    wrap.select = function (v) {
+      btns.forEach(function (b, i) { b.classList.toggle("on", opts[i].value === v); });
+    };
+    return wrap;
+  }
+
+  function field(labelText, valueEl, controlEl) {
+    return el("div", { class: "fld" }, [
+      el("label", {}, [el("span", {}, labelText), valueEl || el("b", {}, "")]),
+      controlEl
+    ]);
+  }
+
+  function kv(rows) {
+    return el("div", { class: "kv" }, rows.map(function (r) {
+      return el("div", {}, [
+        el("span", { class: "k" }, r[0]),
+        el("span", { class: "v" + (r[2] ? " v-" + r[2] : "") }, r[1])
+      ]);
+    }));
+  }
+
+  function table(head, rows, highlightIdx) {
+    const t = el("table", { class: "data" }, [
+      el("thead", {}, el("tr", {}, head.map(function (h) { return el("th", {}, h); }))),
+      el("tbody", {}, rows.map(function (r, i) {
+        return el("tr", { class: i === highlightIdx ? "hi" : "" },
+          r.map(function (c) {
+            return el("td", {}, typeof c === "object" && c !== null ? c : String(c));
+          }));
+      }))
+    ]);
+    return el("div", { class: "scrollx" }, t);
+  }
+
+  /* =====================================================================
+     1 · THE GRID
+     ===================================================================== */
+  /**
+   * The snapping picture. Real values on top, the representable levels as a
+   * ladder, the snapped values below, and the residual drawn as the thing
+   * you actually gave up.
+   */
+  function ladder(o) {
+    const W = 900, H = 132, PAD = 26;
+    const lo = o.xmin, hi = o.xmax;
+    const X = function (v) { return PAD + (v - lo) / (hi - lo) * (W - 2 * PAD); };
+    const yTop = 34, yBot = 96;
+
+    const root = NN.svg("svg", {
+      class: "ladder", viewBox: "0 0 " + W + " " + H, width: "100%", height: H,
+      preserveAspectRatio: "none", role: "img"
+    });
+
+    const lv = o.levels.filter(function (v) { return v >= lo && v <= hi; });
+    lv.forEach(function (v) {
+      root.appendChild(NN.svg("line", {
+        class: "lvl", x1: X(v), x2: X(v), y1: yTop + 12, y2: yBot + 10
+      }));
+    });
+
+    root.appendChild(NN.svg("line", {
+      class: "axis", x1: PAD, x2: W - PAD, y1: yBot + 14, y2: yBot + 14
+    }));
+    [lo, 0, hi].forEach(function (v) {
+      if (v < lo || v > hi) return;
+      const t = NN.svg("text", { x: X(v), y: yBot + 27, "text-anchor": "middle" });
+      t.textContent = fmt(v, 3);
+      root.appendChild(t);
+    });
+
+    const lbl1 = NN.svg("text", { x: PAD, y: 14 });
+    lbl1.textContent = o.topLabel || "real values";
+    root.appendChild(lbl1);
+
+    const groups = [], resids = [];
+    o.values.forEach(function (v, i) {
+      const d = o.deq[i];
+      const r = NN.svg("line", {
+        class: "resid", x1: X(v), x2: X(d), y1: yBot - 4, y2: yBot - 4
+      });
+      root.appendChild(r);
+      resids.push(r);
+      const g = NN.svg("g", { class: "dotg" });
+      g.setAttribute("transform", "translate(" + X(v) + "," + yTop + ")");
+      const c = NN.svg("circle", {
+        cx: 0, cy: 0, r: 4, fill: o.color || "var(--weight)",
+        stroke: "var(--surface-1)", "stroke-width": 1.5
+      });
+      const ttl = NN.svg("title");
+      ttl.textContent = "w = " + v + "  →  code " + o.q[i] + "  →  " + d;
+      g.appendChild(c); g.appendChild(ttl);
+      root.appendChild(g);
+      groups.push({ g: g, x0: X(v), x1: X(d) });
+    });
+
+    root.setStage = function (s) {
+      root.classList.toggle("show-grid", s >= 1);
+      root.classList.toggle("show-err", s >= 3);
+      groups.forEach(function (o2) {
+        o2.g.setAttribute("transform", s >= 2
+          ? "translate(" + o2.x1 + "," + yBot + ")"
+          : "translate(" + o2.x0 + "," + yTop + ")");
+      });
+    };
+    root.setStage(0);
+    return root;
+  }
+
+  function buildGrid() {
+    const host = NN.$("#gridBody");
+    const RM = QU.real_matrix;
+    let bits = 4;
+
+    host.appendChild(el("p", {}, [
+      "Below is ", el("code", {}, RM.name.split(" ")[0]),
+      " — a real weight matrix from the two-layer transformer of Part II, " +
+      RM.shape[0] + " rows by " + RM.shape[1] + " output channels. " +
+      "Quantising it means picking a step size and rounding every value onto " +
+      "the nearest multiple of it. Two numbers per grid describe the whole thing:"
+    ]));
+
+    host.appendChild(NN.formula({
+      rule: "q = clamp(round(x / scale) + zero_point, q<sub>min</sub>, q<sub>max</sub>)",
+      sub: "and back again: x&#770; = (q &minus; zero_point) &middot; scale",
+      cls: "weight"
+    }));
+    host.appendChild(el("p", { class: "small muted" },
+      QU.definitions.symmetric + " — weights are almost always quantised this way, " +
+      "because a zero-point of zero drops an entire term out of the matmul."));
+
+    const bitsVal = el("b", {}, "");
+    const bitsSeg = seg(RM.bits_options.map(function (b) {
+      return { value: b, label: "INT" + b };
+    }), bits, function (v) { bits = v; render(); });
+
+    const stageLabels = [
+      "the real values, in fp32",
+      "the grid: every value the integer codes can represent",
+      "snap — round to the nearest level",
+      "the residual: what quantisation threw away"
+    ];
+
+    const ctl = el("div", { class: "ctlbar" }, [
+      field("bit width", bitsVal, bitsSeg)
+    ]);
+    host.appendChild(ctl);
+
+    const ladderHost = el("div", {});
+    const stepHost = el("div", {});
+    const statHost = el("div", {});
+    const gridsHost = el("div", { style: { marginTop: "14px" } });
+    host.appendChild(el("div", { class: "grid12" }, [
+      el("div", {}, [ladderHost, stepHost]),
+      el("div", { class: "panel" }, [el("h4", {}, "the grid, numerically"), statHost])
+    ]));
+    host.appendChild(gridsHost);
+
+    let stage = 0;
+    const stepper = new NN.Stepper({
+      mount: stepHost, count: stageLabels.length, labels: stageLabels,
+      autoplayMs: 1500,
+      onStep: function (i) { stage = i; if (ladderHost.firstChild) ladderHost.firstChild.setStage(i); }
+    });
+
+    function render() {
+      const pb = RM.per_bits[String(bits)].per_tensor;
+      const vals = [].concat.apply([], RM.values);
+      const deq = [].concat.apply([], pb.deq);
+      const q = [].concat.apply([], pb.q);
+      const levels = levelsOf(pb.scales[0], pb.zero_points[0], pb.qmin, pb.qmax);
+      const span = RM.absmax * 1.12;
+
+      bitsVal.textContent = bits + " bits · " + NN.count(Math.pow(2, bits)) + " levels";
+
+      ladderHost.innerHTML = "";
+      const L = ladder({
+        values: vals, deq: deq, q: q, levels: levels,
+        xmin: -span, xmax: span, color: "var(--weight)",
+        topLabel: RM.shape[0] + "×" + RM.shape[1] + " weights, fp32"
+      });
+      ladderHost.appendChild(L);
+      L.setStage(stage);
+
+      statHost.innerHTML = "";
+      statHost.appendChild(kv([
+        ["integer range", pb.qmin + " … " + pb.qmax],
+        ["max |w|", fmt(RM.absmax, 4), "weight"],
+        ["scale = max|w| / q_max", sci(pb.scales[0], 4), "weight"],
+        ["zero point", String(pb.zero_points[0])],
+        ["codes actually used", pb.distinct_codes[0] + " of " + Math.pow(2, bits)],
+        ["max |error|", sci(pb.err.max_abs, 3)],
+        ["RMSE", sci(pb.err.rmse, 3)],
+        ["relative RMSE", pct(pb.err.rel_rmse)],
+        ["SQNR", db(pb.err.sqnr_db)]
+      ]));
+
+      gridsHost.innerHTML = "";
+      gridsHost.appendChild(NN.legend(["weight"]));
+      const orig = NN.tensor({
+        name: "W", shape: RM.shape, values: RM.values, cls: "weight",
+        digits: 4, note: "fp32, as trained"
+      });
+      const codes = NN.tensor({
+        name: "q", shape: RM.shape, values: pb.q, cls: "weight",
+        digits: 0, signed: true, note: "INT" + bits + " codes"
+      });
+      const back = NN.tensor({
+        name: "ŵ = (q − zp)·scale", shape: RM.shape, values: pb.deq, cls: "weight",
+        digits: 4, note: "what the kernel actually multiplies by"
+      });
+      gridsHost.appendChild(el("div", { class: "scrollx" },
+        el("div", {}, [orig, codes, back])));
+      gridsHost.appendChild(el("p", { class: "small muted", style: { marginTop: "8px" } },
+        "The middle grid is what is stored in HBM. The right-hand grid never exists " +
+        "in memory — it is reconstructed on the fly from the codes and the scale, " +
+        "which is the whole point: you pay " + bits + " bits per weight and get " +
+        "something " + pct(pb.err.rel_rmse) + " away from what you trained."));
+    }
+
+    render();
+
+    host.appendChild(NN.callout("why", "WHY THE STEP SIZE IS SET BY THE LARGEST VALUE",
+      "A symmetric grid has to reach <code>max|w|</code>, and it has only " +
+      "<code>q_max</code> steps to get there. So one enormous weight stretches the " +
+      "spacing for every other weight in the group. That single sentence is the " +
+      "seed of everything below: per-channel scales, group-wise scales, and " +
+      "SmoothQuant are all ways of making sure the value that sets your step size " +
+      "is not shared with values that did not deserve it."));
+  }
+
+  /* =====================================================================
+     2 · PER-TENSOR vs PER-CHANNEL
+     ===================================================================== */
+  function buildChannel() {
+    const host = NN.$("#chanBody");
+    const OM = QU.outlier_matrix;
+    const C = OM.contrast_int8;
+    let bits = 8, chan = 0;
+
+    host.appendChild(el("p", {}, [
+      "Now a wider matrix: ", el("b", {}, OM.shape[0] + " × " + OM.shape[1]),
+      ", every value a real weight taken in order from the trace, with one " +
+      "difference — output channel ",
+      el("b", { class: "v-weight" }, String(OM.outlier_channel)),
+      " has been scaled up by ", el("b", {}, fmt(OM.outlier_factor, 0) + "×"),
+      ". That is a construction, standing in for a real and well-documented " +
+      "property of trained transformers. Watch what one shared scale does to " +
+      "the other seven channels."
+    ]));
+
+    const bitsVal = el("b", {}, "");
+    const chanVal = el("b", {}, "");
+    const bitsSeg = seg(OM.bits_options.map(function (b) {
+      return { value: b, label: "INT" + b };
+    }), bits, function (v) { bits = v; render(); });
+    const chanSeg = seg(OM.values[0].map(function (_, j) {
+      return { value: j, label: "ch " + j + (j === OM.outlier_channel ? " ▲" : "") };
+    }), chan, function (v) { chan = v; render(); });
+
+    host.appendChild(el("div", { class: "ctlbar" }, [
+      field("bit width", bitsVal, bitsSeg),
+      field("channel on the ladder", chanVal, chanSeg)
+    ]));
+
+    const verdict = el("div", { class: "verdict" });
+    host.appendChild(verdict);
+
+    const ladders = el("div", { class: "grid2b" });
+    host.appendChild(ladders);
+
+    const barsHost = el("div", { style: { marginTop: "18px" } });
+    host.appendChild(barsHost);
+
+    const chartHost = el("div", { style: { marginTop: "14px" } });
+    host.appendChild(chartHost);
+
+    function ladderPanel(title, res, ci, lo, hiV, note) {
+      const nr = OM.values.length;
+      const vals = [], deq = [], q = [];
+      for (let i = 0; i < nr; i++) {
+        vals.push(OM.values[i][ci]);
+        deq.push(res.deq[i][ci]);
+        q.push(res.q[i][ci]);
+      }
+      const sc = res.mode === "tensor" ? res.scales[0] : res.scales[ci];
+      const zp = res.mode === "tensor" ? res.zero_points[0] : res.zero_points[ci];
+      const levels = levelsOf(sc, zp, res.qmin, res.qmax);
+      const inWin = levels.filter(function (v) { return v >= lo && v <= hiV; }).length;
+      const L = ladder({
+        values: vals, deq: deq, q: q, levels: levels,
+        xmin: lo, xmax: hiV, color: "var(--weight)",
+        topLabel: "channel " + ci + ", " + nr + " weights"
+      });
+      L.setStage(3);
+      return el("div", { class: "panel" }, [
+        el("h4", {}, title),
+        L,
+        kv([
+          ["scale", sci(sc, 4), "weight"],
+          ["levels inside this channel's range", String(inWin)],
+          ["codes this channel reaches", String(res.channels[ci].code_span) + " of " +
+            Math.pow(2, bits)],
+          ["relative RMSE, this channel", pct(res.channels[ci].err.rel_rmse)]
+        ]),
+        el("p", { class: "small muted", style: { margin: "8px 0 0" } }, note)
+      ]);
+    }
+
+    function render() {
+      const pb = OM.per_bits[String(bits)];
+      const pt = pb.per_tensor, pc = pb.per_channel;
+      bitsVal.textContent = "INT" + bits;
+      chanVal.textContent = "channel " + chan +
+        (chan === OM.outlier_channel ? " — the loud one" : "");
+
+      const ratio = pt.channels[chan].err.rel_rmse / pc.channels[chan].err.rel_rmse;
+      verdict.className = "verdict " + (ratio > 3 ? "bad" : "ok");
+      verdict.innerHTML = "";
+      verdict.appendChild(el("div", { class: "big" },
+        fmt(ratio, ratio > 10 ? 0 : 1) + "×"));
+      verdict.appendChild(el("div", { class: "det" },
+        "more relative error on channel " + chan + " at INT" + bits +
+        " when one scale is shared across the tensor (" +
+        pct(pt.channels[chan].err.rel_rmse) + ") than when each channel gets " +
+        "its own (" + pct(pc.channels[chan].err.rel_rmse) + ")"));
+
+      let lo = 0;
+      for (let i = 0; i < OM.values.length; i++) {
+        lo = Math.max(lo, Math.abs(OM.values[i][chan]));
+      }
+      lo *= 1.15;
+
+      ladders.innerHTML = "";
+      ladders.appendChild(ladderPanel("per-tensor — one scale for all " +
+        (OM.shape[0] * OM.shape[1]) + " weights", pt, chan, -lo, lo,
+        "The scale is set by the loudest value anywhere in the tensor, so inside " +
+        "this channel's own range there are barely any levels to land on."));
+      ladders.appendChild(ladderPanel("per-channel — one scale per output column",
+        pc, chan, -lo, lo,
+        "The scale is set by this channel's own maximum, so the full integer " +
+        "range is spent on the values that are actually here."));
+
+      barsHost.innerHTML = "";
+      barsHost.appendChild(el("h3", {}, "Every channel, both ways"));
+      const grid = el("div", { class: "chanbars" });
+      grid.appendChild(el("div", { class: "hd" }, "channel"));
+      grid.appendChild(el("div", { class: "hd" }, "codes reached — per-tensor"));
+      grid.appendChild(el("div", { class: "hd" }, "codes reached — per-channel"));
+      const maxCodes = Math.pow(2, bits);
+      pt.channels.forEach(function (c, j) {
+        const loud = j === OM.outlier_channel;
+        grid.appendChild(el("div", {},
+          "ch " + j + (loud ? " ▲" : "")));
+        [[c.code_span, "var(--accent)"],
+         [pc.channels[j].code_span, "var(--weight)"]].forEach(function (p) {
+          grid.appendChild(el("div", { class: "cbar" }, [
+            el("i", { style: { width: (p[0] / maxCodes * 100) + "%", background: p[1] } }),
+            el("b", {}, String(p[0]))
+          ]));
+        });
+      });
+      barsHost.appendChild(grid);
+      barsHost.appendChild(el("p", { class: "small muted", style: { marginTop: "9px" } },
+        "▲ marks the loud channel. Under a shared scale it is the only channel " +
+        "using the integer range it was given; every other channel is confined to " +
+        "a sliver of it, and the information that lived in the low bits is gone."));
+
+      chartHost.innerHTML = "";
+      chartHost.appendChild(el("h3", {}, "Relative error, channel by channel"));
+      chartHost.appendChild(NN.chart.line({
+        series: [
+          { name: "per-tensor", color: "var(--accent)",
+            points: pt.channels.map(function (c) { return [c.channel, c.err.rel_rmse]; }) },
+          { name: "per-channel", color: "var(--weight)",
+            points: pc.channels.map(function (c) { return [c.channel, c.err.rel_rmse]; }) }
+        ],
+        width: 900, height: 240, xlabel: "output channel",
+        ylabel: "relative RMSE", logY: true
+      }));
+      chartHost.appendChild(NN.legend(["weight"]));
+      chartHost.appendChild(el("p", { class: "small muted" },
+        "Grey is per-tensor, blue is per-channel; the axis is logarithmic. The " +
+        "loud channel (" + OM.outlier_channel + ") is the one place the two curves " +
+        "meet — it set the shared scale, so it was never the one being damaged."));
+    }
+
+    render();
+
+    host.appendChild(NN.callout("key", "THE AGGREGATE NUMBER LIES",
+      "Across the whole tensor the relative RMSE moves only from <b>" +
+      pct(C.per_tensor_rel_rmse) + "</b> to <b>" + pct(C.per_channel_rel_rmse) +
+      "</b>. That looks like per-channel scaling barely matters. It does not: the " +
+      "loud channel carries nearly all of the signal energy and is quantised fine " +
+      "either way, so it drowns the average. Restricted to the quiet channels the " +
+      "error goes from <b>" + pct(C.quiet_rel_rmse_per_tensor) + "</b> to <b>" +
+      pct(C.quiet_rel_rmse_per_channel) + "</b> — <b>" + fmt(C.ratio, 0) +
+      "×</b> — and those are the channels doing the rest of the model's work. " +
+      "Whenever a quantisation result is quoted as a single tensor-wide number, " +
+      "this is the question to ask of it."));
+
+    host.appendChild(NN.callout("mem", "AND IT IS FREE",
+      "A per-channel scale is one fp16 number per output column. On a real " +
+      "weight matrix with " + NN.count(QU.selector_scale_rows) + " rows that is " +
+      sci(16 / QU.selector_scale_rows, 1) + " extra bits per weight. Better still, " +
+      "the dequantisation multiply for column <i>j</i> can be folded into that " +
+      "column's accumulator <i>after</i> the integer matmul, so it costs one " +
+      "multiply per output element rather than one per weight. Per-channel " +
+      "scaling for weights is not a tradeoff; it is the default for a reason."));
+  }
+
+  /* =====================================================================
+     3 · INT4 AND GROUP SIZE
+     ===================================================================== */
+  function buildGroups() {
+    const host = NN.$("#groupBody");
+    const rows = QU.int4_groups;
+    const labels = [];
+    rows.forEach(function (r) { if (labels.indexOf(r.label) < 0) labels.push(r.label); });
+    let lab = labels[labels.length - 1], bits = 4;
+
+    host.appendChild(el("p", {}, [
+      "Per-channel scaling puts one scale on a whole column. At four bits — ",
+      el("b", {}, "16 levels"),
+      " for the entire column — that is not enough. Group-wise quantisation cuts " +
+      "the column into contiguous runs and gives each run its own scale. Smaller " +
+      "groups track the local magnitude better; they also cost more, because every " +
+      "group carries an fp16 scale of its own. The trade is arithmetic:"
+    ]));
+
+    host.appendChild(NN.formula({
+      rule: "effective bits per weight = n + 16 / group_size",
+      sub: "INT4 at group 128 is not 4 bits per weight, it is 4.125",
+      cls: "weight"
+    }));
+
+    const labVal = el("b", {}, "");
+    const bitsVal = el("b", {}, "");
+    host.appendChild(el("div", { class: "ctlbar" }, [
+      field("weight vector", labVal, seg(labels.map(function (l) {
+        return { value: l, label: l.split(" ")[0] + " " + (l.match(/\((\d+)/) || ["", "?"])[1] };
+      }), lab, function (v) { lab = v; render(); })),
+      field("bit width", bitsVal, seg([{ value: 4, label: "INT4" }, { value: 8, label: "INT8" }],
+        bits, function (v) { bits = v; render(); }))
+    ]));
+
+    const tblHost = el("div", {});
+    const chartHost = el("div", { style: { marginTop: "16px" } });
+    host.appendChild(tblHost);
+    host.appendChild(chartHost);
+
+    function render() {
+      const rs = rows.filter(function (r) { return r.label === lab && r.bits === bits; })
+        .sort(function (a, b) { return b.group - a.group; });
+      labVal.textContent = lab;
+      bitsVal.textContent = "INT" + bits;
+
+      tblHost.innerHTML = "";
+      tblHost.appendChild(table(
+        ["group size", "groups", "eff. bits/weight", "vs bf16", "RMSE", "rel. RMSE", "SQNR"],
+        rs.map(function (r) {
+          return [
+            r.group === rs[0].group ? r.group + "  (per-tensor)" : String(r.group),
+            String(r.n_groups),
+            fmt(r.effective_bits, 3),
+            fmt(r.compression_vs_bf16, 2) + "×",
+            sci(r.err.rmse, 3),
+            pct(r.err.rel_rmse),
+            db(r.err.sqnr_db)
+          ];
+        }),
+        rs.length - 1));
+
+      chartHost.innerHTML = "";
+      chartHost.appendChild(NN.chart.line({
+        series: [{
+          name: "SQNR", color: "var(--weight)",
+          points: rs.map(function (r) { return [r.effective_bits, r.err.sqnr_db]; })
+        }],
+        width: 900, height: 250,
+        xlabel: "effective bits per weight (including the scales)",
+        ylabel: "SQNR (dB)"
+      }));
+      const best = rs[rs.length - 1], worst = rs[0];
+      chartHost.appendChild(el("p", { class: "small muted" },
+        "Going from one scale for all " + (worst.group) + " weights to one per " +
+        best.group + " buys " + fmt(best.err.sqnr_db - worst.err.sqnr_db, 1) +
+        " dB and costs " + fmt(best.effective_bits - worst.effective_bits, 3) +
+        " bits per weight. The curve flattens: the gain from halving the group " +
+        "shrinks while the cost of halving it doubles, and that is what fixes " +
+        "the group sizes people actually ship at 64 and 128."));
+    }
+    render();
+
+    host.appendChild(NN.callout("why", "WHY GROUPING HELPS AT ALL",
+      "It helps exactly to the extent that the local magnitude of a weight " +
+      "vector drifts. If every weight were drawn from the same distribution, one " +
+      "scale would be as good as many and grouping would buy nothing but overhead. " +
+      "The second vector in the selector above is built with a deliberately " +
+      "drifting envelope, so the effect is large and visible; the first is a real " +
+      "run of trace weights, where it is real but smaller. Both are measured, " +
+      "and the difference between them is itself the lesson."));
+  }
+
+  /* =====================================================================
+     4 · FP8
+     ===================================================================== */
+  function buildFp8() {
+    const host = NN.$("#fp8Body");
+    const F = QU.fp8;
+    let exIdx = 4;
+
+    host.appendChild(el("p", {}, [
+      "An integer grid is uniform: every step is the same size. A float grid is " +
+      "not — it is uniform inside each binade and doubles at every exponent, " +
+      "which is why floats hold small and large numbers at the same ",
+      el("i", {}, "relative"),
+      " precision. Page 01 pulled fp32, bf16 and fp16 apart bit by bit. The two " +
+      "8-bit formats work the same way, with eight bits to divide between " +
+      "exponent and mantissa — and there is no good answer, which is why there " +
+      "are two of them."
+    ]));
+
+    /* --- the format table, fp32/bf16/fp16 from T, fp8 from QUANT --- */
+    const fmts = [
+      ["fp32", T.formats.fp32], ["bf16", T.formats.bf16], ["fp16", T.formats.fp16],
+      ["E4M3", F.formats.e4m3], ["E5M2", F.formats.e5m2]
+    ];
+    host.appendChild(table(
+      ["format", "bytes", "exp bits", "mantissa bits", "max finite", "min normal",
+       "min subnormal", "epsilon", "decimal digits"],
+      fmts.map(function (p) {
+        const f = p[1];
+        return [p[0], String(f.bytes), String(f.exponent_bits), String(f.mantissa_bits),
+          sci(f.max_finite, 3), sci(f.min_normal, 2), sci(f.min_subnormal, 2),
+          sci(f.epsilon, 3), fmt(f.decimal_digits, 2)];
+      }), 3));
+    host.appendChild(el("p", { class: "small muted" },
+      "Every row is derived from the field widths, not quoted. Note E4M3's maximum: " +
+      "it is " + fmt(F.formats.e4m3.max_finite, 0) + ", not " +
+      fmt((2 - Math.pow(2, -F.formats.e4m3.mantissa_bits)) *
+          Math.pow(2, F.formats.e4m3.bias), 0) +
+      ". " + F.formats.e4m3.encoding + ", so it has " +
+      F.formats.e4m3.n_finite_codes + " finite codes against E5M2's " +
+      F.formats.e5m2.n_finite_codes + "."));
+
+    /* --- bit ribbons --- */
+    host.appendChild(el("h3", {}, "The same value, in both formats"));
+    const exSeg = seg(F.examples.map(function (e, i) {
+      return { value: i, label: e.label };
+    }), exIdx, function (v) { exIdx = v; renderEx(); });
+    host.appendChild(el("div", { class: "ctlbar" }, [field("value", null, exSeg)]));
+    const exHost = el("div", {});
+    host.appendChild(exHost);
+
+    function statusTag(s) {
+      const map = {
+        ok: ["ok", "exact-ish"], subnormal: ["warnt", "subnormal"],
+        underflow: ["bad", "flushed to zero"],
+        overflow_inf: ["bad", "overflow → ∞"],
+        overflow_saturated: ["bad", "saturated"], nan: ["bad", "NaN"]
+      };
+      const m = map[s] || ["", s];
+      return el("span", { class: "tag " + m[0] }, m[1]);
+    }
+
+    function renderEx() {
+      const e = F.examples[exIdx];
+      exHost.innerHTML = "";
+      exHost.appendChild(kv([["value being encoded", sci(e.value, 6)]]));
+      [["E4M3", e.e4m3, e.rel_err_e4m3], ["E5M2", e.e5m2, e.rel_err_e5m2]].forEach(function (p) {
+        const d = p[1];
+        const row = el("div", { class: "bitrow" }, [
+          el("span", { class: "nm" }, p[0]),
+          d.sign !== null && d.sign !== undefined
+            ? NN.bitribbon({ sign: d.sign, exponent: d.exponent, mantissa: d.mantissa })
+            : el("span", { class: "val" }, "—"),
+          el("span", { class: "val" }, "= " + (d.exact === null || d.exact === undefined
+            ? (d.kind === "inf" ? "±∞" : "—") : sci(d.exact, 6))),
+          statusTag(d.status),
+          p[2] === null || p[2] === undefined ? null
+            : el("span", { class: "val muted" }, "rel. err " + pct(p[2], 2))
+        ]);
+        exHost.appendChild(row);
+      });
+      exHost.appendChild(el("p", { class: "small muted", style: { marginTop: "6px" } }, e.why));
+      exHost.appendChild(el("p", { class: "small muted" },
+        "Red is the sign bit, blue the exponent, green the mantissa — the same " +
+        "grammar as page 01. E4M3 spends four bits on exponent and three on " +
+        "mantissa; E5M2 moves one bit the other way, which halves the precision " +
+        "and squares the reach."));
+    }
+    renderEx();
+
+    /* --- range sweep --- */
+    host.appendChild(el("h3", {}, "Relative error across " +
+      (F.range_sweep[F.range_sweep.length - 1].log10x - F.range_sweep[0].log10x).toFixed(0) +
+      " decades"));
+    const sw = F.range_sweep;
+    host.appendChild(NN.chart.line({
+      series: [
+        { name: "E4M3", color: "var(--activation)", dots: false,
+          points: sw.filter(function (r) { return r.rel_e4m3 !== null && r.rel_e4m3 > 0; })
+            .map(function (r) { return [r.log10x, r.rel_e4m3]; }) },
+        { name: "E5M2", color: "var(--gradient)", dots: false,
+          points: sw.filter(function (r) { return r.rel_e5m2 !== null && r.rel_e5m2 > 0; })
+            .map(function (r) { return [r.log10x, r.rel_e5m2]; }) }
+      ],
+      width: 900, height: 260, xlabel: "log₁₀(value)",
+      ylabel: "relative error", logY: true
+    }));
+    host.appendChild(el("p", { class: "small muted" },
+      "Inside its range each format holds a flat relative error — that is what " +
+      "floating point buys you. E4M3 (green) sits a factor of two lower, because " +
+      "of its extra mantissa bit. The curves stop where the format does: E4M3 " +
+      "runs out at " + fmt(F.formats.e4m3.max_finite, 0) + " above and " +
+      sci(F.formats.e4m3.min_subnormal, 2) + " below; E5M2 keeps going to " +
+      fmt(F.formats.e5m2.max_finite, 0) + " and " +
+      sci(F.formats.e5m2.min_subnormal, 2) + ". Points that overflowed or flushed " +
+      "to zero are not plotted, because their relative error is not a small number."));
+
+    /* --- real tensors --- */
+    host.appendChild(el("h3", {}, "Both formats on real tensors from the trace"));
+    host.appendChild(table(
+      ["tensor", "n", "|max|", "|min| nonzero", "dynamic range",
+       "E4M3 rel. RMSE (scaled)", "E5M2 rel. RMSE (scaled)",
+       "E4M3 flushed to 0", "E5M2 flushed to 0"],
+      F.tensors.map(function (r) {
+        return [r.tensor, String(r.n), sci(r.absmax, 2), sci(r.absmin, 2),
+          fmt(r.dynamic_range, 1) + "×",
+          pct(r.e4m3.scaled.rel_rmse), pct(r.e5m2.scaled.rel_rmse),
+          r.e4m3.unscaled_flushed_to_zero + " / " + r.n,
+          r.e5m2.unscaled_flushed_to_zero + " / " + r.n];
+      })));
+    host.appendChild(el("p", { class: "small muted" },
+      "The first two rows are the real weights and real gradients of layer 0. " +
+      "With a per-tensor scale applied first, E4M3 wins on both — precision is " +
+      "the binding constraint once everything has been brought near unity. The " +
+      "third row is a constructed stand-in for gradients before loss scaling, " +
+      "pushed down several orders of magnitude: the 'flushed to zero' columns " +
+      "are what happens with no scaling at all, and they are the entire argument " +
+      "for E5M2."));
+
+    host.appendChild(NN.callout("key", "E4M3 FOR WEIGHTS AND ACTIVATIONS, E5M2 FOR GRADIENTS " +
+      "— LITERATURE",
+      "<span class='tag'>literature</span> The convention itself comes from the FP8 " +
+      "training papers and the OCP FP8 specification. This page does not " +
+      "demonstrate that it produces good models. What it does show is the " +
+      "mechanism behind it, measured: E4M3 has half the relative error but a " +
+      "range of only " + fmt(F.formats.e4m3.decades_of_range, 1) + " decades " +
+      "above its smallest normal, while E5M2 has " +
+      fmt(F.formats.e5m2.decades_of_range, 1) + ". Weights and activations sit " +
+      "near unity after normalisation, so precision binds. Gradients span orders " +
+      "of magnitude and their scale is not known in advance, so range binds. " +
+      "Loss scaling exists precisely because fp16 got this trade wrong in the " +
+      "other direction — see the underflow row on page 01."));
+  }
+
+  /* =====================================================================
+     5 · SMOOTHQUANT
+     ===================================================================== */
+  function buildSmooth() {
+    const host = NN.$("#smoothBody");
+    const S = QU.smoothquant;
+    let ai = 0;
+    for (let i = 0; i < S.alpha_sweep.length; i++) {
+      if (S.alpha_sweep[i].alpha === S.best.alpha) ai = i;
+    }
+
+    host.appendChild(el("p", {}, [
+      "Weights are the easy operand. They are static, narrow, and you can spend " +
+      "as long as you like choosing their scales. ",
+      el("b", { class: "v-activation" }, "Activations"),
+      " are the hard one: they change every token, they have to be quantised " +
+      "online, and a handful of their channels carry one to two orders of " +
+      "magnitude more than the rest — the same channels, every time. Here that " +
+      "is built in deliberately: channel ",
+      el("b", {}, String(S.outlier_channels.join(", "))),
+      " of the activation matrix is ", el("b", {}, fmt(S.outlier_gain, 0) + "×"),
+      " the others."
+    ]));
+
+    host.appendChild(NN.legend(["activation", "weight"]));
+
+    host.appendChild(NN.formula({
+      rule: "X · W  =  (X · diag(s)<sup>−1</sup>) · (diag(s) · W)",
+      sub: S.migration_rule,
+      result: "exact for any positive s",
+      cls: "activation"
+    }));
+    host.appendChild(el("p", {}, [
+      "That identity is the whole idea. A diagonal rescale applied to the " +
+      "activation columns and undone on the weight rows leaves the product " +
+      "untouched — so you can divide the loud activation channels down and " +
+      "multiply the corresponding weight rows up, moving quantisation difficulty " +
+      "from the operand that cannot take it to the operand that can. ",
+      el("b", {}, "α"), " controls how much you move: 0 flattens the weights " +
+      "completely, 1 flattens the activations completely."
+    ]));
+
+    const aVal = el("b", {}, "");
+    const slider = el("input", {
+      type: "range", min: 0, max: S.alpha_sweep.length - 1, step: 1, value: ai
+    });
+    slider.addEventListener("input", function () { ai = +slider.value; render(); });
+    host.appendChild(el("div", { class: "ctlbar" }, [
+      field("migration strength α", aVal, slider)
+    ]));
+
+    const verdict = el("div", { class: "verdict" });
+    host.appendChild(verdict);
+
+    const panels = el("div", { class: "grid2b" });
+    host.appendChild(panels);
+
+    const chartHost = el("div", { style: { marginTop: "16px" } });
+    host.appendChild(chartHost);
+
+    const maxActBase = Math.max.apply(null, S.act_absmax);
+    const maxWBase = Math.max.apply(null, S.w_absmax);
+
+    function chanPanel(title, before, after, maxBefore, maxAfter, color, cls) {
+      const scaleMax = Math.max(maxBefore, maxAfter);
+      const g = el("div", { class: "chanbars" });
+      g.appendChild(el("div", { class: "hd" }, "channel"));
+      g.appendChild(el("div", { class: "hd" }, "before"));
+      g.appendChild(el("div", { class: "hd" }, "after"));
+      before.forEach(function (v, i) {
+        g.appendChild(el("div", {}, "c" + i));
+        [[v, "var(--accent)"], [after[i], color]].forEach(function (p) {
+          g.appendChild(el("div", { class: "cbar" }, [
+            el("i", { style: { width: (p[0] / scaleMax * 100) + "%", background: p[1] } }),
+            el("b", {}, fmt(p[0], 2))
+          ]));
+        });
+      });
+      return el("div", { class: "panel" }, [
+        el("h4", {}, title), NN.chip(cls), g
+      ]);
+    }
+
+    function render() {
+      const r = S.alpha_sweep[ai];
+      aVal.textContent = "α = " + fmt(r.alpha, 2) +
+        (r.alpha === S.best.alpha ? "  (best measured)" : "");
+
+      const improve = S.baseline.act_per_tensor / r.rel_err_act_per_tensor;
+      verdict.className = "verdict " + (improve >= 1 ? "ok" : "bad");
+      verdict.innerHTML = "";
+      verdict.appendChild(el("div", { class: "big" }, fmt(improve, 2) + "×"));
+      verdict.appendChild(el("div", { class: "det" },
+        "relative error in X·W with INT8 per-tensor activations: " +
+        sci(S.baseline.act_per_tensor, 3) + " → " + sci(r.rel_err_act_per_tensor, 3)));
+      verdict.appendChild(el("div", { class: "det" },
+        "migration exactness in fp64: " + sci(r.exactness, 2) + " relative Frobenius"));
+
+      panels.innerHTML = "";
+      panels.appendChild(chanPanel("activation channel maxima",
+        S.act_absmax, r.act_absmax_after, maxActBase,
+        Math.max.apply(null, r.act_absmax_after),
+        "var(--activation)", "activation"));
+      panels.appendChild(chanPanel("weight row maxima",
+        S.w_absmax, r.w_absmax_after, maxWBase,
+        Math.max.apply(null, r.w_absmax_after),
+        "var(--weight)", "weight"));
+
+      chartHost.innerHTML = "";
+      chartHost.appendChild(NN.chart.line({
+        series: [
+          { name: "per-tensor activations", color: "var(--activation)",
+            points: S.alpha_sweep.map(function (x) {
+              return [x.alpha, x.rel_err_act_per_tensor]; }) },
+          { name: "per-token activations", color: "var(--accent)",
+            points: S.alpha_sweep.map(function (x) {
+              return [x.alpha, x.rel_err_act_per_token]; }) }
+        ],
+        width: 900, height: 250, xlabel: "α", ylabel: "relative error in X·W",
+        logY: true
+      }));
+      chartHost.appendChild(el("p", { class: "small muted" },
+        "The curve has an interior minimum, at α = " + fmt(S.best.alpha, 2) +
+        " here, because both extremes are bad: α = 0 leaves the activations as " +
+        "loud as they were, α = 1 flattens them by wrecking the weights instead. " +
+        "The grey series is per-token activation quantisation — one scale per row " +
+        "rather than one for the tensor, which is what a real kernel can do " +
+        "online. It starts better and is helped by migration too, because the " +
+        "outlier is a channel and a per-row scale cannot see channels."));
+    }
+    render();
+
+    host.appendChild(NN.callout("warn", "WHAT IS CONSTRUCTED HERE, AND WHAT IS NOT",
+      "<span class='tag'>constructed</span> The activation matrix on this page is " +
+      "synthetic, with one channel amplified on purpose. That trained " +
+      "transformers actually behave this way — a small, fixed set of activation " +
+      "channels with far larger magnitude than the rest — is a " +
+      "<span class='tag'>literature</span> result, measured by others, not " +
+      "something demonstrated here. Everything downstream of that premise is " +
+      "computed: the identity is verified exact to " +
+      sci(S.exactness_max_rel_err, 2) + " relative Frobenius error across all " +
+      S.alpha_sweep.length + " values of α, and the error improvement is " +
+      "measured on the actual quantised product."));
+  }
+
+  /* =====================================================================
+     6 · DECODE vs PREFILL
+     ===================================================================== */
+  function buildAsym() {
+    const host = NN.$("#asymBody");
+    const WO = Q.weight_only;
+    const base = WO.rows[0];
+    const i4 = WO.rows[WO.rows.length - 1];
+
+    host.appendChild(el("p", {}, [
+      "Everything above was about accuracy. This is the part that says why " +
+      "anyone bothers. On ", el("b", {}, WO.model.name), " at ",
+      el("b", {}, NN.count(WO.seq) + " tokens of context"), ", batch ",
+      el("b", {}, String(WO.batch)), ", on an ", el("b", {}, WO.gpu.name),
+      " — the same cost model as pages 24–27, imported rather than rebuilt."
+    ]));
+
+    host.appendChild(NN.tiles([
+      { k: "ridge point", v: fmt(WO.ridge_flops_per_byte, 0),
+        s: "FLOP/byte — below this you are bandwidth-bound" },
+      { k: "prefill intensity", v: NN.count(Math.round(base.prefill.intensity)),
+        s: "FLOP/byte · " + base.prefill.bound + "-bound", cls: "activation" },
+      { k: "decode intensity", v: fmt(base.decode.intensity, 2),
+        s: "FLOP/byte · " + base.decode.bound + "-bound", cls: "gradient" },
+      { k: "the gap", v: fmt(base.prefill.intensity / base.decode.intensity, 0) + "×",
+        s: "two regimes, one model" }
+    ]));
+
+    host.appendChild(el("p", {}, [
+      "A decode step reads every weight in the model to produce one token. " +
+      "Quarter the bytes of those weights and you quarter the time, near enough. " +
+      "A prefill step reads the same weights once and then does " +
+      NN.count(WO.seq) + " tokens' worth of arithmetic with them, so the read " +
+      "was never the cost — and dequantising back into the compute dtype " +
+      "adds work it did not have before. Same change, opposite sign."
+    ]));
+
+    const dec = el("div", {});
+    const pre = el("div", {});
+    host.appendChild(el("div", { class: "grid2b" }, [
+      el("div", { class: "panel" }, [el("h4", {}, "decode — time per token"), dec]),
+      el("div", { class: "panel" }, [el("h4", {}, "prefill — time for the whole prompt"), pre])
+    ]));
+
+    dec.appendChild(NN.chart.bars({
+      items: WO.rows.map(function (r) {
+        return { label: r.label, value: r.decode.time_s * 1e3,
+                 color: r.w_bytes === 2 ? "var(--accent)" : "var(--weight)",
+                 sub: "· " + fmt(r.decode_speedup, 2) + "× · " + r.decode.bound + "-bound" };
+      }), unit: "ms"
+    }));
+    pre.appendChild(NN.chart.bars({
+      items: WO.rows.map(function (r) {
+        return { label: r.label, value: r.prefill.time_s,
+                 color: r.w_bytes === 2 ? "var(--accent)" : "var(--weight)",
+                 sub: "· " + fmt(r.prefill_speedup, 2) + "× · " + r.prefill.bound + "-bound" };
+      }), unit: "s"
+    }));
+
+    host.appendChild(table(
+      ["weights", "bytes/weight", "weight bytes", "decode bytes", "decode ms",
+       "decode speedup", "prefill FLOPs", "prefill s", "prefill speedup"],
+      WO.rows.map(function (r) {
+        return [r.label, fmt(r.w_bytes, 2), NN.bytes(r.weight_bytes),
+          NN.bytes(r.decode.bytes), fmt(r.decode.time_s * 1e3, 2),
+          fmt(r.decode_speedup, 2) + "×", NN.count(r.prefill.flops),
+          fmt(r.prefill.time_s, 3), fmt(r.prefill_speedup, 2) + "×"];
+      }), WO.rows.length - 1));
+
+    host.appendChild(el("div", { class: "verdict ok" }, [
+      el("div", { class: "big" }, fmt(i4.decode_speedup, 2) + "× decode"),
+      el("div", { class: "big", style: { color: "var(--critical)" } },
+        fmt(i4.prefill_speedup, 2) + "× prefill"),
+      el("div", { class: "det" },
+        "INT4 weight-only. The weights are " + fmt(i4.weight_bytes_ratio, 0) +
+        "× smaller, decode gets " + fmt(i4.decode_speedup, 2) + "× — short of " +
+        fmt(i4.weight_bytes_ratio, 0) + "× because the KV cache is still bf16 and " +
+        "still has to be read. Prefill gets " +
+        fmt((1 / i4.prefill_speedup - 1) * 100, 0) + "% slower.")
+    ]));
+
+    host.appendChild(el("h3", {}, "And it erodes with batch size"));
+    host.appendChild(NN.chart.line({
+      series: [
+        { name: "decode speedup", color: "var(--weight)",
+          points: WO.by_batch.map(function (r) { return [r.batch, r.decode_speedup]; }) },
+        { name: "prefill speedup", color: "var(--accent)",
+          points: WO.by_batch.map(function (r) { return [r.batch, r.prefill_speedup]; }) }
+      ],
+      width: 900, height: 250, xlabel: "batch size",
+      ylabel: "INT4 speedup vs bf16", yMin: 0
+    }));
+    host.appendChild(el("p", { class: "small muted" },
+      "Weights are read once per step no matter how many sequences are in " +
+      "flight, but the KV cache is per-sequence. So as batch grows the weight " +
+      "term shrinks as a share of the bytes and the weight-only win shrinks with " +
+      "it: from " + fmt(WO.by_batch[0].decode_speedup, 2) + "× at batch " +
+      WO.by_batch[0].batch + " to " +
+      fmt(WO.by_batch[WO.by_batch.length - 1].decode_speedup, 2) + "× at batch " +
+      WO.by_batch[WO.by_batch.length - 1].batch + ", where the KV cache is " +
+      pct(WO.by_batch[WO.by_batch.length - 1].kv_share_bf16, 0) + " of the traffic. " +
+      "This is the same argument as page 26, arriving at the opposite conclusion " +
+      "about which optimisation to reach for."));
+
+    host.appendChild(NN.callout("mem", "WEIGHT-ONLY IS A LATENCY TECHNIQUE",
+      "Put the two facts together and the deployment rule falls out. Low batch, " +
+      "latency-sensitive, one user waiting: decode dominates, weight-only " +
+      "quantisation is close to a free " + fmt(i4.decode_speedup, 1) + "×. High " +
+      "batch, throughput-oriented, long prompts: prefill dominates, the weights " +
+      "are already amortised, and you are paying dequantisation for nothing. " +
+      "The technique did not change; the regime did."));
+  }
+
+  /* =====================================================================
+     7 · PROOF AND PROVENANCE
+     ===================================================================== */
+  function buildProof() {
+    const host = NN.$("#proofBody");
+
+    host.appendChild(el("h3", {}, "Error against storage, in one picture"));
+    const sel = QU.selector.slice().sort(function (a, b) {
+      return a.effective_bits - b.effective_bits;
+    });
+    host.appendChild(NN.chart.line({
+      series: [
+        { name: "per-tensor", color: "var(--accent)",
+          points: sel.filter(function (r) { return r.mode === "tensor" && r.kind === "int"; })
+            .map(function (r) { return [r.effective_bits, r.err.rel_rmse]; }) },
+        { name: "per-channel", color: "var(--weight)",
+          points: sel.filter(function (r) { return r.mode === "channel"; })
+            .map(function (r) { return [r.effective_bits, r.err.rel_rmse]; }) }
+      ],
+      width: 900, height: 260, xlabel: "effective bits per weight",
+      ylabel: "relative RMSE", logY: true
+    }));
+    host.appendChild(table(
+      ["scheme", "eff. bits/weight", "scale overhead", "max |error|", "rel. RMSE", "SQNR"],
+      sel.map(function (r) {
+        return [r.label, fmt(r.effective_bits, 4),
+          r.scale_bits_per_weight ? sci(r.scale_bits_per_weight, 1) + " bits" : "—",
+          sci(r.err.max_abs, 2), pct(r.err.rel_rmse), db(r.err.sqnr_db)];
+      })));
+    host.appendChild(el("p", { class: "small muted" }, QU.selector_note +
+      " Notice where the two FP8 formats land against INT8: on a tensor already " +
+      "scaled to fill the range, the uniform integer grid is competitive with " +
+      "the float one, because there is no wide dynamic range left for the " +
+      "exponent to exploit. FP8's advantage is in the tensors where there is."));
+
+    host.appendChild(el("h3", {}, "What the generator checked"));
+    host.appendChild(el("p", { class: "small muted" },
+      "Every claim on this page is a check in <code>code/quantisation.py</code>, " +
+      "which exits non-zero if any of them fails. Both this page and page 29 read " +
+      "the same emitted file."));
+    const ul = el("ul", { class: "chklist" });
+    Q.checks.forEach(function (c) {
+      ul.appendChild(el("li", {}, [
+        el("div", { class: "st " + (c.passed ? "p" : "f") }, c.passed ? "PASS" : "FAIL"),
+        el("div", {}, [
+          el("div", { class: "nm2" }, c.name),
+          el("div", { class: "dt" }, c.detail)
+        ])
+      ]));
+    });
+    host.appendChild(ul);
+
+    host.appendChild(el("h3", {}, "Assumptions"));
+    host.appendChild(el("p", { class: "small muted" },
+      "Numbers the generator chose rather than derived. They are inputs to the " +
+      "timing model above and the results move with them."));
+    const a = el("ul", { class: "notelist" });
+    Q.weight_only._assumptions.forEach(function (s) { a.appendChild(el("li", {}, s)); });
+    host.appendChild(a);
+
+    host.appendChild(el("h3", {}, "Literature"));
+    host.appendChild(el("p", { class: "small muted" },
+      "Claims from published work that this page relies on but does not " +
+      "demonstrate."));
+    const l = el("ul", { class: "notelist" });
+    Q.weight_only._literature.forEach(function (s) { l.appendChild(el("li", {}, s)); });
+    l.appendChild(el("li", {}, QU.fp8.roles.text));
+    l.appendChild(el("li", {}, QU.smoothquant._constructed));
+    host.appendChild(l);
+
+    host.appendChild(NN.callout("key", "THE ONE THING TO TAKE AWAY",
+      "Quantisation error is not a property of a bit width. It is a property of " +
+      "a bit width <i>and</i> a grouping, and the grouping is chosen to keep " +
+      "values with wildly different magnitudes from sharing a scale. Per-channel, " +
+      "group-wise, and SmoothQuant are three answers to the same question at " +
+      "three different granularities. What decides whether any of it is worth " +
+      "doing is not the error at all — it is whether the tensor you shrank was on " +
+      "the critical path, which on decode it is and on prefill it is not."));
+  }
+
+  buildGrid();
+  buildChannel();
+  buildGroups();
+  buildFp8();
+  buildSmooth();
+  buildAsym();
+  buildProof();
+
+  NN.page("quant");
+})();
+</script>
+</body>
+</html>

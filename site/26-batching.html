@@ -163,13 +163,17 @@
   let uid = 0;
   function occupancy(o) {
     const tl = o.timeline, slots = o.slots;
-    const W = 660, rowH = 15, padL = 30, padR = 8, padT = 8, padB = 20;
+    /* The viewBox is as wide as the panel usually is, and the height is left
+       to CSS, so the grid fills the width instead of letterboxing inside it.
+       Occupancy is dense; every pixel of width is a pixel of iteration. */
+    const W = 1040, rowH = 17, padL = 34, padR = 8, padT = 8, padB = 22;
     const H = padT + slots * rowH + padB;
     const sc = (W - padL - padR) / o.maxMs;
     const id = "occ" + (++uid);
 
     const root = svg("svg", {
-      viewBox: "0 0 " + W + " " + H, width: "100%", height: H,
+      viewBox: "0 0 " + W + " " + H, width: "100%",
+      style: "height:auto;display:block",
       class: "chart", role: "img",
       "aria-label": o.name + " slot occupancy over time"
     });
