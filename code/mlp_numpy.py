@@ -185,7 +185,7 @@ def forward(W1, b1, W2, b2, x, y):
         "yhat": yhat, "error": error, "loss": loss,
         # The forward pass must hand these three to backward. Everything else
         # it computed can be freed. This is the entire "activation memory"
-        # story in miniature -- see site page 06.
+        # story in miniature -- see site page 07.
         "saved": {"x": x, "a1": a1, "relu_mask": mask},
     }
 

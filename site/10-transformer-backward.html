@@ -141,9 +141,9 @@ mark.hl { background: var(--gradient-w); color: var(--gradient); padding: 0 3px;
 
 <main class="wrap">
   <div class="pagehead">
-    <div class="eyebrow">Part 08</div>
+    <div class="eyebrow">Part 10</div>
     <h1>Transformer Backward: Every Gradient, Derived</h1>
-    <p class="lede">Page 07 pushed three tokens forward through two blocks and saved the
+    <p class="lede">Page 09 pushed three tokens forward through two blocks and saved the
       activations. This page spends them. Fourteen backward steps, in reverse order, each one an
       application of the chain rule to a specific saved tensor — and three places where the answer
       is not what a first guess produces: LayerNorm's two correction terms, softmax's dense
@@ -799,7 +799,7 @@ mark.hl { background: var(--gradient-w); color: var(--gradient); padding: 0 3px;
       "You cannot compute <code>dWₒ</code> in block 0 before you know the gradient arriving at " +
       "block 0's output, and that gradient is only available after block " + (NL - 1) +
       " has been differentiated. Backward is a topological sort of the forward graph, run backwards. " +
-      "This is exactly why pipeline parallelism has a bubble (page 17) and why activations from the " +
+      "This is exactly why pipeline parallelism has a bubble (page 21) and why activations from the " +
       "<em>first</em> layer must survive until the <em>last</em> backward step — the longest-lived " +
       "tensors in training are the ones created earliest."));
   })();
@@ -1163,7 +1163,7 @@ mark.hl { background: var(--gradient-w); color: var(--gradient); padding: 0 3px;
       "and 2 LayerNorms per block × " + NL + " blocks. That is " +
       (2 * NL * (SEQ * DM + SEQ)) + " saved numbers in a model with only " + M.n_params +
       " parameters. LayerNorm looks like a cheap normalisation and behaves like an activation " +
-      "checkpoint. §8 accounts for it; page 07 is where they were created."));
+      "checkpoint. §8 accounts for it; page 09 is where they were created."));
   })();
 
   /* ======================================================================
@@ -1785,7 +1785,7 @@ mark.hl { background: var(--gradient-w); color: var(--gradient); padding: 0 3px;
     const host = NN.$("#readBody");
 
     host.appendChild(el("p", { html:
-      "Page 07 created these tensors and said they would be needed. Here is the receipt: every saved " +
+      "Page 09 created these tensors and said they would be needed. Here is the receipt: every saved " +
       "activation, the backward step that consumed it, and the specific term in that step's formula " +
       "that would be impossible to evaluate without it." }));
 
@@ -1832,8 +1832,8 @@ mark.hl { background: var(--gradient-w); color: var(--gradient); padding: 0 3px;
 
     host.appendChild(el("p", { class: "small muted", html:
       "Full detail on where each of these was born, and the forward arithmetic that produced it, is on " +
-      "<a href='07-transformer-forward.html'>page 07</a>. The lifetime picture — allocation, peak, " +
-      "free — is on <a href='06-loop.html'>page 06</a>." }));
+      "<a href='09-transformer-forward.html'>page 09</a>. The lifetime picture — allocation, peak, " +
+      "free — is on <a href='07-loop.html'>page 07</a>." }));
 
     /* memory strip: what is resident at the moment backward starts */
     const bytes = 4;
@@ -2051,7 +2051,7 @@ mark.hl { background: var(--gradient-w); color: var(--gradient); padding: 0 3px;
       "the two reasons transformers use GELU or SwiGLU instead."));
 
     host.appendChild(el("p", { class: "small muted", style: { marginTop: "20px" }, html:
-      "Later, once the distributed machinery is in place: <a href='18-transformer-partitioned.html'>page 18</a> takes the same " +
+      "Later, once the distributed machinery is in place: <a href='22-transformer-partitioned.html'>page 22</a> takes the same " +
       D.partitioning.length + " weight tensors and cuts each one four different ways — tensor, " +
       "pipeline, data and ZeRO — and shows which GPU ends up holding which slice of which matrix." }));
   })();

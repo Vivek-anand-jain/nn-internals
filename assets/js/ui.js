@@ -28,7 +28,7 @@
 
   /* ------------------------------------------------------------- pages */
   NN.PAGES = [
-    /* Part I — the mechanics, on the 13-parameter MLP */
+    /* ---- Part I — the mechanics, on the 13-parameter MLP ---- */
     { n: "01", id: "memory",      file: "01-memory.html",      title: "Tensors in Memory",
       blurb: "What a parameter actually is: bytes, dtypes, strides." },
     { n: "02", id: "forward",     file: "02-forward.html",     title: "Forward Pass",
@@ -36,45 +36,78 @@
     { n: "03", id: "loss",        file: "03-loss.html",        title: "Loss",
       blurb: "Turning a prediction into one number to minimise." },
     { n: "04", id: "backward",    file: "04-backward.html",    title: "Backward Pass",
-      blurb: "The chain rule, and why activations had to be kept." },
+      blurb: "The chain rule, derived — and why activations are kept." },
     { n: "05", id: "optimizer",   file: "05-optimizer.html",   title: "Optimizer & Adam",
       blurb: "SGD, momentum, Adam, and the fp32 master copy." },
-    { n: "06", id: "loop",        file: "06-loop.html",        title: "One Full Iteration",
+    { n: "06", id: "dynamics",    file: "06-training-dynamics.html", title: "Training Dynamics",
+      blurb: "Warmup, decay, initialisation, clipping, and loss spikes." },
+    { n: "07", id: "loop",        file: "07-loop.html",        title: "One Full Iteration",
       blurb: "Memory rising and falling across a single step." },
 
-    /* Part II — a real transformer, on the 288-parameter 2-layer block.
-       FlashAttention sits directly after the cost page, because it is the
-       answer to the seq^2 term that page identifies. */
-    { n: "07", id: "tfforward",   file: "07-transformer-forward.html", title: "Transformer Forward",
+    /* ---- Part II — a real transformer, on the 288-parameter block.
+       The objective comes FIRST: you cannot follow the mechanics until you
+       know what the thing is predicting. ---- */
+    { n: "08", id: "lm",          file: "08-what-it-predicts.html", title: "What It Predicts",
+      blurb: "X, Y and ŷ. Next-token prediction and cross-entropy." },
+    { n: "09", id: "tfforward",   file: "09-transformer-forward.html", title: "Transformer Forward",
       blurb: "Two real blocks, every matrix, token by token." },
-    { n: "08", id: "tfbackward",  file: "08-transformer-backward.html", title: "Transformer Backward",
+    { n: "10", id: "tfbackward",  file: "10-transformer-backward.html", title: "Transformer Backward",
       blurb: "LayerNorm's two correction terms. Softmax's dense Jacobian." },
-    { n: "09", id: "transformer", file: "09-transformer-cost.html", title: "What a Transformer Costs",
+    { n: "11", id: "position",    file: "11-positional.html",  title: "Position",
+      blurb: "Attention is orderless. RoPE is how order gets back in." },
+    { n: "12", id: "attnvariants", file: "12-attention-variants.html", title: "Attention Variants",
+      blurb: "MHA → MQA → GQA → MLA, and the KV cache that drove them." },
+    { n: "13", id: "transformer", file: "13-transformer-cost.html", title: "What It Costs",
       blurb: "Parameter counts, activation memory, and the seq² term." },
-    { n: "10", id: "flash",       file: "10-flash-attention.html", title: "FlashAttention",
+    { n: "14", id: "flash",       file: "14-flash-attention.html", title: "FlashAttention",
       blurb: "The seq² matrix never has to exist. Proven exact." },
-    { n: "11", id: "scaling",     file: "11-scaling.html",     title: "Scaling to 70B",
+    { n: "15", id: "scaling",     file: "15-scaling.html",     title: "Scaling to 70B",
       blurb: "Why ZeRO, FSDP, TP and PP have to exist." },
 
-    /* Part III — many GPUs. Sequence parallelism sits directly after tensor
-       parallelism, because it removes exactly the activations TP leaves
-       replicated. */
-    { n: "12", id: "collectives", file: "12-collectives.html", title: "Collective Operations",
+    /* ---- Part III — many GPUs, training ---- */
+    { n: "16", id: "collectives", file: "16-collectives.html", title: "Collective Operations",
       blurb: "Broadcast, all-gather, reduce-scatter, all-reduce — and the ring." },
-    { n: "13", id: "dataparallel", file: "13-data-parallel.html", title: "Data Parallel",
+    { n: "17", id: "dataparallel", file: "17-data-parallel.html", title: "Data Parallel",
       blurb: "Split the batch, all-reduce the gradients. Proven identical." },
-    { n: "14", id: "zero",        file: "14-zero-fsdp.html",   title: "ZeRO & FSDP",
+    { n: "18", id: "zero",        file: "18-zero-fsdp.html",   title: "ZeRO & FSDP",
       blurb: "Stop replicating what you don't need. Three stages." },
-    { n: "15", id: "tensorpar",   file: "15-tensor-parallel.html", title: "Tensor Parallel",
+    { n: "19", id: "tensorpar",   file: "19-tensor-parallel.html", title: "Tensor Parallel",
       blurb: "Cut the weight matrices themselves. Column then row." },
-    { n: "16", id: "seqpar",      file: "16-sequence-parallel.html", title: "Sequence Parallelism",
+    { n: "20", id: "seqpar",      file: "20-sequence-parallel.html", title: "Sequence Parallelism",
       blurb: "The activations TP leaves replicated — removed for free." },
-    { n: "17", id: "pipelinepar", file: "17-pipeline-parallel.html", title: "Pipeline Parallel",
+    { n: "21", id: "pipelinepar", file: "21-pipeline-parallel.html", title: "Pipeline Parallel",
       blurb: "Split the layers. Live with the bubble." },
-    { n: "18", id: "tfpartition", file: "18-transformer-partitioned.html", title: "Partitioning a Block",
+    { n: "22", id: "tfpartition", file: "22-transformer-partitioned.html", title: "Partitioning a Block",
       blurb: "Every weight matrix of a real transformer, cut four ways." },
-    { n: "19", id: "combining",   file: "19-3d-parallelism.html", title: "3D Parallelism",
-      blurb: "Composing TP × PP × DP onto real hardware topology." }
+    { n: "23", id: "combining",   file: "23-3d-parallelism.html", title: "3D Parallelism",
+      blurb: "Composing TP × PP × DP onto real hardware topology." },
+
+    /* ---- Part IV — inference. A different machine: arithmetic intensity
+       replaces the four tensor classes as the organising idea. ---- */
+    { n: "24", id: "regimes",     file: "24-prefill-decode.html", title: "Prefill vs Decode",
+      blurb: "Two regimes, 8000× apart in arithmetic intensity." },
+    { n: "25", id: "kvcache",     file: "25-kv-cache.html",    title: "The KV Cache",
+      blurb: "Exact memoisation — and what it costs at 128k context." },
+    { n: "26", id: "batching",    file: "26-batching.html",    title: "Batching",
+      blurb: "Continuous batching, chunked prefill, and why decode batches free." },
+    { n: "27", id: "paged",       file: "27-paged-attention.html", title: "PagedAttention",
+      blurb: "The KV cache needed an operating system." },
+    { n: "28", id: "quant",       file: "28-quantisation.html", title: "Quantisation",
+      blurb: "INT8, INT4, FP8 — and why weight-only helps decode." },
+    { n: "29", id: "specdec",     file: "29-speculative.html", title: "Speculative Decoding",
+      blurb: "Verify k tokens for the price of one. A bandwidth trick." },
+    { n: "30", id: "infpar",      file: "30-inference-parallelism.html", title: "Inference Parallelism",
+      blurb: "TP for latency, PP for throughput — the opposite of training." },
+    { n: "31", id: "serving",     file: "31-serving.html",     title: "Serving at Scale",
+      blurb: "Disaggregated prefill/decode, scheduling, and the SLOs." },
+
+    /* ---- Part V — mixture of experts ---- */
+    { n: "32", id: "moe",         file: "32-moe.html",         title: "Mixture of Experts",
+      blurb: "Routing, top-k, and decoupling parameters from FLOPs." },
+    { n: "33", id: "moetrain",    file: "33-moe-training.html", title: "MoE Training",
+      blurb: "Expert parallelism, all-to-all, and the load-balance problem." },
+    { n: "34", id: "moeinfer",    file: "34-moe-inference.html", title: "MoE Inference",
+      blurb: "A batch that scatters, and weights read for almost no math." }
   ];
 
   /* ------------------------------------------------------------- utils */

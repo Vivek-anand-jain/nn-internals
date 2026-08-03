@@ -1080,7 +1080,7 @@
       "as “Adam mixed precision”. There is no single true number; there is an " +
       "arithmetic, and the only useful question is which line items someone included. " +
       "None of these include activations, which depend on batch size and sequence " +
-      "length and are the subject of part 06."));
+      "length and are the subject of part 07."));
 
     host.appendChild(NN.chart.bars({
       items: RECIPES.map(function (r) {
@@ -1129,7 +1129,7 @@
         })),
         small("Model states only — no activations, no gradient-accumulation " +
               "buffers, no communication buffers, no allocator fragmentation, and no " +
-              "sharding across devices. Part 11 puts the sharding back.")
+              "sharding across devices. Part 15 puts the sharding back.")
       );
     }
     sel.addEventListener("change", paintScale);

@@ -140,7 +140,7 @@
   <p class="muted">
     The answers to Part II's memory wall. The mechanics are worked on a third
     toy — a 193-parameter network on four simulated GPUs — where every strategy
-    is <em>proven</em> to compute exactly what one GPU would. Then page 18
+    is <em>proven</em> to compute exactly what one GPU would. Then page 22
     applies all of it back to the real transformer, matrix by matrix.
   </p>
   <div class="cards" id="cards3"></div>
@@ -151,6 +151,23 @@
     each one the shortest honest way to a particular question.
   </p>
   <div class="paths" id="paths"></div>
+
+  <h2>Part IV — Inference</h2>
+  <p class="muted">
+    A different machine. Training's organising idea was four tensor classes;
+    inference's is <em>arithmetic intensity</em> — FLOPs per byte moved. Decode
+    reads every weight in the model to produce one token, and leaves over 99%
+    of the GPU's arithmetic idle. Every technique here attacks that.
+  </p>
+  <div class="cards" id="cards4"></div>
+
+  <h2>Part V — Mixture of Experts</h2>
+  <p class="muted">
+    Parameters and FLOPs stop being the same question. Also the only place
+    <code>all-to-all</code> — taught in Part III and unused since — finally
+    earns its keep.
+  </p>
+  <div class="cards" id="cards5"></div>
 
   <section class="block">
     <h2 style="margin-top:0">Every strategy, verified</h2>
@@ -282,7 +299,8 @@
 
   /* --------------------------------------------------------- the cards */
   /* Pages 01-10 are the single-GPU arc; 11-17 are the distributed arc. */
-  const c1 = NN.$("#cards1"), c2 = NN.$("#cards2"), c3 = NN.$("#cards3");
+  const c1 = NN.$("#cards1"), c2 = NN.$("#cards2"), c3 = NN.$("#cards3"),
+        c4 = NN.$("#cards4"), c5 = NN.$("#cards5");
   NN.PAGES.forEach(function (p) {
     const card = NN.el("a", { class: "card", href: "site/" + p.file }, [
       NN.el("div", { class: "n" }, "PART " + p.n),
@@ -290,7 +308,7 @@
       NN.el("div", { class: "b" }, p.blurb)
     ]);
     const n = Number(p.n);
-    (n <= 6 ? c1 : n <= 11 ? c2 : c3).appendChild(card);
+    (n <= 7 ? c1 : n <= 15 ? c2 : n <= 23 ? c3 : n <= 31 ? c4 : c5).appendChild(card);
   });
 
   /* -------------------------------------------------- reading paths */

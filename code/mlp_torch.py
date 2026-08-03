@@ -37,7 +37,7 @@ most of its length not on the model but on:
     optimizer state     empty until the first step(), then 2x params for Adam
 
 Those six lines are the entire memory model of training. Everything on site
-page 11 (scaling) is arithmetic on top of them.
+page 15 (scaling) is arithmetic on top of them.
 
 ANTI-DRIFT RULE
 ---------------
@@ -72,7 +72,7 @@ except ImportError:  # pragma: no cover - the whole point of this branch
 #
 # So the verification model is float64. That is a deliberate, visible choice,
 # and it costs us something: element_size() will report 8 bytes, not the 4
-# that site page 11's arithmetic assumes. We pay that back in
+# that site page 15's arithmetic assumes. We pay that back in
 # section 2 by casting a copy and watching nbytes halve.
 #
 # The lesson is the one from site page 01: precision is not a detail you get
@@ -227,7 +227,7 @@ def main():
     # Batch dimension of 1. The trace's x is a bare (2,) vector; nn.Linear
     # accepts that, but giving it a leading batch axis makes the forward hook
     # in section 6 print the shapes a real training step would show, and makes
-    # the activation-memory arithmetic on site page 06 scale the obvious way.
+    # the activation-memory arithmetic on site page 07 scale the obvious way.
     x = torch.tensor([T["forward"]["x"]], dtype=DTYPE)      # (1, 2)
     y = torch.tensor([[T["forward"]["y"]]], dtype=DTYPE)    # (1, 1)
 
@@ -256,7 +256,7 @@ def main():
     #                 meaningful when two tensors report the SAME one (see
     #                 section 7 -- that is what "shares storage" means).
     #   elem          bytes per element. This is the number that fp32 -> bf16
-    #                 halves, and the reason every scaling table on page 11 is
+    #                 halves, and the reason every scaling table on page 15 is
     #                 written as "bytes per parameter" rather than "parameters".
     #   nbytes        numel x elem. The tensor's actual footprint. Add these up
     #                 and you have the "weights" bar on the memory strip.
@@ -346,7 +346,7 @@ def main():
     # ========================================================================
     # This is the cleanest demonstration in PyTorch that gradients are a
     # SECOND, SEPARATE allocation the same size as the weights -- not some
-    # annotation living inside them. Site page 11 counts them as their own
+    # annotation living inside them. Site page 15 counts them as their own
     # tensor class for exactly this reason, and this is why the naive
     # "1x params" mental model of training memory is wrong by at least 2x
     # before the optimizer has even been constructed.
@@ -414,7 +414,7 @@ def main():
     print("  Every 'same buffer?' is False. Gradients live somewhere else.")
     print("  Scale that to 70B params in bf16: 140 GB of weights forces a")
     print("  second 140 GB of gradients into existence the moment you call")
-    print("  backward(). Site page 11 makes that a row in a table; this is it.")
+    print("  backward(). Site page 15 makes that a row in a table; this is it.")
 
     # Parameter gradients, against the trace.
     ck.check("dL_dW1", model.lin1.weight.grad, T["backward"]["dL_dW1"])
@@ -450,7 +450,7 @@ def main():
     # A forward hook fires after a module produces its output, so it sees
     # exactly the tensors that autograd may need to keep alive. This is the
     # instrument you would reach for on a real model to answer "where is my
-    # activation memory going", and it is how the numbers on site page 06 are
+    # activation memory going", and it is how the numbers on site page 07 are
     # obtained in practice rather than estimated.
     captured = []
 
@@ -683,7 +683,7 @@ def main():
         print(f"  peak              : "
               f"{torch.cuda.max_memory_allocated(dev)} B")
         print()
-        print("  Those four deltas are the four tensor classes on site page 11,")
+        print("  Those four deltas are the four tensor classes on site page 15,")
         print("  measured. The allocator rounds to blocks, so the numbers are")
         print("  larger than numel x element_size -- real allocators always are,")
         print("  which is why a memory budget needs headroom, not a tight fit.")

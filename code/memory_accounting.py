@@ -19,7 +19,7 @@ The only thing that changes is that the arithmetic starts to matter. This is
 that arithmetic, made executable, so that "will a 70B model fit on 8 H100s"
 becomes a command rather than an opinion.
 
-Site page 11 (scaling) renders the same numbers. This file is the reference
+Site page 15 (scaling) renders the same numbers. This file is the reference
 implementation of the formulas below; if the page and this script ever
 disagree, one of them has drifted and the formulas documented here are the
 tiebreaker.
@@ -251,7 +251,7 @@ ACT_COEFF_BASE_BYTES = 2
 # PRESETS — read from the trace, never typed here
 # ============================================================================
 # T.reference_configs holds the published model architectures and GPU HBM
-# capacities that site page 11 offers in its dropdowns. Reading them from the
+# capacities that site page 15 offers in its dropdowns. Reading them from the
 # same file the page reads is the only way to guarantee the CLI and the page
 # describe the same machine. AGENTS.md rule 1 applied to Python: if a number
 # is in the trace, do not type it again here.
@@ -306,7 +306,7 @@ def print_presets(rc):
     for g in rc.get("gpus", []):
         print(f"  {g['name']:<16}{gib(g['hbm_bytes']):>9.0f} GiB")
     print()
-    print(f"  defaults on page 11: model {rc.get('default_model')!r}, "
+    print(f"  defaults on page 15: model {rc.get('default_model')!r}, "
           f"gpu {rc.get('default_gpu')!r}")
 
 
@@ -679,7 +679,7 @@ def build_parser():
                     "down by the four tensor classes.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Formulas are documented in this file's module docstring. "
-               "Site page 11 must agree with them.")
+               "Site page 15 must agree with them.")
 
     g = p.add_argument_group("model")
     g.add_argument("--params", type=parse_count, default=None,

@@ -635,7 +635,7 @@ def build_gpipe_grid(P, M):
 
     (This function used to be labelled 1F1B, which was simply wrong: the
     construction below runs every forward before any backward, which is
-    GPipe by definition. Page 17 caught the mislabelling. The genuine 1F1B
+    GPipe by definition. Page 21 caught the mislabelling. The genuine 1F1B
     schedule is built by build_1f1b_grid.)
     """
     total = 2 * M + 2 * (P - 1)

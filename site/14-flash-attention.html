@@ -269,7 +269,7 @@
 
 <main class="wrap">
   <div class="pagehead">
-    <div class="eyebrow">Part 10</div>
+    <div class="eyebrow">Part 14</div>
     <h1>FlashAttention</h1>
     <p class="lede" id="lede"></p>
   </div>
@@ -541,7 +541,7 @@
     out.appendChild(h2("1 · The tensor that is too big"));
 
     out.appendChild(p(
-      "Page 09 counted a transformer's activation memory and found one term " +
+      "Page 13 counted a transformer's activation memory and found one term " +
       "that behaves differently from all the others: the attention " +
       "probabilities. Every other activation is linear in sequence length. " +
       "That one is quadratic — " + code(F.memory.formula_standard) +
@@ -1634,7 +1634,7 @@
             "dS<sub>ij</sub> = p<sub>ij</sub> (dP<sub>ij</sub> − D<sub>i</sub>)",
       sub: "D<sub>i</sub> = Σ<sub>j</sub> dP<sub>ij</sub> p<sub>ij</sub> — " +
            "one scalar per row, the contraction of the dense softmax Jacobian " +
-           "that page 08 §5 derives. Then dQ = dS·K / √d and dK = dSᵀ·Q / √d.",
+           "that page 10 §5 derives. Then dQ = dS·K / √d and dK = dSᵀ·Q / √d.",
       cls: "gradient"
     }));
 
@@ -1655,8 +1655,8 @@
       ])
     ]));
 
-    /* row_dots <-> page 08 softmax_dots */
-    out.appendChild(h3("Dᵢ is the same term page 08 called softmax_dots"));
+    /* row_dots <-> page 10 softmax_dots */
+    out.appendChild(h3("Dᵢ is the same term page 10 called softmax_dots"));
     const dotsTbl = el("table", { class: "data" }, [
       el("thead", {}, el("tr", {}, [
         el("th", {}, "row i"),
@@ -1682,7 +1682,7 @@
       })[0];
       if (st) {
         out.appendChild(small(
-          "Page 08 computes the same quantity on the two-block transformer and " +
+          "Page 10 computes the same quantity on the two-block transformer and " +
           "stores it as <code>softmax_dots</code>. Its first attention head's " +
           "values are [" + st.heads[0].softmax_dots.map(function (v) {
             return f(v, 8);
@@ -1729,7 +1729,7 @@
       "HBM bandwidth give a ratio: how many floating-point operations the " +
       "machine can do in the time it takes to move one byte. A kernel below " +
       "that ratio is bandwidth-bound — the arithmetic units idle while " +
-      "they wait. These are the published figures for the devices page 11 " +
+      "they wait. These are the published figures for the devices page 15 " +
       "uses:"));
 
     const gpus = T.reference_configs.gpus;
@@ -1879,7 +1879,7 @@
       "Activation memory for the attention probabilities alone, both ways. " +
       "Standard is " + code(F.memory.formula_standard) + "; flash is " +
       code(F.memory.formula_flash) + ". Nothing else about the model is " +
-      "included — page 09 does the full budget — because the " +
+      "included — page 13 does the full budget — because the " +
       "point here is one term."));
 
     /* Control domains are powers of two spanning the range flash.py's own
@@ -2066,7 +2066,7 @@
         " decimal). The standard version's probabilities alone would need " +
         "<b>" + f(nGpuStd, nGpuStd < 10 ? 2 : 0) + "×</b> that, before " +
         "a single weight, gradient or optimizer state is placed — and " +
-        "before the other activations page 09 counts. With FlashAttention " +
+        "before the other activations page 13 counts. With FlashAttention " +
         "the same term is " + f(r.flB / gpu.hbm_bytes * 100, 3) +
         "% of one device."));
     }
@@ -2090,24 +2090,24 @@
     out.appendChild(h2("8 · Where this goes"));
 
     out.appendChild(NN.callout("why", "Back to 09 — what a transformer costs",
-      "Page 09's activation budget has a checkbox marked " +
+      "Page 13's activation budget has a checkbox marked " +
       "<em>FlashAttention</em> that deletes the " + code("a·s²·b") +
       " term. This page is what that checkbox does: not an estimate, not a " +
       "modelling assumption, but " + num(F.flash.saved_elements, 0) +
       " numbers kept instead of " + num(F.standard.stored_elements, 0) +
       " at " + code("seq " + SEQ) + ", and an output that matches to " +
       sci(F.equivalence.output_max_abs_err) + ". Go back and tick it knowing " +
-      "what it means. <a href='09-transformer-cost.html'>09 · What a " +
+      "what it means. <a href='13-transformer-cost.html'>09 · What a " +
       "Transformer Costs →</a>"));
 
     out.appendChild(NN.callout("mem", "Forward to 11 — scaling to 70B",
       "With the quadratic term removed, activation memory is linear in " +
-      "sequence length and the remaining problem is the one page 11 opens " +
+      "sequence length and the remaining problem is the one page 15 opens " +
       "with: a " + T.reference_configs.default_model + " model's parameters, " +
       "gradients and optimizer states do not fit on any single device, no " +
       "matter how the activations behave. FlashAttention is the last thing " +
       "you can do on one GPU. Everything after it needs more than one. " +
-      "<a href='11-scaling.html'>11 · Scaling to 70B →</a>"));
+      "<a href='15-scaling.html'>11 · Scaling to 70B →</a>"));
 
     out.appendChild(NN.callout("key", "The three sentences worth keeping",
       "<ol style='margin:8px 0 0 18px;padding:0'>" +

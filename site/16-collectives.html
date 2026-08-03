@@ -150,7 +150,7 @@ table.duality td .opn { font-family: var(--mono); font-weight: 700; }
 
 <main class="wrap">
   <div class="pagehead">
-    <div class="eyebrow">Part 12</div>
+    <div class="eyebrow">Part 16</div>
     <h1>Collective Operations</h1>
     <p class="lede">Eight ways a set of GPUs can rearrange a buffer between them. Every parallelism
       strategy on the six pages that follow — DDP, ZeRO, FSDP, tensor parallel, pipeline parallel, and
@@ -1173,14 +1173,14 @@ table.duality td .opn { font-family: var(--mono); font-weight: 700; }
       "collective, and which one is fixed by linear algebra, not by taste.</p>" +
       "<p>The consequence that surprises people is that <b>a no-op in one direction becomes a " +
       "collective in the other</b>. If the forward pass merely uses a locally-held shard and does " +
-      "no communication, its adjoint may still have to sum N partial gradients. On page 15 this " +
+      "no communication, its adjoint may still have to sum N partial gradients. On page 19 this " +
       "is the entire content of the two functions Megatron calls <code>f</code> and " +
       "<code>g</code>: <code>f</code> is identity forward and all-reduce backward, " +
       "<code>g</code> is all-reduce forward and identity backward. They are the same object seen " +
       "from the two ends.</p>" +
       "<p>The same duality is why FSDP's schedule is what it is: <code>all_gather</code> the " +
       "weights to run the forward, <code>reduce_scatter</code> the gradients on the way back. " +
-      "Page 14 spends its time on that pair.</p>"));
+      "Page 18 spends its time on that pair.</p>"));
   })();
 
   /* ======================================================================
@@ -1282,7 +1282,7 @@ table.duality td .opn { font-family: var(--mono); font-weight: 700; }
     host.appendChild(el("p", { class: "small muted", html:
       "The toy model in <code>code/parallel_toy.py</code> has " + P.meta.n_params + " parameters " +
       "over " + P.meta.n_layers + " layers on " + N + " GPUs, so each rank owns " +
-      "≈" + NN.fmt(P.meta.n_params / N, 2) + " of them. Page 14 runs the full three-stage " +
+      "≈" + NN.fmt(P.meta.n_params / N, 2) + " of them. Page 18 runs the full three-stage " +
       "version of this and checks it against the single-GPU answer." }));
   })();
 
@@ -1810,7 +1810,7 @@ table.duality td .opn { font-family: var(--mono); font-weight: 700; }
     host.appendChild(el("div", { class: "scrollx" }, [t]));
 
     host.appendChild(el("p", { class: "small muted", html:
-      "Next: page 13 spends one <code>all_reduce</code> per step and proves the result is " +
+      "Next: page 17 spends one <code>all_reduce</code> per step and proves the result is " +
       "numerically identical to single-GPU training. Everything after that is a rearrangement of " +
       "the eight operations above." }));
   })();

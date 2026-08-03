@@ -237,7 +237,7 @@ def flash_attention():
                 # These three states are the whole story of the step and
                 # must be captured at the moment each is true -- an earlier
                 # version recorded them at the end, so acc_rescaled came out
-                # byte-identical to acc_after. Page 10 caught it by replaying
+                # byte-identical to acc_after. Page 14 caught it by replaying
                 # the recurrence.
 
                 acc_rescaled = list(acc[a])
@@ -338,7 +338,7 @@ def flash_backward(std, fl, dO):
     dS = zeros(SEQ, SEQ)
     row_dots = []
     for i in range(SEQ):
-        # the same dense-Jacobian contraction page 08 derives
+        # the same dense-Jacobian contraction page 10 derives
         D_i = sum(dP[i][j] * P_recomputed[i][j] for j in range(SEQ))
         row_dots.append(D_i)
         for j in range(SEQ):

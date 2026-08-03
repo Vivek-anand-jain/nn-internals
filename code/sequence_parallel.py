@@ -5,7 +5,7 @@ cannot touch, and what to do about it.
 
 Pure Python standard library.
 
-Page 18 states, correctly, that LayerNorm cannot be sharded across the
+Page 22 states, correctly, that LayerNorm cannot be sharded across the
 hidden dimension: computing a mean needs the whole vector. It then says
 "that is what sequence parallelism fixes" and stops. This file finishes the
 sentence.
@@ -333,7 +333,7 @@ def at_scale():
         })
     return {
         # Explicit, so a consumer does not have to solve for them from the
-        # table (page 16 did exactly that, correctly, and should not have had
+        # table (page 20 did exactly that, correctly, and should not have had
         # to). A is the REPLICATED FLOOR: the part TP cannot divide.
         "coefficients": {
             "tp_only_floor_A": 10,

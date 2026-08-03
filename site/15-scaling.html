@@ -75,7 +75,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; max-width: 280px; 
 
 <main class="wrap">
   <div class="pagehead">
-    <div class="eyebrow">Part 11</div>
+    <div class="eyebrow">Part 15</div>
     <h1>Scaling to 70B: Why ZeRO, FSDP, TP and PP Exist</h1>
     <p class="lede">The 13-parameter model held four classes of tensor. So did the transformer block
       you have just walked forward, backward and costed. So does a 70B model — the
@@ -1225,8 +1225,8 @@ table.data td.wrap, table.data th.wrap { white-space: normal; max-width: 280px; 
     const a = r.act;
 
     host.appendChild(el("p", { html:
-      "Page 09 ended on a term that grows as <span class='mono'>s²</span>. Here is what that term " +
-      "costs. A transformer layer — the one you differentiated step by step on page 08 — keeps two " +
+      "Page 13 ended on a term that grows as <span class='mono'>s²</span>. Here is what that term " +
+      "costs. A transformer layer — the one you differentiated step by step on page 10 — keeps two " +
       "shapes of activation for the backward pass: things shaped " +
       "like <span class='mono'>(b " + x + " s " + x + " d)</span>, which grow linearly in sequence " +
       "length, and the attention score matrix shaped <span class='mono'>(b " + x + " heads " + x +

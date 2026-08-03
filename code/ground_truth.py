@@ -652,7 +652,7 @@ def build():
     # ---- the transient tensors backward creates on its way through -------
     # These are real allocations and they are exactly what makes the middle
     # of backward the co-resident window, so leaving them out understates
-    # the peak. Added after page 06 pointed out the omission.
+    # the peak. Added after page 07 pointed out the omission.
     memory["per_tensor"].extend([
         {"name": "loss", "shape": [1], "elements": 1, "cls": "activation",
          "note": "the scalar the whole backward pass hangs off"},
@@ -674,7 +674,7 @@ def build():
 
     # ---- lifetime timeline -----------------------------------------------
     # One training iteration as an ordered list of phases, each naming the
-    # tensors allocated and freed. Page 06 previously had to author this by
+    # tensors allocated and freed. Page 07 previously had to author this by
     # hand from read-dependencies; emitting it here makes that page
     # data-driven and keeps the phase story in one place.
     memory["timeline"] = [

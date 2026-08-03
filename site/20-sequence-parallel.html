@@ -169,7 +169,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
 
 <main class="wrap">
   <div class="pagehead">
-    <div class="eyebrow">Part 16</div>
+    <div class="eyebrow">Part 20</div>
     <h1>Sequence Parallelism</h1>
     <p class="lede">Tensor parallelism divides the weights and the MLP activations by the TP
       degree, and divides the LayerNorm, dropout and residual activations by one. Nothing in
@@ -348,7 +348,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     const host = NN.$("#repBody");
 
     host.appendChild(el("p", { html:
-      "Page <a href='15-tensor-parallel.html'>15</a> cut the weight matrices: <code>W_in</code> " +
+      "Page <a href='19-tensor-parallel.html'>15</a> cut the weight matrices: <code>W_in</code> " +
       "by column, <code>W_out</code> by row, one all-reduce at the join. That is the whole of " +
       "tensor parallelism, and it is genuinely a division — the weights shrink, and so does the " +
       "MLP hidden state. But a transformer block is not only matmuls. Around them sit LayerNorm, " +
@@ -490,7 +490,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     const host = NN.$("#resistBody");
 
     host.appendChild(el("p", { html:
-      "Page <a href='18-transformer-partitioned.html#tp'>18</a> made the argument and then left " +
+      "Page <a href='22-transformer-partitioned.html#tp'>18</a> made the argument and then left " +
       "it hanging: a LayerNorm mean is an average over the <em>hidden</em> vector, so a rank that " +
       "holds half the channels holds half the sum, and half a sum is not a mean. Here is that " +
       "arithmetic on the first token of this page's input, <code>SEQPAR.input.X[0]</code>." }));
@@ -498,7 +498,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     const x0 = S.input.X[0];
     const mu = sum(x0) / DM;
 
-    /* independent cross-check: page 18's LayerNorm on the same vector */
+    /* independent cross-check: page 22's LayerNorm on the same vector */
     let tfMu = null, tfErr = null;
     if (F && F.forward && F.forward.layers && F.forward.layers[0].ln1) {
       const row = F.forward.layers[0].ln1.rows[0];
@@ -552,7 +552,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     host.appendChild(el("p", { class: "small muted", html:
       "Each rank can compute a partial sum and a partial sum of squares — two scalars per token — " +
       "and then it is stuck until those scalars are added across ranks. Megatron's answer, on " +
-      "page <a href='18-transformer-partitioned.html#tp'>18</a>, is not to bother: keep the hidden " +
+      "page <a href='22-transformer-partitioned.html#tp'>18</a>, is not to bother: keep the hidden " +
       "vector whole at the LayerNorm and accept the duplication." +
       (tfMu !== null
         ? " <span style='color:var(--good)'>✓</span> The same vector appears as " +
@@ -664,7 +664,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     host.appendChild(el("p", { html:
       "Both columns below compute the same region — " + M.region + " — on the same " + RANKS +
       " GPUs, from the same inputs, and finish with the same numbers. The left column is page " +
-      "<a href='15-tensor-parallel.html'>15</a>'s tensor parallelism, unchanged. The right column " +
+      "<a href='19-tensor-parallel.html'>15</a>'s tensor parallelism, unchanged. The right column " +
       "shards the LayerNorm and residual regions by sequence and pays for the crossings with the " +
       "two collectives in <code>SEQPAR.tp_plus_sp.schedule</code>. Step through and watch the " +
       "right-hand ledger stay smaller." }));
@@ -783,7 +783,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     host.appendChild(two);
 
     const sides = {};
-    [["tp", "TP only (page 15)"], ["sp", "TP + sequence parallel"]].forEach(function (pair) {
+    [["tp", "TP only (page 19)"], ["sp", "TP + sequence parallel"]].forEach(function (pair) {
       const key = pair[0];
       const head = el("div", { class: "colhead" + (key === "sp" ? " win" : "") }, [
         el("span", {}, pair[1]),
@@ -979,7 +979,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     host.appendChild(el("p", { html:
       "Sequence parallelism adds two collectives per region and removes one. That sounds like a " +
       "loss until you write down what the one it removed was made of. This is page " +
-      "<a href='12-collectives.html#compose'>12</a>'s decomposition, applied:" }));
+      "<a href='16-collectives.html#compose'>12</a>'s decomposition, applied:" }));
 
     const arInfo = collectiveInfo("all_reduce");
     const agInfo = collectiveInfo("all_gather");
@@ -1197,8 +1197,8 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
 
     host.appendChild(el("p", { html:
       "Rearranging where activations live must not change what is computed. The check is the " +
-      "same one page <a href='15-tensor-parallel.html'>15</a> and page " +
-      "<a href='13-data-parallel.html'>13</a> use: run the region on one GPU, run it under each " +
+      "same one page <a href='19-tensor-parallel.html'>15</a> and page " +
+      "<a href='17-data-parallel.html'>13</a> use: run the region on one GPU, run it under each " +
       "strategy, subtract. Recomputed here in the browser from " +
       "<code>SEQPAR.baseline.out</code>, <code>SEQPAR.tp_only.out</code> and " +
       "<code>SEQPAR.tp_plus_sp.out</code> rather than read off the stored value." }));
@@ -1475,7 +1475,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
         "-byte bf16, the dropout masks are 1 byte — so they are not a single dtype you can " +
         "rescale, and this page does not try to. Sequence length enters linearly here because " +
         "the seq² attention term is assumed handled; page " +
-        "<a href='10-flash-attention.html'>10</a> is why that assumption is allowed." }));
+        "<a href='14-flash-attention.html'>10</a> is why that assumption is allowed." }));
     }
     repaint();
 
@@ -1512,7 +1512,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       "value <i>j</i> for every <i>j</i> it attends to. So a rank holding queries for its own " +
       "tokens has to obtain everyone else's K and V, which is done by passing K/V blocks around " +
       "a ring of ranks and accumulating the softmax online, in the same streaming way page " +
-      "<a href='10-flash-attention.html'>10</a> accumulates over tiles. It costs real extra " +
+      "<a href='14-flash-attention.html'>10</a> accumulates over tiles. It costs real extra " +
       "communication that scales with sequence length.<br><br>" +
       "Sequence parallelism shards the sequence only in the regions where tokens do " +
       "<em>not</em> interact — " + M.region + " — which is exactly why it is free and why the " +
@@ -1527,12 +1527,12 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     box2.appendChild(el("h4", {}, "It does not shard weights"));
     box2.appendChild(el("div", { class: "small", html:
       "Not one parameter moves. <code>W_in</code> and <code>W_out</code> are split exactly as " +
-      "page <a href='15-tensor-parallel.html'>15</a> splits them, by tensor parallelism, and the " +
+      "page <a href='19-tensor-parallel.html'>15</a> splits them, by tensor parallelism, and the " +
       "LayerNorm gain and bias stay replicated on every rank — they are per-channel, every rank " +
       "needs every channel, and there are only " + (2 * DM) + " of them per LayerNorm in this " +
       "model. Sequence parallelism is an <em>activation</em> optimisation and nothing else. If " +
       "your problem is that the weights do not fit, this page is not the answer; page " +
-      "<a href='14-zero-fsdp.html'>14</a> and page <a href='15-tensor-parallel.html'>15</a> are." }));
+      "<a href='18-zero-fsdp.html'>14</a> and page <a href='19-tensor-parallel.html'>15</a> are." }));
     host.appendChild(box2);
 
     const box3 = el("div", { class: "notbox" });
@@ -1558,7 +1558,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       "typically the " + TP + "-to-8 GPUs inside one node, on the fast link, because that is " +
       "where TP already lives. So sequence parallelism inherits TP's placement rules exactly, " +
       "and it changes nothing about the other two dimensions.<br><br>" +
-      "<b>Pipeline parallelism</b> (page <a href='17-pipeline-parallel.html'>17</a>) cuts the " +
+      "<b>Pipeline parallelism</b> (page <a href='21-pipeline-parallel.html'>17</a>) cuts the " +
       "layer stack across the slower links. Its stage boundary sends one activation tensor per " +
       "micro-batch, and with SP on that tensor is a sequence shard rather than a full copy — the " +
       "same shrink, applied to the pipeline's own point-to-point traffic. Its bubble arithmetic " +
@@ -1567,12 +1567,12 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       "Activations are per-replica, so the saving multiplies: every data-parallel replica saves " +
       "the same " + fmt(S.at_scale.table.find(function (r) { return r.tp === 8; }).saving_pct, 1) +
       "% at t = 8.<br><br>" +
-      "Page <a href='19-3d-parallelism.html'>19</a> composes the three onto real hardware. Read " +
+      "Page <a href='23-3d-parallelism.html'>19</a> composes the three onto real hardware. Read " +
       "sequence parallelism as a property of the TP axis in that picture, not as a fourth axis: " +
       "it does not add a dimension to the mesh, it makes one dimension stop wasting memory."));
 
     host.appendChild(el("p", { class: "small muted", html:
-      "The unfinished sentence on page <a href='18-transformer-partitioned.html#tp'>18</a> — " +
+      "The unfinished sentence on page <a href='22-transformer-partitioned.html#tp'>18</a> — " +
       "“LayerNorm cannot be sharded, that is what sequence parallelism fixes” — closes like " +
       "this: it cannot be sharded <em>along the hidden dimension</em>, because a mean is a " +
       "reduction over exactly that axis. It shards perfectly along the sequence, because a " +

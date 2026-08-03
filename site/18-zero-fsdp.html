@@ -83,7 +83,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
 
 <main class="wrap">
   <div class="pagehead">
-    <div class="eyebrow">Part 14</div>
+    <div class="eyebrow">Part 18</div>
     <h1>ZeRO &amp; FSDP: Stop Replicating What You Don't Need</h1>
     <p class="lede">DDP replicates everything. Four GPUs hold four identical copies of the
       weights, the gradients and the optimizer state — three quarters of that is waste that
@@ -295,7 +295,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
     const host = NN.$("#spineBody");
 
     host.appendChild(el("p", { html:
-      "The toy here is the same " + NL + "-layer network page 13 ran under DDP: " +
+      "The toy here is the same " + NL + "-layer network page 17 ran under DDP: " +
       "<span class='mono'>" + P.meta.dims.join(" " + arrow + " ") + "</span>, " +
       "<b>" + ints(NP) + " parameters</b>, split over <b>" + WD + " GPUs</b>. " +
       "Under DDP every one of those GPUs holds the same three things in full: the " +
@@ -404,7 +404,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
       ]));
       arithHost.appendChild(t);
       arithHost.appendChild(el("div", { class: "hint", style: { marginTop: "9px" } },
-        i === 0 ? "the baseline — page 13's DDP, unchanged"
+        i === 0 ? "the baseline — page 17's DDP, unchanged"
                 : "against DDP: " + NN.fmt(100 * (1 - s.total / DDP.total), 1) +
                   "% less per GPU"));
 
@@ -659,7 +659,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
 
     host.appendChild(el("h3", {}, "all-reduce is already two collectives"));
     host.appendChild(el("p", { html:
-      "Page 12 took the ring all-reduce apart: <span class='mono'>" +
+      "Page 16 took the ring all-reduce apart: <span class='mono'>" +
       coll.all_reduce.what + "</span> Its cost factor is <span class='mono'>" +
       coll.all_reduce.ring_factor + "</span>, and that 2 is not a coincidence — it is " +
       "<span class='mono'>" + coll.reduce_scatter.ring_factor + "</span> for the " +
@@ -1209,7 +1209,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
       "shrinks at-rest without moving the peak much. <b>Deep and narrow is ZeRO-3's best " +
       "case; shallow and wide is its worst</b>, and in the limit — one layer that does not " +
       "fit on one device — it fails outright no matter how large N gets. That limit is " +
-      "section 8, and the answer to it is page 15."));
+      "section 8, and the answer to it is page 19."));
   })();
 
   /* ======================================================================
@@ -1224,7 +1224,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
 
     host.appendChild(el("p", { html:
       "Memory is not free; it is bought with bandwidth. The ring cost of every collective " +
-      "on this page is a fixed multiple of the buffer size (page 12), so the total each " +
+      "on this page is a fixed multiple of the buffer size (page 16), so the total each " +
       "strategy pushes through each GPU's NIC per step is just a sum over its schedule." }));
 
     const t = el("table", { class: "data" });
@@ -1333,7 +1333,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
 
     /* ------------------------------------------------------------------
        Activation accounting. The per-(token x d_model) byte coefficients
-       are the same structural constants page 11 derives and documents:
+       are the same structural constants page 15 derives and documents:
          2 LayerNorm inputs 4, QKV input 2, attn-over-V out 2, out-proj
          dropout mask 1, MLP first-linear input 2, MLP dropout mask 1 = 12
          + Q 2 + K,V 4*(kv_heads/heads) + MLP internals 4*(d_ff/d_model).
@@ -1648,8 +1648,8 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
             "floor and activations become the binding constraint. "
           : "Even at N = " + NLIST[NLIST.length - 1] + " the model state has not fallen " +
             "below the activation floor here. ") +
-        "That is precisely the point page 11 makes, and it is why activation " +
-        "checkpointing, sequence parallelism and the layer split of page 17 exist: past " +
+        "That is precisely the point page 15 makes, and it is why activation " +
+        "checkpointing, sequence parallelism and the layer split of page 21 exist: past " +
         "some N, ZeRO has nothing left to give you." }));
     }
 
@@ -1795,7 +1795,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
       "splitting the batch — DDP already had it. ZeRO adds exactly zero activation savings " +
       "on top. Section 6's flat green line is the visual: shard the model state as hard as " +
       "you like and the activations sit there unmoved. Activation memory is attacked with " +
-      "checkpointing, FlashAttention, sequence parallelism and micro-batching — page 11's " +
+      "checkpointing, FlashAttention, sequence parallelism and micro-batching — page 15's " +
       "subject, not this page's." }));
 
     host.appendChild(el("h3", {}, "It does not help if one layer does not fit"));
@@ -1819,7 +1819,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; text-align: left; 
       "To get under the single-layer floor you have to stop reassembling the layer at all: " +
       "split the weight matrix itself and let each GPU compute a <em>piece</em> of the " +
       "output, with the matmul rewritten so the pieces add up. That is tensor parallelism — " +
-      "<b>page 15</b>. It is strictly harder than ZeRO, because the collectives move " +
+      "<b>page 19</b>. It is strictly harder than ZeRO, because the collectives move " +
       "activations and sit inside the arithmetic rather than around it (" +
       S.tp.schedule.filter(function (c) { return c.op !== "none"; }).length +
       " collectives per step in the same toy, every one of them an " +

@@ -65,7 +65,7 @@
 
 <main class="wrap">
   <div class="pagehead">
-    <div class="eyebrow">Part 09</div>
+    <div class="eyebrow">Part 13</div>
     <h1>What a Transformer Costs</h1>
     <p class="lede" id="lede"></p>
   </div>
@@ -119,8 +119,8 @@
     return '<span class="num' + (cls ? " v-" + cls : "") + '">' + f(x, d) + "</span>";
   }
 
-  const P07 = "07-transformer-forward.html";
-  const P08 = "08-transformer-backward.html";
+  const P07 = "09-transformer-forward.html";
+  const P08 = "10-transformer-backward.html";
   function link07(anchor, text) { return "<a href='" + P07 + (anchor || "") + "'>" + text + "</a>"; }
   function link08(anchor, text) { return "<a href='" + P08 + (anchor || "") + "'>" + text + "</a>"; }
 
@@ -155,9 +155,9 @@
 
     host.appendChild(h2("The bridge: same architecture, real dimensions"));
     host.appendChild(p(
-      link07("", "Page 07") + " pushed " + (F2 ? num(F2.meta.n_params, 0) : "the toy's") +
+      link07("", "Page 09") + " pushed " + (F2 ? num(F2.meta.n_params, 0) : "the toy's") +
       " parameters through " + (F2 ? num(F2.meta.n_layers, 0) : "two") +
-      " stacked pre-norm blocks token by token, and " + link08("", "page 08") +
+      " stacked pre-norm blocks token by token, and " + link08("", "page 10") +
       " spent every one of those saved tensors on a gradient. The mechanics " +
       "are settled. What is not settled is the arithmetic: those blocks ran at " +
       mono("d_model " + D) + ", and " + big.name + " runs the same block at " +
@@ -230,8 +230,8 @@
       "<code>ground_truth.py</code> before it emits, so " + num(paramGrad, 0) +
       " = " + num(mlpP, 0) + " is checked at generation time. Transient " +
       "activation gradients are a separate population — " +
-      "<a href='06-loop.html'>page 06</a> counts them, " +
-      link08("#read", "page 08 §8") + " walks them." }));
+      "<a href='07-loop.html'>page 07</a> counts them, " +
+      link08("#read", "page 10 §8") + " walks them." }));
 
     host.appendChild(NN.callout("key", "The one row that behaves differently",
       "Three of those four rows are locked to each other: " + num(blkP, 0) +
@@ -262,7 +262,7 @@
       "counting, not as an explanation: each box is labelled with its " +
       "parameter count, and clicking one jumps to that row of the table below. " +
       "For what the boxes actually compute — every matmul, every softmax row, " +
-      "term by term — see " + link07("#walk", "page 07 §2") + "."));
+      "term by term — see " + link07("#walk", "page 09 §2") + "."));
 
     const W = 780, HT = 660;
     const SX = 152;                      // residual stream x (leaves room for
@@ -448,7 +448,7 @@
       f(TF.real.models[TF.real.default_index].config.n_layers, 0) +
       " times. (It also means the gradient reaches the embedding through a " +
       "chain of additions rather than multiplications — " +
-      link08("#res", "page 08 §7") + " shows that gradient arriving intact.)"));
+      link08("#res", "page 10 §7") + " shows that gradient arriving intact.)"));
   })();
 
   /* ===================================================================== */
@@ -460,9 +460,9 @@
 
     host.appendChild(h2("Counting parameters in terms of d_model"));
     host.appendChild(p(
-      "This is the canonical count for the site. " + link07("#params", "Page 07 §5") +
+      "This is the canonical count for the site. " + link07("#params", "Page 09 §5") +
       " counts its own two-block model tensor by tensor with the tensor-parallel " +
-      "cut marked on each row, because that is what page 18 needs. Here the " +
+      "cut marked on each row, because that is what page 22 needs. Here the " +
       "question is different: how many parameters does a block hold as a " +
       "function of " + mono("d_model") + ", and does that formula survive " +
       "contact with a real model?"));
@@ -812,7 +812,7 @@
       "Parameters are the easy half: fixed, countable from the config, done. " +
       "The other half of the memory bill is the set of forward tensors that " +
       "cannot be thrown away, because a specific term of a specific gradient " +
-      "needs them. " + link08("#read", "Page 08 §8") + " is the receipt — it " +
+      "needs them. " + link08("#read", "Page 10 §8") + " is the receipt — it " +
       "lists every saved tensor next to the term that would be impossible to " +
       "evaluate without it. Three of those entries set the shape of everything " +
       "below:"));
@@ -882,7 +882,7 @@
       "nothing about this block looks alarming. But the linear pile grows " +
       mono("×2") + " when you double the context and the quadratic pile grows " +
       mono("×4") + ", so the ordering is guaranteed to flip; the only question " +
-      "is where. " + link08("#close", "Page 08 §10") + " puts bf16 byte counts " +
+      "is where. " + link08("#close", "Page 10 §10") + " puts bf16 byte counts " +
       "on these three tensors for one specific model at one specific sequence " +
       "length. The calculator below does the general case — any batch, any " +
       "sequence, any width, any head count — and solves for the crossover."));
@@ -1191,7 +1191,7 @@
         " with Flash, a saving of <b>" + NN.bytes(saved) + "</b> (" +
         num(saved / rn.total * 100, 1) + "% of the naive figure)." +
         "<br><br>It is affordable because the tensors it recomputes from are " +
-        "saved anyway: " + link08("#qkv", "page 08 §6") + " shows Q and K " +
+        "saved anyway: " + link08("#qkv", "page 10 §6") + " shows Q and K " +
         "being consumed for each other's gradients, so a kernel that has them " +
         "in registers can rebuild any tile of P without ever writing P to HBM." +
         "<br><br><b>The honest caveat:</b> " + AM.flash.caveat +

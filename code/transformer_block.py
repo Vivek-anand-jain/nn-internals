@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-transformer_block.py — ground truth for page 09, "The Transformer Block".
+transformer_block.py — ground truth for page 13, "The Transformer Block".
 
 Same discipline as code/ground_truth.py: pure Python standard library, no
 numpy, no torch, no autograd. Every matmul is written out longhand so the
 page can render the individual numbers instead of asserting them.
 
-The main trace (assets/data/trace.js) describes a 2 -> 3 -> 1 MLP. Page 09
+The main trace (assets/data/trace.js) describes a 2 -> 3 -> 1 MLP. Page 13
 needs a transformer, which the MLP trace does not contain, so this file
-generates it. Nothing on page 09 may hand-type a number; everything it
+generates it. Nothing on page 13 may hand-type a number; everything it
 renders comes out of the payload emitted here.
 
 It computes ONE forward pass of a real (if tiny) pre-norm transformer block:
@@ -613,7 +613,7 @@ def load_reference_configs(root):
     if not rc:
         raise SystemExit(
             "trace.json has no reference_configs. Run "
-            "`python3 code/ground_truth.py` first -- page 09 takes its real "
+            "`python3 code/ground_truth.py` first -- page 13 takes its real "
             "model dimensions from there, not from a copy in this file.")
     return rc
 
@@ -890,7 +890,7 @@ assert ACTMEM["quad_coeff"] == 5, ACTMEM["quad_coeff"]
 # ============================================================================
 # THE BRIDGE BACK TO THE MLP  (page 01-06's model)
 # ============================================================================
-# Page 09 opens by claiming the transformer introduces no new tensor CLASS.
+# Page 13 opens by claiming the transformer introduces no new tensor CLASS.
 # These are the numbers that claim rests on; the MLP side is re-derived from
 # the same layout ground_truth.py uses so the two pages cannot drift.
 
