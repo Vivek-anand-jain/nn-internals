@@ -688,24 +688,46 @@ table.data tr.hi td:first-child { font-weight: 700; }
         yMax: Math.max.apply(null, rs.map(function (r) { return r.err.sqnr_db; })) + 1
       }));
       const best = rs[rs.length - 1], worst = rs[0];
+      const steps = rs.map(function (r, i) {
+        return i === 0 ? null : {
+          from: rs[i - 1].group, to: r.group,
+          dDb: r.err.sqnr_db - rs[i - 1].err.sqnr_db,
+          dBits: r.effective_bits - rs[i - 1].effective_bits
+        };
+      }).filter(Boolean);
+      const lastStep = steps[steps.length - 1];
       chartHost.appendChild(el("p", { class: "small muted" },
-        "Going from one scale for all " + (worst.group) + " weights to one per " +
+        "Going from one scale for all " + worst.group + " weights to one per " +
         best.group + " buys " + fmt(best.err.sqnr_db - worst.err.sqnr_db, 1) +
         " dB and costs " + fmt(best.effective_bits - worst.effective_bits, 3) +
-        " bits per weight. The curve flattens: the gain from halving the group " +
-        "shrinks while the cost of halving it doubles, and that is what fixes " +
-        "the group sizes people actually ship at 64 and 128."));
+        " bits per weight. The last halving, " + lastStep.from + " → " +
+        lastStep.to + ", buys " + fmt(lastStep.dDb, 2) + " dB for " +
+        fmt(lastStep.dBits, 3) + " bits — and the bit cost of every further " +
+        "halving doubles while the dB gain does not. That is what pins the " +
+        "group sizes in practice; where exactly the knee sits depends on the " +
+        "tensor, which is the point of the selector above."));
     }
     render();
 
+    const totalGain = {};
+    labels.forEach(function (L) {
+      const rs = rows.filter(function (r) { return r.label === L && r.bits === 4; })
+        .sort(function (a, b) { return b.group - a.group; });
+      totalGain[L] = rs[rs.length - 1].err.sqnr_db - rs[0].err.sqnr_db;
+    });
     host.appendChild(NN.callout("why", "WHY GROUPING HELPS AT ALL",
       "It helps exactly to the extent that the local magnitude of a weight " +
-      "vector drifts. If every weight were drawn from the same distribution, one " +
-      "scale would be as good as many and grouping would buy nothing but overhead. " +
-      "The second vector in the selector above is built with a deliberately " +
-      "drifting envelope, so the effect is large and visible; the first is a real " +
-      "run of trace weights, where it is real but smaller. Both are measured, " +
-      "and the difference between them is itself the lesson."));
+      "vector drifts. If every weight were drawn from one distribution, one " +
+      "scale would be as good as many and grouping would buy nothing but " +
+      "overhead. Both vectors here are measured, and the comparison is not the " +
+      "one you would guess: the constructed vector, with a smooth sinusoidal " +
+      "envelope, gains <b>" + fmt(totalGain[labels[1]], 1) + " dB</b> from " +
+      "grouping, while the run of real trace weights gains <b>" +
+      fmt(totalGain[labels[0]], 1) + " dB</b>. The real vector wins because it " +
+      "is a concatenation of several different weight matrices, each with its " +
+      "own natural scale — a step change is easier for a group boundary to " +
+      "catch than a gradual drift. Real weight tensors are full of exactly " +
+      "that kind of structure."));
   }
 
   /* =====================================================================

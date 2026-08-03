@@ -146,13 +146,6 @@ def quantise(vals, nbits, symmetric=True):
     }
 
 
-def levels_of(res):
-    """Every real value this grid can represent, in order. Only worth
-    materialising for small bit widths -- that is the point of the picture."""
-    return [(i - res["zero_point"]) * res["scale"]
-            for i in range(res["qmin"], res["qmax"] + 1)]
-
-
 def quantise_grouped(vals, nbits, group, symmetric=True):
     """One scale per contiguous group of `group` values. group = len(vals)
     is per-tensor; group = 1 would be lossless and pointless."""

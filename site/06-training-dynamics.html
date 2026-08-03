@@ -330,6 +330,12 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
     })));
     return el("div", { class: "scrollx" }, t);
   }
+  /* A multiplier that may be 1e-6 or 1e6. NN.fmt only reaches for exponential
+     below 1e-4, which renders 0.0012 as "0" at two digits. */
+  function mult(v) {
+    const a = Math.abs(v);
+    return (a >= 100 ? fmt(v, 1) : a >= 0.01 ? fmt(v, 3) : v.toExponential(1)) + "×";
+  }
   function labelFor(key) {
     const c = D.schedules.curves.filter(function (x) { return x.key === key; })[0];
     return c ? c.name : key;
@@ -780,8 +786,9 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
 
     host.appendChild(NN.formula({
       rule: "Var(z_out) = n · Var(W) · Var(z_in)",
-      sub: "ReLU deletes the negative half of a symmetric distribution, halving it again",
-      result: "Var(W) = 2/n holds it still",
+      sub: "½ · n · Var(W) · Var(z_in) &nbsp;<span class='muted'>after ReLU deletes " +
+           "the negative half of a symmetric distribution</span>",
+      result: "Var(z_in), exactly, when Var(W) = 2/n",
       cls: "activation"
     }));
 
@@ -797,7 +804,7 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
           m.scheme_name, m.activation, fmt(m.predicted_ratio, 3),
           fmt(m.measured_ratio, 3),
           fmt(100 * m.rel_error, 1) + "%",
-          { cls: m.stable ? "ok" : "bad", html: fmt(m.over_10_layers, 4) + "×" }
+          { cls: m.stable ? "ok" : "bad", html: fmt(m.over_10_layers, 2) + "×" }
         ] };
       })));
     host.appendChild(el("div", { class: "legendnote", html:
@@ -831,7 +838,7 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
       I.schemes.map(function (s) {
         return [s.name, fmt(s.std, 4), fmt(s.predicted_ratio_relu, 3),
                 { cls: Math.abs(Math.log(s.final_over_initial_relu)) < 0.7 ? "ok" : "bad",
-                  html: fmt(s.final_over_initial_relu, 4) + "×" },
+                  html: fmt(s.final_over_initial_relu, 3) + "×" },
                 { html: '<span class="muted">' + s.why + "</span>" }];
       })));
 
@@ -846,8 +853,9 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
 
     host.appendChild(NN.formula({
       rule: "Var(x_L) = Var(x_0) + L·σ²",
-      sub: "scale every branch by 1/√(2L) and the sum telescopes: Var(x_0) + σ²/2",
-      result: "depth-independent",
+      sub: "Var(x_0) + L · σ²/(2L) &nbsp;<span class='muted'>with every branch " +
+           "scaled by 1/√(2L)</span>",
+      result: "Var(x_0) + σ²/2, at any depth",
       cls: "activation"
     }));
     host.appendChild(el("p", { html: R.why_2L }));
@@ -966,9 +974,10 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
       "scale the whole gradient down so the norm is exactly that threshold." }));
 
     host.appendChild(NN.formula({
-      rule: "g ← g · min(1, c / ‖g‖₂)",
-      sub: "‖g‖₂ over EVERY parameter, c = " + fmt(C.max_norm, 2),
-      result: "the direction is preserved, the length is capped",
+      rule: "g ← g · min(1, c / ‖g‖₂) &nbsp;<span class='muted'>‖g‖₂ over EVERY " +
+            "parameter</span>",
+      sub: "g · min(1, " + fmt(C.max_norm, 2) + " / " + fmt(C.global_norm, 5) + ")",
+      result: "g × " + fmt(C.global_coef, 5),
       cls: "gradient"
     }));
 
@@ -1277,14 +1286,15 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
     host.appendChild(el("div", { class: "vs" }, [
       el("div", {}, NN.formula({
         rule: "Adam + L2:&nbsp; Δθ = lr · (ĝ + λθ) / (√v̂ + ε)",
-        sub: "the decay term is divided by √v̂ too",
-        result: "shrink depends on the gradient history",
+        sub: "lr·ĝ / (√v̂ + ε) &nbsp;+&nbsp; lr·λ·θ / (√v̂ + ε)",
+        result: "a decay divided by √v̂ — different for every parameter",
         cls: "gradient"
       })),
       el("div", {}, NN.formula({
         rule: "AdamW:&nbsp; Δθ = lr · ĝ / (√v̂ + ε) &nbsp;+&nbsp; lr·λ·θ",
-        sub: "the decay is applied to the weight, outside the adaptive scaling",
-        result: "the same proportional shrink for every parameter",
+        sub: "lr·λ·θ = " + fmt(W.lr * W.weight_decay, 4) + " · θ",
+        result: fmt(100 * W.lr * W.weight_decay, 2) + "% of the weight, every step, " +
+                "for every parameter",
         cls: "optimizer"
       }))
     ]));

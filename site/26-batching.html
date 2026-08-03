@@ -598,9 +598,13 @@
     host.appendChild(el("p", { class: "small muted" },
       better + " of " + co.requests.length + " requests finish sooner under continuous " +
       "batching, and the mean falls from " + fms(st.mean_latency_ms) + " to " +
-      fms(co.mean_latency_ms) + ". Continuous batching is not a throughput-for-latency " +
-      "trade: on this workload it wins both, because the slot a finished request gives back " +
-      "immediately starts a queued one."));
+      fms(co.mean_latency_ms) + ". On this workload it wins throughput and latency together, " +
+      "because the slot a finished request gives back immediately starts a queued one. The " +
+      (co.requests.length - better) + " that get slower are the early arrivals with long " +
+      "outputs: under static batching they had a half-empty machine to themselves once their " +
+      "batch-mates finished, and under continuous batching that space is immediately sold to " +
+      "somebody else. Higher utilisation is not free for the request that was enjoying the " +
+      "idle capacity."));
   })();
 
   /* ======================================================================

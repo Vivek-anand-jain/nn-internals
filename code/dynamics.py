@@ -523,12 +523,14 @@ def build_warmup_demo():
                    "MAGNITUDE cancels out entirely; only its sign survives. "
                    "The first Adam step is a jump of size lr in a direction "
                    "estimated from one batch.",
-            "dead_unit_note": "The exceptions are the three slots belonging to "
-                              "hidden unit 2 — the dead ReLU. Their gradient is "
-                              "exactly zero, so m and v are exactly zero, and "
-                              "0/(0+eps) = 0. The one part of the network Adam "
-                              "cannot damage on step 1 is the part that was "
-                              "already broken.",
+            "dead_unit_note": "The exceptions are the four slots that touch "
+                              "hidden unit 2 — the dead ReLU from page 04: its "
+                              "two input weights, its bias, and the output "
+                              "weight that multiplies its always-zero "
+                              "activation. Their gradient is exactly zero, so m "
+                              "and v are exactly zero, and 0/(0+eps) = 0. The "
+                              "one part of the network Adam cannot damage on "
+                              "step 1 is the part that was already broken.",
         },
         "collapse": {
             "mean_y": mu_y,
@@ -647,10 +649,14 @@ INIT_SCHEMES = [
      lambda fi, fo: math.sqrt(2.0 / (fi + fo)),
      "Derived for a symmetric activation with unit slope at zero — tanh, or "
      "no activation at all. It balances the forward and backward passes, and "
-     "it is missing ReLU's factor of two."),
-    ("too_small", "half of Kaiming's variance", "sqrt(1 / fan_in)",
-     lambda fi, fo: math.sqrt(1.0 / fi),
-     "A plausible-looking guess. It loses half the signal per layer."),
+     "it is missing ReLU's factor of two. For a square layer fan_in = "
+     "fan_out, so Xavier's variance is exactly HALF of Kaiming's: the whole "
+     "disagreement between the two most-cited initialisations is that one "
+     "factor."),
+    ("too_small", "a quarter of Kaiming's variance", "sqrt(0.5 / fan_in)",
+     lambda fi, fo: math.sqrt(0.5 / fi),
+     "A plausible-looking guess. It loses three quarters of the signal per "
+     "layer, which over ten layers is a factor of a million."),
     ("too_large", "twice Kaiming's variance", "sqrt(4 / fan_in)",
      lambda fi, fo: math.sqrt(4.0 / fi),
      "The same guess in the other direction. It doubles the signal per "

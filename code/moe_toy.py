@@ -518,7 +518,8 @@ def main():
           f"   imbalance {lb['imbalance_ratio']:.2f}x")
     print(f"  aux loss {lb['aux_loss']:.4f}   "
           f"(uniform {lb['aux_loss_if_uniform']:.1f}, "
-          f"collapsed {lb['aux_loss_if_collapsed']:.1f})")
+          f"ceiling at k={TOP_K} is {lb['aux_loss_max_at_this_k']:.1f}, "
+          f"and N={lb['aux_loss_if_collapsed_k1']:.0f} only at k=1)")
     print(f"  capacity {lb['capacity_per_expert']}/expert -> "
           f"{lb['n_dropped']} token-slots dropped")
     print()

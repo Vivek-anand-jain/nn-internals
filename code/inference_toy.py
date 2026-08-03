@@ -532,7 +532,7 @@ def main():
         if r["model"] == "Llama 3 70B" and r["batch"] in (1, 32):
             print(f"    70B batch {r['batch']:3d}   prefill {r['prefill_intensity']:9.2f}"
                   f" ({r['prefill_bound']})   decode {r['decode_intensity']:7.3f}"
-                  f" ({r['decode_bound']}, {r['decode_flops_utilisation']*100:.2f}% of peak FLOPs)")
+                  f" ({r['decode_bound']}, {r['flops_utilisation']*100:.2f}% of peak FLOPs)")
     print()
     kv = d["kv_cache"]["rows"]
     print("  KV cache per sequence (bf16):")

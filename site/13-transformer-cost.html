@@ -128,7 +128,7 @@
   /* 0. lede                                                                */
   /* ===================================================================== */
   NN.$("#lede").innerHTML =
-    "Pages 07 and 08 ran a transformer small enough to print: every matmul " +
+    "Pages 09 and 10 ran a transformer small enough to print: every matmul " +
     "forward, every gradient backward, finite-difference checked. This page " +
     "does not repeat any of it. It asks the other question — what does that " +
     "same architecture <em>cost</em> at real dimensions? Two answers, with " +
@@ -828,13 +828,13 @@
     const cb = el("tbody", {});
     [
       ["LayerNorm", "x̂ and 1/σ, per token",
-       "dx = (1/σ)[dx̂ − mean(dx̂) − x̂·mean(dx̂ x̂)] — " + link08("#ln", "08 §3"),
+       "dx = (1/σ)[dx̂ − mean(dx̂) − x̂·mean(dx̂ x̂)] — " + link08("#ln", "10 §3"),
        "seq·d  +  seq"],
       ["attention", "Q, K, V and the probability matrix P",
-       "dV = Pᵀ·dO and the dense Jacobian pᵢ(δ − pⱼ) — " + link08("#soft", "08 §5"),
+       "dV = Pᵀ·dO and the dense Jacobian pᵢ(δ − pⱼ) — " + link08("#soft", "10 §5"),
        "seq·d  and  heads·seq²"],
       ["MLP", "the pre-activation U",
-       "dU = dG ⊙ GELU′(U) — " + link08("#read", "08 §8"),
+       "dU = dG ⊙ GELU′(U) — " + link08("#read", "10 §8"),
        "seq·d_ff"]
     ].forEach(function (r) {
       cb.appendChild(el("tr", {}, [
