@@ -106,7 +106,14 @@ body { background: var(--page); }
 .stage .tclass { font-size: 14px; padding: 3px 11px 3px 9px; }
 .stage table.data { font-size: 16px; margin: 9px 0; }
 .stage table.data th { font-size: 12px; }
-.stage table.data th, .stage table.data td { padding: 4px 10px; }
+.stage table.data th, .stage table.data td { padding: 4px 10px; line-height: 1.35; }
+/* A table whose rows are one line each. Four rows of wrapped prose cost more
+   than five columns of it at one step down in size, and the slide it sits on
+   ends up rendering nearer 1.0, so the reader sees the text LARGER. */
+.stage table.data.nowrap { font-size: 13.5px; }
+.stage table.data.nowrap th, .stage table.data.nowrap td {
+  white-space: nowrap; padding: 3px 6px;
+}
 .stage .small { font-size: 15px; }
 .stage .legend { margin: 9px 0; gap: 8px; }
 .stage .gpugrid { margin: 10px 0; gap: 9px; }
@@ -137,9 +144,27 @@ body { background: var(--page); }
 .cols.wide-r { grid-template-columns: 1fr 1.35fr; }
 /* left column exactly as wide as the matrix in it, everything else beside */
 .cols.fitleft { grid-template-columns: auto 1fr; align-items: start; }
+/* dS row-sums slide: a tall table on the right, three shorter things down
+   the left. Explicit placement so the DOM — and therefore the build order —
+   can stay exactly as it was while the fourth item moves back to the left. */
+.cols.dsgrid { align-items: start; row-gap: 11px; }
+.cols.dsgrid > :nth-child(1) { grid-column: 1; grid-row: 1; }
+.cols.dsgrid > :nth-child(2) { grid-column: 1; grid-row: 2; }
+.cols.dsgrid > :nth-child(3) { grid-column: 2; grid-row: 1 / span 3; }
+.cols.dsgrid > :nth-child(4) { grid-column: 1; grid-row: 3; }
+/* one tall note beside two short ones, again without moving the DOM */
+.cols3.notecol { align-items: start; row-gap: 11px; }
+.cols3.notecol > :nth-child(1) { grid-column: 1; grid-row: 1 / span 2; }
+.cols3.notecol > :nth-child(2) { grid-column: 2 / span 2; grid-row: 1; }
+.cols3.notecol > :nth-child(3) { grid-column: 2 / span 2; grid-row: 2; }
 .cols3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; align-items: stretch; }
 .cols4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; align-items: stretch; }
 .stack { display: flex; flex-direction: column; gap: 11px; }
+/* a sequence read top-to-bottom then across, three items per column */
+.colflow3 {
+  display: grid; grid-auto-flow: column;
+  grid-template-rows: repeat(3, auto); gap: 11px 16px; align-items: start;
+}
 .rowflex { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
 .rowflex.top { align-items: flex-start; }
 /* a row that must stay on ONE line: the children shrink instead of wrapping,
@@ -4695,7 +4720,10 @@ S({
             wm("bias b", [b], "learned", 4)
           ]), "f-fade")
         ]),
-        d("stack", [
+        /* Five derivation steps in one column were more than twice the
+           height of the matrices beside them; two columns filled top to
+           bottom keep the reading order and halve the height. */
+        d("colflow3", [
           frag(NN.formula({ rule: "μ = (1/d) Σ xⱼ",
             sub: "(" + r.x.map(function (v) { return f(v, 3); }).join(" + ") + ") ÷ " + DM,
             result: f(r.mu, 6), cls: "activation" }), "f-right"),
@@ -6181,18 +6209,20 @@ S({
     return [
       kicker("Backward · the plan"),
       title(BST.length + " steps, in exact reverse order"),
-      d("cols wide-l", [
-        frag(d("panel g", [ph("TF2.backward_steps · block " + (NL - 1) +
-          " first, block 0 last"),
-          el("table", { class: "data" }, [
-            el("thead", {}, el("tr", {}, [
-              el("th", {}, "#"), el("th", {}, "block"),
-              el("th", { style: { textAlign: "left" } }, "step"),
-              el("th", {}, "id"),
-              el("th", { style: { textAlign: "left" } }, "extra detail shipped")])),
-            el("tbody", {}, rows)
-          ])]), "f-left"),
-        d("stack", [
+      /* A 14-row table squeezed into a 1.35fr column wrapped every row onto
+         two lines. Given the whole width every row is one line, which is
+         shorter than the column layout even with the notes underneath. */
+      frag(d("panel g", [ph("TF2.backward_steps · block " + (NL - 1) +
+        " first, block 0 last"),
+        el("table", { class: "data" }, [
+          el("thead", {}, el("tr", {}, [
+            el("th", {}, "#"), el("th", {}, "block"),
+            el("th", { style: { textAlign: "left" } }, "step"),
+            el("th", {}, "id"),
+            el("th", { style: { textAlign: "left" } }, "extra detail shipped")])),
+          el("tbody", {}, rows)
+        ])]), "f-left"),
+      d("cols3 notecol", [
           frag(NN.callout("warn", "Three of these are where people go wrong",
             "<b>LayerNorm backward</b> — the naive answer is wrong and we " +
             "derive the two correction terms. <b>The softmax Jacobian</b> — " +
@@ -6213,7 +6243,6 @@ S({
             "opposite order to the forward pass — which is also why the " +
             "activations the forward pass wrote first are the ones freed " +
             "last."), "f-right")
-        ])
       ])
     ];
   }
@@ -6750,7 +6779,9 @@ S({
       frag(d("rowflex top", [
         gm("dL/dA · into the attention branch", B.dA, "", 5)
       ]), "f-fade"),
-      frag(d("cols", [
+      /* each of these is a five-term product; side by side they wrapped onto
+         three lines each, stacked they are one line each */
+      frag(d("stack", [
         d("panel g", [ph("weight gradient · reads the SAVED concat"),
           d("rowflex top", [
             am("concatᵀ", mT(FL[1].concat), "saved", 3), h("ar", "×"),
@@ -7013,30 +7044,30 @@ S({
     return [
       kicker("Backward · block 1 · attention · the invariant"),
       title("Σᵢ dL/dsᵢ = 0, on every row, in every head", true),
-      d("cols wide-l", [
-        d("stack", [
-          frag(d("panel g", [ctx.hm]), "f-fade"),
-          frag(NN.formula({ rule: "the proof, in one line",
-            sub: "Σᵢ pᵢ(dL/dpᵢ − dot) = Σᵢ pᵢ dL/dpᵢ − dot · Σᵢ pᵢ",
-            result: "= dot − dot · 1 = 0", cls: "gradient" }), "f-pop")
-        ]),
-        d("stack", [
-          frag(d("panel g tight", [ph("TF2.backward_steps[].heads[].row_sums_dS · " +
-            "all " + (NL * NH * SQ) + " rows"),
-            el("table", { class: "data" }, [
-              el("thead", {}, el("tr", {}, [
-                el("th", {}, "block"), el("th", {}, "head"),
-                el("th", { style: { textAlign: "left" } }, "row"),
-                el("th", {}, "Σ dS"), el("th", {}, "|Σ|")])),
-              el("tbody", {}, rows)
-            ])]), "f-right"),
-          frag(NN.callout("key", "A forward constraint becomes a backward constraint",
-            "Softmax outputs sum to 1 for every input, so the score direction " +
-            "“add the same constant to every score” cannot change " +
-            "the output. A direction the function ignores is a direction the " +
-            "gradient must be orthogonal to — and orthogonal to all-ones " +
-            "means summing to zero."), "f-right")
-        ])
+      /* The row-sums table is 12 rows tall on its own; stacking a callout
+         under it made the right column twice the height of the left. The
+         four fragments stay in exactly this build order — the grid just puts
+         the fourth one back in the left column, under the proof. */
+      d("cols dsgrid", [
+        frag(d("panel g", [ctx.hm]), "f-fade"),
+        frag(NN.formula({ rule: "the proof, in one line",
+          sub: "Σᵢ pᵢ(dL/dpᵢ − dot) = Σᵢ pᵢ dL/dpᵢ − dot · Σᵢ pᵢ",
+          result: "= dot − dot · 1 = 0", cls: "gradient" }), "f-pop"),
+        frag(d("panel g tight", [ph("TF2.backward_steps[].heads[].row_sums_dS · " +
+          "all " + (NL * NH * SQ) + " rows"),
+          el("table", { class: "data" }, [
+            el("thead", {}, el("tr", {}, [
+              el("th", {}, "block"), el("th", {}, "head"),
+              el("th", { style: { textAlign: "left" } }, "row"),
+              el("th", {}, "Σ dS"), el("th", {}, "|Σ|")])),
+            el("tbody", {}, rows)
+          ])]), "f-right"),
+        frag(NN.callout("key", "A forward constraint becomes a backward constraint",
+          "Softmax outputs sum to 1 for every input, so the score direction " +
+          "“add the same constant to every score” cannot change " +
+          "the output. A direction the function ignores is a direction the " +
+          "gradient must be orthogonal to — and orthogonal to all-ones " +
+          "means summing to zero."), "f-right")
       ]),
       frag(NN.callout("why", "And the mask takes care of itself",
         "A masked position had <span class='mono'>p = 0</span>, and " +
@@ -7147,7 +7178,10 @@ S({
         NN.tiles([{ k: "V path contributes", v: f(mag(B.fromV), 5),
                     s: "max |contribution|", cls: "gradient" }])
       ]), "f-pop"),
-      frag(d("cols wide-l", [
+      /* the three 4×4 weight gradients fit across the full stage on one line;
+         in a 1.35fr column they wrapped onto three, which is what made this
+         one of the shortest-scaled slides in the deck */
+      frag(d("stack", [
         d("rowflex top", [
           gm("dL/dW_q", GR2["L1.Wq"], "", 5),
           gm("dL/dW_k", GR2["L1.Wk"], "", 5),
@@ -13234,6 +13268,8 @@ S({
             "<span class='mono'>s·b·h·(A + B/t)</span>, so the last two " +
             "columns carry the <span class='mono'>× d " + CFG.d +
             "</span> factor as well.")]),
+        /* the table panel is 432px; four notes stacked beside it were 945,
+           so the two long ones move under the whole row instead */
         d("stack", [
           frag(d("vbox", [
             el("span", { class: "mark" }, "✓"),
@@ -13254,21 +13290,23 @@ S({
               s: f(SP_DIFF_T8 / CFG.gradB * 100, 0) + "% of the " +
                  BY(CFG.gradB) + " gradient buffer",
               cls: "activation" }
-          ]), "f-right"),
-          frag(NN.callout("mem", "What that buys, concretely",
-            "Activation memory is the term you trade for throughput: it is what " +
-            "sets the micro-batch size and it is what activation recomputation " +
-            "is spending " + f(CKPT_OVERHEAD * 100, 0) + "% of your compute to avoid. Cutting it by " +
-            f(SP_T8.saving_pct, 0) + "% at no communication cost is why the " +
-            "paper this table comes from is titled after recomputation rather " +
-            "than after parallelism."), "f-right"),
-          frag(NN.callout("warn", "Read the units carefully",
-            "These are bytes per token per layer for one rank, in the paper's " +
-            "accounting, which assumes bf16 and counts the tensors a block " +
-            "must keep. They are not comparable with the " +
-            "<span class='mono'>bytes per parameter</span> figures from the " +
-            "cost run — that is persistent state, this is per-sequence."), "f-right")
+          ]), "f-right")
         ])
+      ]),
+      d("cols", [
+        frag(NN.callout("mem", "What that buys, concretely",
+          "Activation memory is the term you trade for throughput: it is what " +
+          "sets the micro-batch size and it is what activation recomputation " +
+          "is spending " + f(CKPT_OVERHEAD * 100, 0) + "% of your compute to avoid. Cutting it by " +
+          f(SP_T8.saving_pct, 0) + "% at no communication cost is why the " +
+          "paper this table comes from is titled after recomputation rather " +
+          "than after parallelism."), "f-right"),
+        frag(NN.callout("warn", "Read the units carefully",
+          "These are bytes per token per layer for one rank, in the paper's " +
+          "accounting, which assumes bf16 and counts the tensors a block " +
+          "must keep. They are not comparable with the " +
+          "<span class='mono'>bytes per parameter</span> figures from the " +
+          "cost run — that is persistent state, this is per-sequence."), "f-right")
       ])
     ];
   }
@@ -15139,8 +15177,13 @@ S({
     return [
       kicker("Composition · four cuts, four different indices"),
       title("Nothing overlaps, so the savings multiply", true),
+      /* Three full-width blocks made this one of the shortest-scaled slides
+         in the deck. The axis table's four rows each wrapped onto two lines;
+         allowed not to wrap they are one line each, which is worth more than
+         the size step it costs. The four replicated LayerNorm vectors are
+         1×4, so they pair up across instead of stacking four deep. */
       frag(d("panel acc", [ph("the same block under all four, in order"),
-        el("table", { class: "data" }, [
+        el("table", { class: "data nowrap" }, [
           el("thead", {}, el("tr", {}, [
             el("th", {}, "axis"),
             el("th", {}, "what index it splits"),
@@ -15162,10 +15205,12 @@ S({
             wm("W_o ½", PRM["L0.Wo"].slice(0, DM / TW), "", 2),
             wm("W_down ½", PRM["L0.W2"].slice(0, DFF / TW), "", 2)]),
           d("stack", [h("small muted", "replicated in full"),
-            wm("ln1.g", [PRM["L0.ln1.g"]], "", 2),
-            wm("ln1.b", [PRM["L0.ln1.b"]], "", 2),
-            wm("ln2.g", [PRM["L0.ln2.g"]], "", 2),
-            wm("ln2.b", [PRM["L0.ln2.b"]], "", 2)])
+            d("rowflex top", [
+              wm("ln1.g", [PRM["L0.ln1.g"]], "", 2),
+              wm("ln1.b", [PRM["L0.ln1.b"]], "", 2)]),
+            d("rowflex top", [
+              wm("ln2.g", [PRM["L0.ln2.g"]], "", 2),
+              wm("ln2.b", [PRM["L0.ln2.b"]], "", 2)])])
         ])]), "f-pop"),
       frag(d("cols", [
         NN.tiles([
