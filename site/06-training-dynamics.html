@@ -383,7 +383,7 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
       series: S.curves.map(function (c) {
         return { name: c.name, color: SCOL[c.key], points: pts(c.points), dots: false };
       }),
-      width: 700, height: 250, xlabel: "step", ylabel: "learning rate"
+      width: 900, height: 250, xlabel: "step", ylabel: "learning rate"
     }));
     host.appendChild(el("div", { class: "legend" }, S.curves.map(function (c) {
       return el("span", { class: "tclass",
@@ -438,7 +438,7 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
         { name: "WSD planned for " + hd.long_steps + " steps", color: C_W,
           dash: "5 4", points: pts(hd.wsd_long_truncated), dots: false }
       ],
-      width: 700, height: 230, xlabel: "step", ylabel: "learning rate"
+      width: 900, height: 230, xlabel: "step", ylabel: "learning rate"
     }));
 
     host.appendChild(NN.callout("key", "WHY WSD EXISTS",
@@ -519,7 +519,7 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
           { name: "no warmup", color: C_BAD, points: upto(A.loss), dots: false },
           { name: "warmup", color: C_LR, points: upto(B.loss), dots: false }
         ],
-        width: 700, height: 250, xlabel: "step", ylabel: "loss", logY: true,
+        width: 900, height: 250, xlabel: "step", ylabel: "loss", logY: true,
         xMin: 0, xMax: N - 1, yMin: lossMin, yMax: lossMax
       }));
       mount(lrChart, NN.chart.line({
@@ -527,7 +527,7 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
           { name: "no warmup", color: C_BAD, points: upto(A.lr), dots: false },
           { name: "warmup", color: C_LR, points: upto(B.lr), dots: false }
         ],
-        width: 700, height: 170, xlabel: "step", ylabel: "learning rate",
+        width: 900, height: 170, xlabel: "step", ylabel: "learning rate",
         xMin: 0, xMax: N - 1, yMin: 0, yMax: W.peak_lr
       }));
 
@@ -722,7 +722,7 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
                           n_steps: S.n_steps, decay: state.decay });
       mount(lrC, NN.chart.line({
         series: [{ name: labelFor(state.kind), color: C_LR, points: pts(r.lr), dots: false }],
-        width: 700, height: 180, xlabel: "step", ylabel: "learning rate",
+        width: 900, height: 180, xlabel: "step", ylabel: "learning rate",
         xMin: 0, xMax: S.n_steps - 1, yMin: 0, yMax: PEAK_MAX
       }));
       const floor = D.warmup.collapse.constant_predictor_loss;
@@ -732,7 +732,7 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
           { name: "collapse floor = var(y)", color: C_BAD, dash: "4 4",
             points: [[0, floor], [S.n_steps - 1, floor]], dots: false }
         ],
-        width: 700, height: 230, xlabel: "step", ylabel: "loss", logY: true,
+        width: 900, height: 230, xlabel: "step", ylabel: "loss", logY: true,
         xMin: 0, xMax: S.n_steps - 1,
         yMin: Math.min(refMin, Math.min.apply(null, r.loss)),
         yMax: Math.max.apply(null, r.loss.concat([floor]))
@@ -826,7 +826,7 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
         return { name: s.name + "  " + s.std_formula, color: ICOL[s.key],
                  points: pts(s.measured_relu), dots: false };
       }),
-      width: 700, height: 260, xlabel: "layer", ylabel: "E[z²]", logY: true
+      width: 900, height: 260, xlabel: "layer", ylabel: "E[z²]", logY: true
     }));
     host.appendChild(el("div", { class: "legend" }, I.schemes.map(function (s) {
       return el("span", { class: "tclass",
@@ -887,7 +887,7 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
             points: R.measured.filter(function (m) { return m.L <= L; })
                      .map(function (m) { return [m.L, m.unscaled]; }) }
         ],
-        width: 700, height: 250, xlabel: "block", ylabel: "stream variance",
+        width: 900, height: 250, xlabel: "block", ylabel: "stream variance",
         xMin: 1, xMax: Math.max(2, L)
       }));
       mount(NN.$("#resTiles"), NN.tiles([
@@ -1179,7 +1179,7 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
           { name: "loss (clean batch)", color: C_LOSS, points: pts(r.clean_loss), dots: false },
           marker(lossMin, lossMax)
         ],
-        width: 700, height: 210, xlabel: "step", ylabel: "loss",
+        width: 900, height: 210, xlabel: "step", ylabel: "loss",
         xMin: 0, xMax: N - 1, yMin: 0, yMax: lossMax
       }));
       mount(c2, NN.chart.line({
@@ -1189,7 +1189,7 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
             points: [[0, S.max_norm], [N - 1, S.max_norm]] },
           marker(gMin, gMax)
         ],
-        width: 700, height: 210, xlabel: "step", ylabel: "‖g‖", logY: true,
+        width: 900, height: 210, xlabel: "step", ylabel: "‖g‖", logY: true,
         xMin: 0, xMax: N - 1
       }));
       mount(c3, NN.chart.line({
@@ -1197,7 +1197,7 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
           { name: "clip ratio", color: C_GRAD, points: pts(r.clip_ratio), dots: false },
           marker(0, 1)
         ],
-        width: 700, height: 170, xlabel: "step", ylabel: "ratio",
+        width: 900, height: 170, xlabel: "step", ylabel: "ratio",
         xMin: 0, xMax: N - 1, yMin: 0, yMax: 1.05
       }));
 
@@ -1330,7 +1330,7 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
           { name: "Adam + L2", color: C_GRAD, points: grab("l2") },
           { name: "AdamW", color: C_LR, points: grab("adamw") }
         ],
-        width: 700, height: 250, xlabel: "step", ylabel: NAMES[i]
+        width: 900, height: 250, xlabel: "step", ylabel: NAMES[i]
       }));
       const p = W.per_param[i];
       NN.$("#decNote").innerHTML = p.dead

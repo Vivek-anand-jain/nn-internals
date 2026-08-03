@@ -303,6 +303,10 @@ def build_schedules():
     wsd_long = [lr_at(t, "wsd", n_steps=longer) for t in range(HORIZON)]
     cos_gap = max(abs(cos_long[t] - cos[t]) for t in range(HORIZON))
     wsd_gap = max(abs(wsd_long[t] - wsd[t]) for t in range(HORIZON))
+    # The window in which BOTH runs are still in their stable phase. Outside
+    # it the short run has started decaying and of course the two differ.
+    stable_until = int(HORIZON * (1 - WSD_DECAY_FRAC))
+    wsd_gap_stable = max(abs(wsd_long[t] - wsd[t]) for t in range(stable_until))
     checks.append({
         "claim": "cosine's shape depends on the total step count; WSD's "
                  "stable phase does not",
@@ -322,6 +326,8 @@ def build_schedules():
             "cosine_short": cos, "cosine_long_truncated": cos_long,
             "wsd_short": wsd, "wsd_long_truncated": wsd_long,
             "cosine_max_gap": cos_gap, "wsd_max_gap": wsd_gap,
+            "stable_window_steps": stable_until,
+            "wsd_max_gap_in_stable": wsd_gap_stable,
             "why": "A cosine schedule is a function of t/N. Change N and "
                    "every step's learning rate changes, including steps you "
                    "have already run. That is why you cannot decide to train "
