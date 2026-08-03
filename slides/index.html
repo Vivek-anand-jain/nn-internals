@@ -112,6 +112,15 @@ body { background: var(--page); }
 .stage .commcard { margin: 10px 0; }
 .stage p { margin: 0 0 .7em; }
 .stage p:last-child { margin-bottom: 0; }
+/* Inside the deck's own rows the `gap` already does the separating, so a
+   child's own vertical margin is pure dead height — and a callout in a
+   two-up row was paying 22px of it. Same for the first/last child of a
+   panel, where the panel's padding is already the margin. */
+.cols > *, .cols3 > *, .cols4 > *, .stack > *, .rowflex > * {
+  margin-top: 0; margin-bottom: 0;
+}
+.stage .panel > :first-child { margin-top: 0; }
+.stage .panel > :last-child { margin-bottom: 0; }
 .stage .ckey {
   font-family: var(--mono); font-size: 14px; color: var(--ink-2);
   display: inline-flex; align-items: center; gap: 8px;

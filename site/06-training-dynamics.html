@@ -804,7 +804,7 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
           m.scheme_name, m.activation, fmt(m.predicted_ratio, 3),
           fmt(m.measured_ratio, 3),
           fmt(100 * m.rel_error, 1) + "%",
-          { cls: m.stable ? "ok" : "bad", html: fmt(m.over_10_layers, 2) + "×" }
+          { cls: m.stable ? "ok" : "bad", html: mult(m.over_10_layers) }
         ] };
       })));
     host.appendChild(el("div", { class: "legendnote", html:
@@ -838,7 +838,7 @@ select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid
       I.schemes.map(function (s) {
         return [s.name, fmt(s.std, 4), fmt(s.predicted_ratio_relu, 3),
                 { cls: Math.abs(Math.log(s.final_over_initial_relu)) < 0.7 ? "ok" : "bad",
-                  html: fmt(s.final_over_initial_relu, 3) + "×" },
+                  html: mult(s.final_over_initial_relu) },
                 { html: '<span class="muted">' + s.why + "</span>" }];
       })));
 
