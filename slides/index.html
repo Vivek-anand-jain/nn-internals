@@ -948,6 +948,113 @@ body { background: var(--page); }
   .stage .spanbar i,
   .stage .shsvg rect.sh, .stage .shsvg text.shl { transition: none !important; }
 }
+
+/* ============================================ part V · mixture of experts
+   Four more deck-local primitives, all additive, nothing above this comment
+   changes. In order: a row of expert cards that light when the router picks
+   them, the expert-parallel dispatch diagram, the capacity grid a dropped
+   token falls out of, and two small text utilities.
+
+   The colour grammar is unchanged and no fifth TENSOR hue appears. An expert
+   IS a weight matrix, so an expert card is blue; a token in flight IS an
+   activation, so every hop in the dispatch diagram is green — which is also
+   the hue NN.gpu.opColor already gives all_to_all. The three states that are
+   NOT tensor classes — local, crossing, dropped — are distinguished by a
+   DASH PATTERN and by a word printed in the cell, never by hue alone. */
+
+/* One card per expert. `.on` = this token routed here; `.top1` = it was the
+   argmax. Both states are written out in the card as well as drawn. */
+.stage .exprow { display: flex; gap: 10px; flex-wrap: wrap; }
+.stage .expbox {
+  flex: 1 1 0; min-width: 118px; box-sizing: border-box;
+  border: 1px solid var(--hairline); background: var(--surface-2);
+  border-radius: 9px; padding: 8px 10px; font-family: var(--mono);
+  transition: border-color .35s, background .35s, box-shadow .35s;
+}
+.stage .expbox .en { font-size: 15px; font-weight: 700; color: var(--ink-2); }
+.stage .expbox .ev { font-size: 20px; font-weight: 700; color: var(--ink-muted); line-height: 1.3; }
+.stage .expbox .es { font-size: 11.5px; color: var(--ink-muted); min-height: 15px; }
+.stage .expbox.on {
+  border-color: var(--weight); background: var(--weight-w);
+}
+.stage .expbox.on .en, .stage .expbox.on .ev { color: var(--weight); }
+.stage .expbox.top1 { box-shadow: inset 0 0 0 1px var(--weight); }
+/* an expert this batch never touched: hollow, hatched, and it says so */
+.stage .expbox.idle {
+  border-style: dashed;
+  background: repeating-linear-gradient(45deg,
+    var(--surface-2), var(--surface-2) 5px,
+    var(--surface-3) 5px, var(--surface-3) 10px);
+}
+
+/* The expert-parallel dispatch diagram: two GPU panels, tokens on top,
+   experts underneath, one path per (token, expert) pair. A path that stays
+   on its own GPU is DASHED and labelled `local`; one that crosses is solid
+   and labelled with the GPU it lands on. */
+.stage .a2a { display: block; width: 100%; }
+.stage .a2a text { font-family: var(--mono); fill: var(--ink-2); }
+.stage .a2a text.gpul { font-size: 12px; fill: var(--ink-muted); }
+.stage .a2a text.hopl { font-size: 10.5px; }
+.stage .a2a .hop {
+  fill: none; stroke: var(--activation); stroke-width: 2.2;
+  stroke-linecap: round; opacity: 0; transition: opacity .3s;
+}
+.stage .a2a .hop.shown { opacity: .9; }
+.stage .a2a .hop.local { stroke-dasharray: 3 5; opacity: 0; }
+.stage .a2a .hop.local.shown { opacity: .62; }
+.stage .a2a .hop.live { stroke-width: 3.4; opacity: 1; }
+.stage .a2a .hop.cross.live {
+  stroke-dasharray: 8 7; animation: a2adash .9s linear infinite;
+}
+@keyframes a2adash { to { stroke-dashoffset: -30; } }
+.stage .a2a .nb { stroke-width: 1.5; transition: fill .3s, stroke .3s; }
+.thumb .stage .a2a .hop.cross.live, .thumb .a2a .hop.cross.live { animation: none !important; }
+
+/* Capacity: one row per expert, one column per slot, plus the slots that
+   overflowed. A dropped slot is hatched, dashed and carries the word. */
+.stage .capgrid { display: grid; gap: 5px; font-family: var(--mono); }
+.stage .capgrid .cl {
+  font-size: 12px; color: var(--ink-muted);
+  display: flex; align-items: center; justify-content: flex-end; padding-right: 7px;
+}
+.stage .capcell {
+  height: 32px; border-radius: 5px; font-size: 12.5px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  border: 1px solid var(--hairline-2); background: var(--surface-3);
+  color: var(--ink-muted); line-height: 1.15;
+}
+.stage .capcell.kept {
+  border-color: var(--activation); background: var(--activation-w); color: var(--ink);
+}
+.stage .capcell.dropped {
+  border-style: dashed; border-color: var(--critical); color: var(--critical);
+  background: repeating-linear-gradient(45deg,
+    var(--surface-3), var(--surface-3) 4px,
+    var(--surface-2) 4px, var(--surface-2) 8px);
+}
+.stage .capcell b { font-weight: 700; }
+.stage .capcell i { font-style: normal; font-size: 9.5px; letter-spacing: .06em; }
+
+/* A pill that says a figure was not simulated. Used once, in part V, so the
+   offloading slide cannot be mistaken for a measurement. */
+.stage .pill.model {
+  border-style: dashed; color: var(--ink-muted);
+  background: var(--surface-3);
+}
+
+/* One row that has to hold three matrices totalling 16 columns — the two
+   expert projections and the gate. At the deck's default cell size that is
+   about 60px too wide and the row wraps, which costs 260px of height and
+   drops the slide to 0.73. Nothing is removed and no value is rounded: the
+   cells are simply typeset one step down, and only inside this opt-in
+   wrapper. */
+.stage .cellsm .cell { font-size: 13.5px; min-width: 46px; padding: 4px 5px; }
+.stage .cellsm .tensor-body { padding: 4px; }
+
+/* The closing slide links all of the site's chapters; at the default pill
+   size that is six wrapped rows. Deck-local, used on that one list. */
+.stage .rowflex.pglist { gap: 7px; }
+.stage .pglist .pill { font-size: 13px; padding: 4px 10px; gap: 6px; }
 </style>
 </head>
 <body>
@@ -1016,7 +1123,9 @@ body { background: var(--page); }
 <script src="../assets/data/infer.js"></script>
 <script src="../assets/data/serving.js"></script>
 <script src="../assets/data/quant.js"></script>
+<script src="../assets/data/moe.js"></script>
 <script src="../assets/js/ui.js"></script>
+<script src="../assets/js/viz.js"></script>
 <script>
 (function () {
 "use strict";
@@ -1040,6 +1149,11 @@ function n_(v, cls, dig)   { return '<span class="num' + (cls ? " v-" + cls : ""
 function nS_(v, cls, dig)  { return '<span class="num' + (cls ? " v-" + cls : "") + '">' + fS(v, dig) + "</span>"; }
 function tn(o)             { return NN.tensor(o); }
 function gap(px)           { return el("div", { style: { height: px + "px" } }); }
+/* `.phaselabel` is display:flex, so a caption written as "text <span>x</span>
+   text" becomes THREE flex items and the whitespace between them is dropped —
+   rendering things like "INT2 ·4levels". Everything goes inside one element
+   instead. Lives here, at the top, because part IV and part V both need it. */
+function plab(e, html)     { e.innerHTML = "<span>" + html + "</span>"; }
 /* Charts get a written key: colour never carries meaning on its own. */
 function chartKey(items) {
   return d("rowflex", items.map(function (it) {
@@ -1443,6 +1557,12 @@ const TOY_SRV  = (window.SERVING ? window.SERVING.workload.n : 16) +
 const TOY_QNT  = "real tf2.json weights on integer grids · " +
                  (window.QUANT ? window.QUANT.spec.proof.empirical.draws : 0) +
                  " speculative rollouts against the exact chain";
+
+const _MOMETA = (window.MOE && window.MOE.meta) || {};
+const TOY_MOE  = _MOMETA.n_tokens + " tokens · " + _MOMETA.n_experts +
+                 " experts, top-" + _MOMETA.top_k + " · d " + _MOMETA.d_model +
+                 " × d_ff " + _MOMETA.d_ff + " · EP " + _MOMETA.ep_degree +
+                 " on " + _MOMETA.ep_degree + " ranks · every hop printable";
 
 
 const SECTIONS = [
@@ -1870,7 +1990,85 @@ const SECTIONS = [
       "pools and pay to move the cache between them. Finish honestly: say " +
       "which numbers in this part were measured, which were modelled, and " +
       "which were assumed, and name the real systems people should go and " +
-      "read next." }
+      "read next." },
+
+  /* ------------------------------------------------------------- Part V */
+  { id: "part5", kind: "part", part: 5, title: "Mixture of Experts", cls: "accent",
+    q: "Every part so far assumed every weight is read for every token. What if it is not?",
+    toy: TOY_MOE, toyNew: true,
+    say: "Part five, and it is the only part of this deck that changes the " +
+      "LAYER rather than the setting. Everything up to here — the four " +
+      "tensor classes, the parallel strategies, the whole of the inference " +
+      "argument — rested on one assumption nobody stated: that a forward " +
+      "pass reads every weight in the model for every token. A " +
+      "mixture-of-experts layer breaks it on purpose. It holds " +
+      (_MOMETA.n_experts || 4) + " experts and sends each token to " +
+      (_MOMETA.top_k || 2) + " of them, so parameter count and FLOPs stop " +
+      "being the same question. New object, and the last one in the deck: " +
+      (_MOMETA.n_tokens || 6) + " tokens, " + (_MOMETA.n_experts || 4) +
+      " experts, top-" + (_MOMETA.top_k || 2) + ", d " +
+      (_MOMETA.d_model || 4) + ", expert parallelism over " +
+      (_MOMETA.ep_degree || 2) + " GPUs — small enough that the entire " +
+      "routing table, every all-to-all hop and every dropped token fit on " +
+      "one slide each. Set one expectation before you start: the deck taught " +
+      "eight collectives back in part three and has used seven of them. The " +
+      "eighth is in this part, and there is nothing in a dense model that " +
+      "needs it." },
+
+  { id: "moe", part: 5, title: "Mixture of Experts", cls: "weight",
+    q: "If only k of N experts run per token, what are the other N − k for?",
+    toy: TOY_MOE,
+    say: "The mechanism, on real numbers. Three things to land. One: " +
+      "parameters and FLOPs come apart, and the size of that gap on a real " +
+      "model is the headline — DeepSeek-V3 holds " +
+      ((window.MOE && f(window.MOE.accounting.real[1].mlp_params_total / 1e9, 1)) || "687.7") +
+      "B MLP parameters and uses " +
+      ((window.MOE && f(window.MOE.accounting.real[1].mlp_params_active / 1e9, 1)) || "24.2") +
+      "B of them per token. Two: the router is four lines of arithmetic — " +
+      "logits, softmax, top-k, renormalise — and the renormalisation is not " +
+      "cosmetic, so give it its own beat. Three: the implementation trick " +
+      "that makes the whole idea viable is GROUPING, and the run proves it " +
+      "changes nothing about what is computed rather than asserting it. " +
+      "Finish on the bill, which arrives as memory: every expert has to be " +
+      "resident even if this batch never touches it." },
+
+  { id: "moetrain", part: 5, title: "MoE Training", cls: "gradient",
+    q: "The experts do not fit on one GPU. How do the tokens reach them?",
+    toy: TOY_MOE,
+    say: "The section the eighth collective lives in, so say that out loud on " +
+      "the first slide and again on the all-to-all one. Tokens arrive " +
+      "sharded by sequence and the experts are sharded across GPUs, so every " +
+      "token has to travel to whichever rank holds its expert and its result " +
+      "has to come back: that is two all-to-alls per layer in forward and " +
+      "two more in backward. The slide people should argue with is the " +
+      "data-dependent one — unlike tensor parallelism's all-reduce, the " +
+      "payload size here depends on how the router happened to split this " +
+      "batch, so the buffers cannot be sized in advance. That is what makes " +
+      "MoE communication genuinely hard and it contrasts directly with " +
+      "everything in part three. Then load balancing, where the toy shows a " +
+      (window.MOE ? f(window.MOE.load_balance.imbalance_ratio, 0) : "2") +
+      "× imbalance out of six tokens, and the auxiliary loss, whose trick is " +
+      "worth slowing down for: only the soft term carries gradient, which is " +
+      "how a discrete routing decision gets pushed toward balance without " +
+      "anyone differentiating through an argmax." },
+
+  { id: "moeinfer", part: 5, title: "MoE Inference", cls: "activation",
+    q: "In decode the batch is small and it scatters. What does that do to intensity?",
+    toy: TOY_MOE, toyBack: true,
+    say: "Part four's one number, recomputed for a model whose experts see a " +
+      "handful of tokens each. In training a large batch hits every expert " +
+      "and grouping gives real GEMMs; in decode the batch scatters, each " +
+      "expert may see one token, and you still read its entire weight " +
+      "matrix. At batch 1 the arithmetic intensity of a DeepSeek-shaped MoE " +
+      "layer is exactly 1.0 FLOP per byte. Not approximately — exactly, and " +
+      "the identity behind that is worth showing rather than hiding: an " +
+      "expert's arithmetic intensity IS the number of tokens it received. " +
+      "Two honesty clauses to keep flagging. The offloading and " +
+      "hot-expert-caching slide is not simulated and is badged as such. And " +
+      "the intensity model ignores the expert-parallel all-to-all, which in " +
+      "decode is a per-token latency cost and is often the real bottleneck " +
+      "rather than the weight reads — that caveat ships with the data and it " +
+      "goes on the slide verbatim." }
 ];
 
 let SEP_END = 0;
@@ -21141,10 +21339,8 @@ function iUs(s)  { return f(s * 1e6, Math.abs(s) * 1e6 < 10 ? 2 : 1) + " µs"; }
 function iPc(x, dg) { return f(x * 100, dg === undefined ? 1 : dg) + "%"; }
 function iX(v, dg)  { return f(v, dg === undefined ? 2 : dg) + "×"; }
 function iTok(s) { return f(1 / s, 1) + " tok/s"; }
-/* `.phaselabel` is display:flex, so a caption written as "text <span>x</span>
-   text" becomes THREE flex items and the whitespace between them is dropped.
-   Everything goes inside one element instead. */
-function plab(e, html) { e.innerHTML = "<span>" + html + "</span>"; }
+/* plab() — the .phaselabel flex trap — is hoisted to the small builders at
+   the top of the file, because part V needs it too. */
 
 /* ---------------------------------------------------- the canonical rows */
 const IMETA = INF.meta;
@@ -26686,57 +26882,3324 @@ S({
 
 }  /* end if (INF && SRV && QNT) — part IV */
 
-/* --------------------------------------------------------------- close */
+/* ======================================================================== */
+/*  PART V · MIXTURE OF EXPERTS                                             */
+/*    window.MOE   assets/data/moe.js   code/moe_toy.py                     */
+/*                                                                          */
+/*  Every part so far rested on an assumption nobody stated: a forward pass */
+/*  reads every weight in the model for every token. An MoE layer breaks it */
+/*  on purpose -- N experts held, k run -- so parameters and FLOPs stop     */
+/*  being the same question. Three consequences, one per section: the layer */
+/*  itself, the all-to-all that expert parallelism forces (the one          */
+/*  collective the deck taught and never used), and what a batch that       */
+/*  SCATTERS does to part IV's arithmetic intensity.                        */
+/*                                                                          */
+/*  Part III's helpers live inside `if (PA)` and part IV's inside           */
+/*  `if (INF && SRV && QNT)`, so this part reads both payloads back out of  */
+/*  window.* rather than reaching into scopes it is not in -- the same rule */
+/*  part IV already follows for window.PARALLEL. Same objects, same         */
+/*  numbers, no duplicated FIGURES.                                         */
+/* ======================================================================== */
+
+const MOE = window.MOE || null;
+if (!MOE) console.error("nn-internals slides: moe.js did not load. " +
+                        "Run `python3 code/moe_toy.py` to regenerate it.");
+
+if (MOE) {
+
+const MM   = MOE.meta;
+const MXIN = MOE.input;
+const MRT  = MOE.routing;
+const MPE  = MOE.per_expert;
+const MEQ  = MOE.equivalence;
+const MEP  = MOE.expert_parallel;
+const MLB  = MOE.load_balance;
+const MAC  = MOE.accounting;
+const MIF  = MOE.inference;
+
+const NE  = MM.n_experts;     /* 4 experts                       */
+const KK  = MM.top_k;         /* top-2                           */
+const NTK = MM.n_tokens;      /* 6 tokens                        */
+const DMO = MM.d_model;
+const DFO = MM.d_ff;
+const EPD = MM.ep_degree;
+const MTOK = MM.tokens;
+const MTOY = MAC.toy;
+const MREAL = MAC.real;
+const MBIG = MREAL.filter(function (r) { return r.n_experts > 1; })
+                  .sort(function (a, b) { return b.sparsity - a.sparsity; })[0];
+const MMIX = MREAL.filter(function (r) { return r.n_experts > 1; })
+                  .sort(function (a, b) { return a.sparsity - b.sparsity; })[0];
+const MDNS = MREAL.filter(function (r) { return r.n_experts === 1; })[0];
+
+/* payloads owned by other parts, read back out of window.* */
+const VINF = window.INFER || null;
+const VPA  = window.PARALLEL || null;
+const VRL  = VINF ? VINF.roofline.filter(function (r) {
+  return r.gpu === GPUD.name; })[0] : null;
+const VRIDGE = VRL ? VRL.ridge_flops_per_byte : null;
+const VGPU   = VINF ? VINF.gpus.filter(function (g) {
+  return g.name === GPUD.name; })[0] : null;
+const VBAT   = VINF ? VINF.batching : null;             /* the dense curve  */
+const VDROWS = VBAT ? VBAT.by_seq[0].rows : null;
+const VCOLL  = VPA ? VPA.collectives : null;
+const VA2A   = VCOLL ? VCOLL.filter(function (c) {
+  return c.op === "all_to_all"; })[0] : null;
+const VAR    = VCOLL ? VCOLL.filter(function (c) {
+  return c.op === "all_reduce"; })[0] : null;
+const VPCIE  = VPA ? VPA.interconnects.links.filter(function (l) {
+  return l.name.indexOf("PCIe") >= 0; })[0] : null;
+
+/* ------------------------------------------------------ shared shorthand */
+function vPc(x, dg) { return f(x * 100, dg === undefined ? 1 : dg) + "%"; }
+function vX(v, dg)  { return f(v, dg === undefined ? 2 : dg) + "×"; }
+function eN(e)      { return "E" + e; }
+/* one NVSwitch domain. A STATED assumption, and the same one part IV makes. */
+const VPER_NODE = 8;
+/** decode intensity of the dense reference model at this batch, or null */
+function vDenseAt(b) {
+  if (!VDROWS) return null;
+  const r = VDROWS.filter(function (x) { return x.batch === b; })[0];
+  return r ? r.intensity : null;
+}
+/* the batch at which the gap between the two curves is widest, derived
+   rather than chosen, over the batch sizes both payloads happen to share */
+const VCMP = MIF.rows.filter(function (r) { return vDenseAt(r.batch) !== null; });
+const VWORST = VCMP.length ? VCMP.reduce(function (a, b) {
+  return vDenseAt(b.batch) / b.intensity > vDenseAt(a.batch) / a.intensity ? b : a;
+}, VCMP[0]) : null;
+const VGAP = VWORST ? vDenseAt(VWORST.batch) / VWORST.intensity : null;
+/* the two all_to_alls the generator lists per forward MoE layer, and the
+   backward pass mirrors both */
+const VA2A_FWD = MEP.collectives_per_layer.length;
+const VA2A_STEP = 2 * VA2A_FWD;
+/**
+ * A shard bar that can own SEVERAL slices. Part III has the identical helper
+ * inside its own `if (PA)` block, which this part is not in; same markup and
+ * the same CSS classes, so a sharded expert list and a sharded token range
+ * are drawn by the one grammar the deck already uses.
+ */
+/* the site chapter that caught the N/k bug, looked up rather than typed */
+const VPAGE33 = (NN.PAGES.filter(function (x) { return x.id === "moetrain"; })[0]
+                 || { n: "33" }).n;
+function vShard(o) {
+  const bar = el("div", { class: "shardbar" });
+  for (let i = 0; i < o.parts; i++) {
+    const mine = o.own.indexOf(i) >= 0;
+    bar.appendChild(el("div", {
+      class: "shardseg" + (mine ? " mine" : ""),
+      style: { background: mine ? (o.color || "var(--weight)") : "var(--surface-3)" },
+      title: o.name + " " + i + (mine ? " — held on this GPU" : " — held elsewhere")
+    }));
+  }
+  return el("div", { class: "shardrow" }, [
+    el("span", { class: "shardname" }, o.name), bar
+  ]);
+}
+function tN(t)      { return "t" + t + " “" + MTOK[t] + "”"; }
+function tS(t)      { return "t" + t; }
+/* a token's row of the routing table, and the slot an expert sits in it */
+function rowOf(t)   { return MRT[t]; }
+function slotOf(t, e) { return MRT[t].chosen.indexOf(e); }
+function wOf(t, e)  { const k = slotOf(t, e); return k < 0 ? 0 : MRT[t].weights[k]; }
+
+/* Arithmetic the payload does not ship, derived from what it does. AGENTS.md
+   allows deriving in JS; it forbids typing a number. */
+function vmm(A, B) {
+  return A.map(function (r) {
+    return B[0].map(function (_, j) {
+      let s = 0; for (let t = 0; t < B.length; t++) s += r[t] * B[t][j];
+      return s;
+    });
+  });
+}
+function vgelu(x) {
+  const c = Math.sqrt(2 / Math.PI);
+  return 0.5 * x * (1 + Math.tanh(c * (x + 0.044715 * x * x * x)));
+}
+function vmap(M, fn) { return M.map(function (r) { return r.map(fn); }); }
+function vmax(A, B) {
+  let m = 0;
+  for (let i = 0; i < A.length; i++) for (let j = 0; j < A[0].length; j++) {
+    m = Math.max(m, Math.abs(A[i][j] - B[i][j]));
+  }
+  return m;
+}
+
+/* ============================================================ primitives ==
+   Four deck-local drawings. Each returns an element with a paint/show method
+   so a playbar can drive it without rebuilding the DOM -- the auto-fit scale
+   is measured once, at build time, from the element's natural height. */
+
+/** One card per expert, lit when the router picks it. */
+function expRow(o) {
+  o = o || {};
+  const cards = [];
+  const row = d("exprow", []);
+  for (let e = 0; e < NE; e++) {
+    const nm = h("en", eN(e));
+    const vv = h("ev", "—");
+    const ss = h("es", o.sub ? o.sub(e) : "");
+    const b = d("expbox", [nm, vv, ss]);
+    b.title = "expert " + e + " — W_up " + DMO + "×" + DFO +
+              ", W_down " + DFO + "×" + DMO;
+    row.appendChild(b); cards.push({ box: b, v: vv, s: ss });
+  }
+  /** fn(e) -> {on, top1, idle, v, s} */
+  row.paint = function (fn) {
+    for (let e = 0; e < NE; e++) {
+      const st = fn(e) || {};
+      cards[e].box.className = "expbox" + (st.on ? " on" : "") +
+        (st.top1 ? " top1" : "") + (st.idle ? " idle" : "");
+      cards[e].v.textContent = st.v === undefined ? "—" : st.v;
+      cards[e].s.textContent = st.s || "";
+    }
+  };
+  return row;
+}
+
+/**
+ * gather -> per-expert GEMM -> scatter, as one picture that changes.
+ *
+ * Top row: the six tokens as they arrive. Middle row: the four expert
+ * groups. Bottom row: the six blended outputs. The edges are the routing
+ * table, so the ragged group sizes are visible rather than described.
+ */
+function moeFlow() {
+  const Wd = 1060, Ht = 296;
+  const TY = 44, GY = 148, OY = 256;
+  /* the left gutter holds the three row labels, so the columns start inside it */
+  const tx = function (t) { return 116 + t * ((Wd - 232) / (NTK - 1)); };
+  const ex = function (e) { return 200 + e * ((Wd - 400) / (NE - 1)); };
+  const s = SV("svg", { viewBox: "0 0 " + Wd + " " + Ht, width: "100%",
+    height: Ht, class: "a2a", role: "img",
+    "aria-label": "tokens gathered into expert groups and scattered back" });
+
+  const gath = SV("g", {}), scat = SV("g", {});
+  s.appendChild(gath); s.appendChild(scat);
+  const gpaths = [], spaths = [];
+  for (let t = 0; t < NTK; t++) {
+    MRT[t].chosen.forEach(function (e) {
+      const a = tx(t), b = ex(e);
+      gpaths.push({ t: t, e: e, el: gath.appendChild(SV("path", {
+        class: "hop", d: "M" + a + " " + (TY + 17) + " C" + a + " " + (TY + 68) +
+               ", " + b + " " + (GY - 62) + ", " + b + " " + (GY - 22) })) });
+      spaths.push({ t: t, e: e, el: scat.appendChild(SV("path", {
+        class: "hop", d: "M" + b + " " + (GY + 22) + " C" + b + " " + (GY + 70) +
+               ", " + a + " " + (OY - 60) + ", " + a + " " + (OY - 17) })) });
+    });
+  }
+  function box(x, y, w, hgt, cls) {
+    return s.appendChild(SV("rect", { x: x - w / 2, y: y - hgt / 2, width: w,
+      height: hgt, rx: 6, class: "nb", fill: "var(--surface-2)",
+      stroke: "var(--hairline)" }));
+  }
+  function txt(x, y, str, size, fill, weight) {
+    const t = SV("text", { x: x, y: y, "text-anchor": "middle",
+      "font-size": size, fill: fill || "var(--ink-2)",
+      "font-weight": weight || 400 });
+    t.textContent = str; s.appendChild(t); return t;
+  }
+  const tBox = [], eBox = [], eLab = [], oBox = [];
+  for (let t = 0; t < NTK; t++) {
+    tBox.push(box(tx(t), TY, 104, 34));
+    txt(tx(t), TY + 5, tS(t) + " “" + MTOK[t] + "”", 13, "var(--activation)");
+  }
+  for (let e = 0; e < NE; e++) {
+    eBox.push(box(ex(e), GY, 178, 44));
+    txt(ex(e), GY - 4, eN(e), 14, "var(--weight)", 700);
+    eLab.push(txt(ex(e), GY + 13, "", 11.5, "var(--ink-muted)"));
+  }
+  for (let t = 0; t < NTK; t++) {
+    oBox.push(box(tx(t), OY, 104, 34));
+    txt(tx(t), OY + 5, "y" + t, 13, "var(--activation)");
+  }
+  function rowLab(y, str) {
+    const t = SV("text", { x: 6, y: y, "text-anchor": "start", "font-size": 11,
+      fill: "var(--ink-muted)" });
+    t.textContent = str; s.appendChild(t);
+  }
+  rowLab(TY + 5, "tokens");
+  rowLab(GY + 4, "experts");
+  rowLab(OY + 5, "outputs");
+
+  /** phase 0 tokens · 1 gather · 2 GEMM · 3 scatter */
+  s.phase = function (k) {
+    gpaths.forEach(function (p) {
+      p.el.setAttribute("class", "hop" + (k >= 1 ? " shown" : "") +
+                                 (k === 1 ? " cross live" : ""));
+    });
+    spaths.forEach(function (p) {
+      p.el.setAttribute("class", "hop" + (k >= 3 ? " shown cross live" : ""));
+    });
+    for (let e = 0; e < NE; e++) {
+      const n = MPE[e].n_tokens;
+      eBox[e].setAttribute("fill", k >= 1 ? "var(--weight-w)" : "var(--surface-2)");
+      eBox[e].setAttribute("stroke", k >= 1 ? "var(--weight)" : "var(--hairline)");
+      eLab[e].textContent =
+        k === 0 ? "idle" :
+        k === 1 ? n + " token" + (n === 1 ? "" : "s") + " gathered" :
+        k >= 2  ? "ONE GEMM · " + n + "×" + DMO + " @ " + DMO + "×" + DFO : "";
+    }
+    oBox.forEach(function (b) {
+      b.setAttribute("fill", k >= 3 ? "var(--activation-w)" : "var(--surface-2)");
+      b.setAttribute("stroke", k >= 3 ? "var(--activation)" : "var(--hairline)");
+    });
+  };
+  s.phase(0);
+  return s;
+}
+
+/**
+ * The expert-parallel dispatch picture. Two GPU panels; tokens on top of
+ * their HOME rank, experts underneath their OWNER. One path per
+ * (token, expert) pair, revealed a hop at a time.
+ *
+ * A hop that stays on its own GPU is DASHED and the caption says `local`;
+ * one that crosses is solid, animated, and the caption names the rank it
+ * lands on. Never colour alone.
+ */
+function a2aSVG(o) {
+  const rev = !!(o && o.combine);
+  const PW = 494, GAPX = 46, X0 = 18;
+  const Wd = X0 * 2 + EPD * PW + (EPD - 1) * GAPX;
+  const Ht = 300;
+  const perG = NTK / EPD, perE = NE / EPD;
+  const px  = function (g) { return X0 + g * (PW + GAPX); };
+  const tx  = function (t) {
+    const g = MEP.home[String(t)];
+    return px(g) + PW / 2 + ((t - g * perG) - (perG - 1) / 2) * 138;
+  };
+  const ex  = function (e) {
+    const g = MEP.owner[String(e)];
+    return px(g) + PW / 2 + ((e - g * perE) - (perE - 1) / 2) * 196;
+  };
+  const TY = 108, EY = 224;
+  const s = SV("svg", { viewBox: "0 0 " + Wd + " " + Ht, width: "100%",
+    height: Ht, class: "a2a", role: "img",
+    "aria-label": (rev ? "combine" : "dispatch") +
+      ": every token-expert pair travelling between " + EPD + " GPUs" });
+
+  for (let g = 0; g < EPD; g++) {
+    s.appendChild(SV("rect", { x: px(g), y: 46, width: PW, height: 232, rx: 12,
+      fill: "var(--surface-1)", stroke: "var(--hairline)", "stroke-width": 1.5 }));
+    const gp = MEP.gpus[g];
+    const t1 = SV("text", { x: px(g) + PW / 2, y: 34, "text-anchor": "middle",
+      class: "gpul" });
+    t1.textContent = "GPU " + g + " · holds " +
+      gp.experts.map(eN).join(", ") + " · home tokens " +
+      gp.home_tokens.map(tS).join(", ");
+    s.appendChild(t1);
+    const t2 = SV("text", { x: px(g) + PW / 2, y: 268, "text-anchor": "middle",
+      class: "gpul" });
+    t2.textContent = gp.expert_params + " expert parameters resident";
+    s.appendChild(t2);
+  }
+
+  const hops = [];
+  MEP.detail.forEach(function (hp) {
+    const a = tx(hp.token), b = ex(hp.expert);
+    const dPath = rev
+      ? "M" + b + " " + (EY - 24) + " C" + b + " " + (EY - 76) + ", " +
+        a + " " + (TY + 74) + ", " + a + " " + (TY + 20)
+      : "M" + a + " " + (TY + 20) + " C" + a + " " + (TY + 74) + ", " +
+        b + " " + (EY - 76) + ", " + b + " " + (EY - 24);
+    const p = SV("path", { class: "hop", d: dPath });
+    const ttl = SV("title", {});
+    ttl.textContent = tS(hp.token) + " → " + eN(hp.expert) + " · GPU " +
+      (rev ? hp.to_gpu + " → GPU " + hp.from_gpu : hp.from_gpu + " → GPU " + hp.to_gpu) +
+      (hp.local ? " · local, never leaves the rank" : " · crosses a GPU boundary");
+    p.appendChild(ttl);
+    s.appendChild(p);
+    hops.push({ hp: hp, el: p });
+  });
+
+  function node(x, y, w, hgt) {
+    return s.appendChild(SV("rect", { x: x - w / 2, y: y - hgt / 2, width: w,
+      height: hgt, rx: 6, class: "nb", fill: "var(--surface-2)",
+      stroke: "var(--hairline)" }));
+  }
+  function lab(x, y, str, size, fill, weight) {
+    const t = SV("text", { x: x, y: y, "text-anchor": "middle",
+      "font-size": size, fill: fill || "var(--ink-2)",
+      "font-weight": weight || 400 });
+    t.textContent = str; s.appendChild(t); return t;
+  }
+  const tB = [], eB = [], eC = [];
+  for (let t = 0; t < NTK; t++) {
+    tB.push(node(tx(t), TY, 108, 36));
+    lab(tx(t), TY + 5, tS(t) + " “" + MTOK[t] + "”", 13, "var(--activation)");
+  }
+  for (let e = 0; e < NE; e++) {
+    eB.push(node(ex(e), EY, 176, 46));
+    lab(ex(e), EY - 3, eN(e), 14, "var(--weight)", 700);
+    eC.push(lab(ex(e), EY + 14, "0 received", 11, "var(--ink-muted)"));
+  }
+
+  /** show(k): k hops revealed, the k-th one live. k = 0 shows none. */
+  s.show = function (k) {
+    const n = NN.clamp(k, 0, hops.length);
+    const got = [];
+    for (let e = 0; e < NE; e++) got.push(0);
+    hops.forEach(function (o2, i) {
+      const on = i < n, live = (i === n - 1);
+      o2.el.setAttribute("class", "hop" + (o2.hp.local ? " local" : " cross") +
+        (on ? " shown" : "") + (on && live ? " live" : ""));
+      if (on) got[o2.hp.expert]++;
+    });
+    for (let e = 0; e < NE; e++) {
+      eC[e].textContent = got[e] + " received";
+      eB[e].setAttribute("fill", got[e] ? "var(--weight-w)" : "var(--surface-2)");
+      eB[e].setAttribute("stroke", got[e] ? "var(--weight)" : "var(--hairline)");
+    }
+    for (let t = 0; t < NTK; t++) {
+      const sent = hops.filter(function (o2, i) {
+        return o2.hp.token === t && i < n; }).length;
+      tB[t].setAttribute("fill", sent ? "var(--activation-w)" : "var(--surface-2)");
+      tB[t].setAttribute("stroke", sent ? "var(--activation)" : "var(--hairline)");
+    }
+  };
+  s.hops = hops;
+  s.show(0);
+  return s;
+}
+
+/** The capacity grid: one row per expert, one column per slot. */
+function capGrid() {
+  const cap  = MLB.capacity_per_expert;
+  const cols = MLB.max_load;
+  const g = d("capgrid", []);
+  g.style.gridTemplateColumns = "84px repeat(" + cols + ", 1fr)";
+  g.appendChild(h("cl", ""));
+  for (let c = 0; c < cols; c++) {
+    g.appendChild(el("div", { class: "cl",
+      style: { justifyContent: "center", paddingRight: "0" } },
+      "slot " + (c + 1) + (c === cap - 1 ? " ⟂" : "")));
+  }
+  const cells = [];
+  for (let e = 0; e < NE; e++) {
+    g.appendChild(h("cl", eN(e) + " · " + MLB.counts[e]));
+    cells.push([]);
+    for (let c = 0; c < cols; c++) {
+      const cell = d("capcell", []);
+      g.appendChild(cell); cells[e].push(cell);
+    }
+  }
+  /** reveal(k): 0 = arrivals only, 1 = capacity applied */
+  g.reveal = function (k) {
+    for (let e = 0; e < NE; e++) for (let c = 0; c < cols; c++) {
+      const cell = cells[e][c];
+      const item = MPE[e].tokens[c];
+      cell.innerHTML = "";
+      if (item === undefined) {
+        cell.className = "capcell";
+        cell.style.visibility = "hidden";
+        cell.title = "";
+        continue;
+      }
+      cell.style.visibility = "visible";
+      const over = k >= 1 && c >= cap;
+      cell.className = "capcell" + (k === 0 ? "" : over ? " dropped" : " kept");
+      cell.appendChild(el("b", {}, tS(item)));
+      cell.appendChild(el("i", {},
+        over ? "dropped" : slotOf(item, e) === 0 ? "top-1" : "top-" + KK));
+      cell.title = tS(item) + " → " + eN(e) +
+        (over ? " — beyond capacity " + cap + ", dropped"
+              : " — kept, gate " + f(wOf(item, e), 4));
+    }
+  };
+  g.reveal(0);
+  return g;
+}
+
+SEP("part5");
+SEP("moe");
+
+/* ---------------------------------------------- V1. parameters vs FLOPs */
 S({
-  chapter: "Close", plain: "Four things to remember",
-  notes: "Close on the four claims the deck actually proved, each on a model " +
-    "small enough to verify by hand. Then point people at the interactive " +
-    "pages, where they can step through the same trace themselves and poke at " +
-    "NN.T, NN.P and window.TFORMER in the console. Take questions on the " +
-    "memory curve slide or the ZeRO ladder — press G and jump back to either.",
+  chapter: "MoE · the decoupling",
+  plain: "Parameters and FLOPs stop being the same question",
+  notes: "Open by naming the assumption the whole deck has been resting on " +
+    "and never stated: a forward pass reads every weight in the model for " +
+    "every token. Parameter count and compute per token have therefore been " +
+    "the same number all deck, up to a factor of two. A mixture-of-experts " +
+    "layer breaks that on purpose. It holds " + NE + " expert MLPs and sends " +
+    "each token to " + KK + " of them, chosen at run time. So the layer holds " +
+    MTOY.params_total + " parameters and touches " +
+    MTOY.params_active_per_token + " of them per token — " +
+    f(MTOY.sparsity_ratio, 3) + "× more capacity than compute, on a toy this " +
+    "small. Say clearly what does and does not change: capacity grows with N, " +
+    "compute grows with k, and the bill arrives as MEMORY, because every " +
+    "expert has to be resident somewhere whether or not this batch touches " +
+    "it. Note the honest wrinkle on the right — at top-" + KK +
+    " this toy does MORE arithmetic per token than a single dense MLP of the " +
+    "same width, not less. The saving is never in the FLOPs. It is that you " +
+    "can grow N without growing them.",
+  build: function () {
+    return [
+      kicker("Part V · <b>the assumption that breaks</b>"),
+      title("A dense layer uses every weight. An MoE uses <span class='v-weight'>" +
+            KK + " of " + NE + "</span>.", true),
+      frag(d("cols", [
+        d("panel w", [ph("dense MLP · one expert, always"),
+          h("say", "Every token goes through the same <span class='mono'>" +
+            DMO + "×" + DFO + "</span> up-projection and the same " +
+            "<span class='mono'>" + DFO + "×" + DMO + "</span> " +
+            "down-projection. <b>" + MTOY.dense_equivalent + "</b> parameters " +
+            "held, <b>" + MTOY.dense_equivalent + "</b> used. Parameter count " +
+            "and work per token are the same question.")]),
+        d("panel a", [ph("MoE layer · " + NE + " experts, top-" + KK),
+          h("say", "A gate scores the " + NE + " experts for this token and " +
+            "the top " + KK + " run. <b>" + MTOY.params_total + "</b> " +
+            "parameters held (" + NE + " × " + MTOY.params_per_expert +
+            " + " + MTOY.gate_params + " for the gate), <b>" +
+            MTOY.params_active_per_token + "</b> touched. The two numbers " +
+            "have come apart.")])
+      ]), "f-pop"),
+      frag(NN.tiles([
+        { k: "parameters held", v: String(MTOY.params_total),
+          s: NE + " experts + gate", cls: "weight" },
+        { k: "touched per token", v: String(MTOY.params_active_per_token),
+          s: KK + " experts + gate", cls: "activation" },
+        { k: "sparsity", v: vX(MTOY.sparsity_ratio, 3), s: "held ÷ touched" },
+        { k: "FLOPs per token", v: String(MTOY.flops_per_token_moe),
+          s: "2 × active · dense would be " + MTOY.flops_per_token_dense,
+          cls: "activation" }
+      ]), "f-fade"),
+      frag(d("cols wide-l", [
+        NN.callout("key", "Capacity grows with N. Compute grows with k.",
+          MAC.why),
+        NN.callout("warn", "On a toy this small the FLOPs go UP, not down",
+          "Top-" + KK + " over " + NE + " experts runs " + KK + " expert MLPs " +
+          "per token, so this layer does <span class='mono'>" +
+          MTOY.flops_per_token_moe + "</span> FLOP where one dense MLP of the " +
+          "same width does <span class='mono'>" + MTOY.flops_per_token_dense +
+          "</span>. That is the honest reading and it stays true at scale: " +
+          "MoE never makes a token cheaper than the dense layer it replaces. " +
+          "It makes the <em>parameter count</em> free to grow without the " +
+          "per-token cost following it, which is a different and much more " +
+          "useful trade.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* -------------------------------------------------- V2. the real numbers */
+S({
+  chapter: "MoE · at scale",
+  plain: MBIG.name + ": " + f(MBIG.mlp_params_total / 1e9, 1) + "B MLP parameters, " +
+         f(MBIG.mlp_params_active / 1e9, 1) + "B active — " + vX(MBIG.sparsity) + " sparse",
+  notes: "The toy's " + f(MTOY.sparsity_ratio, 3) + "× is the shape of the " +
+    "idea; these are the numbers people actually ship. " + MMIX.name +
+    " holds " + MMIX.n_experts + " experts and uses " + MMIX.top_k +
+    ", which is exactly " + vX(MMIX.sparsity) + " — N over k, no rounding, " +
+    "because every expert is the same size. " + MBIG.name + " is the one to " +
+    "sit with: " + f(MBIG.mlp_params_total / 1e9, 1) + " billion MLP " +
+    "parameters resident, " + f(MBIG.mlp_params_active / 1e9, 1) +
+    " billion touched per token, " + vX(MBIG.sparsity) + ". Its " +
+    MBIG.n_experts + " experts are individually small — that is the design, " +
+    "many narrow experts rather than a few wide ones — and its ratio is not " +
+    MBIG.n_experts + "/" + MBIG.top_k + " because it also runs a shared " +
+    "expert on every token. Two caveats to state out loud. These are MLP " +
+    "parameters only: attention and embeddings are dense and identical " +
+    "either way. And the " + f(MBIG.mlp_params_active / 1e9, 1) +
+    "B figure is what the FLOPs scale with, while the " +
+    f(MBIG.mlp_params_total / 1e9, 1) + "B figure is what your HBM bill " +
+    "scales with. Part V section three is entirely about the fact that those " +
+    "are different numbers.",
+  build: function () {
+    const rows = MREAL.map(function (r) {
+      const dense = r.n_experts === 1;
+      return el("tr", {}, [
+        el("td", { style: { textAlign: "left" },
+                   class: dense ? "muted" : "v-weight" }, r.name),
+        el("td", { class: "n" }, String(r.n_experts)),
+        el("td", { class: "n" }, String(r.top_k)),
+        el("td", { class: "n v-weight" }, f(r.mlp_params_total / 1e9, 1) + "B"),
+        el("td", { class: "n v-activation" }, f(r.mlp_params_active / 1e9, 1) + "B"),
+        el("td", { class: "n", html: dense
+          ? "<span class='muted'>" + vX(r.sparsity) + "</span>"
+          : "<b>" + vX(r.sparsity) + "</b>" })
+      ]);
+    });
+    return [
+      kicker("MoE · <b>the same arithmetic on real models</b>"),
+      title("<span class='v-weight'>" + f(MBIG.mlp_params_total / 1e9, 1) +
+            "B</span> held, <span class='v-activation'>" +
+            f(MBIG.mlp_params_active / 1e9, 1) + "B</span> used", true),
+      frag(d("panel acc", [
+        ph("MLP parameters only · attention and embeddings are dense either way"),
+        el("table", { class: "data" }, [
+          el("thead", {}, el("tr", {}, [
+            el("th", { style: { textAlign: "left" } }, "model"),
+            el("th", {}, "experts"), el("th", {}, "top-k"),
+            el("th", {}, "MLP params held"), el("th", {}, "active per token"),
+            el("th", {}, "sparsity")])),
+          el("tbody", {}, rows)
+        ])]), "f-fade"),
+      frag(d("cols wide-l", [
+        NN.callout("key", "Two different numbers, two different bills",
+          "The <span class='v-activation'>active</span> column is what the " +
+          "FLOPs scale with, so it sets how fast a token is. The " +
+          "<span class='v-weight'>held</span> column is what has to be " +
+          "resident, so it sets how many GPUs you need before you can serve " +
+          "one token at all. For " + MBIG.name + " those differ by " +
+          vX(MBIG.sparsity) + " — " +
+          BY(MBIG.mlp_params_total * BF16B) + " of bf16 weights standing " +
+          "behind " + BY(MBIG.mlp_params_active * BF16B) +
+          " of work. Section three is about what that does to a decode step."),
+        NN.tiles([
+          { k: MMIX.name, v: vX(MMIX.sparsity),
+            s: MMIX.n_experts + " experts ÷ top-" + MMIX.top_k, cls: "weight" },
+          { k: MBIG.name, v: vX(MBIG.sparsity),
+            s: MBIG.n_experts + " experts, top-" + MBIG.top_k + " + a shared one",
+            cls: "weight" },
+          { k: MDNS.name.replace("a dense ", "dense ").replace(", for contrast", ""),
+            v: vX(MDNS.sparsity), s: "held = used, by definition" }
+        ])
+      ]), "f-fade"),
+      frag(h("small muted", MREAL[0].note +
+        ". Every figure here is <span class='mono'>MOE.accounting.real</span>, " +
+        "computed by <span class='mono'>" + MM.generated_by + "</span> from " +
+        "published shapes rather than quoted."))
+    ];
+  }
+});
+
+/* ------------------------------------------------- V3. one expert is an MLP */
+S({
+  chapter: "MoE · what an expert is",
+  plain: "An expert is an ordinary MLP. Nothing about it is exotic.",
+  notes: "Before the routing, kill the mystique. An expert is not a " +
+    "specialist module, it is not trained on a topic, and there is nothing " +
+    "in the architecture that makes expert 3 the punctuation expert. It is " +
+    "an MLP: an up-projection, a nonlinearity, a down-projection, exactly " +
+    "the object from part two. Here it is " + DMO + "×" + DFO +
+    " then " + DFO + "×" + DMO + ", which is " + MTOY.params_per_expert +
+    " parameters, and the four experts differ only in their initial values. " +
+    "The gate is the one new tensor and it is tiny: " + DMO + "×" + NE +
+    " = " + MTOY.gate_params + " parameters, one score per expert. Point at " +
+    "the arithmetic on the right — " + NE + " × " + MTOY.params_per_expert +
+    " + " + MTOY.gate_params + " = " + MTOY.params_total +
+    " — because every accounting slide in this part is that line with bigger " +
+    "numbers in it.",
+  build: function () {
+    const E0 = MXIN.experts[0];
+    return [
+      kicker("MoE · <b>the parts list</b>"),
+      title("An expert is an MLP. The gate is one small matrix.", true),
+      frag(d("panel w", [
+        ph("expert 0 · <span class='mono'>y = GELU(x · W_up) · W_down</span> · " +
+           "the only new thing is that there are " + NE + " of them"),
+        d("rowflex top cellsm", [
+          tn({ name: "W_up", shape: [DMO, DFO], values: E0.W_up,
+               cls: "weight", digits: 3, signed: true,
+               note: DMO * DFO + " params" }),
+          tn({ name: "W_down", shape: [DFO, DMO], values: E0.W_down,
+               cls: "weight", digits: 3, signed: true,
+               note: DFO * DMO + " params" }),
+          tn({ name: "W_gate", shape: [DMO, NE], values: MXIN.W_gate,
+               cls: "weight", digits: 3, signed: true,
+               note: MTOY.gate_params + " params" })
+        ])]), "f-fade"),
+      frag(d("cols3", [
+        NN.formula({ rule: "one expert", sub: "d·d_ff + d_ff·d = " +
+          DMO + "·" + DFO + " + " + DFO + "·" + DMO,
+          result: MTOY.params_per_expert + " parameters", cls: "weight" }),
+        NN.formula({ rule: "the gate", sub: "d·N = " + DMO + "·" + NE,
+          result: MTOY.gate_params + " parameters", cls: "weight" }),
+        NN.formula({ rule: "the layer", sub: NE + "·" + MTOY.params_per_expert +
+          " + " + MTOY.gate_params,
+          result: MTOY.params_total + " parameters", cls: "weight" })
+      ]), "f-fade"),
+      frag(NN.callout("key", "Nothing in the architecture says what an expert is “for”",
+        "An expert is the pre-LN MLP from part two, unchanged, with no " +
+        "knowledge that it is one of " + NE + ". The gate is one " + DMO +
+        "×" + NE + " matrix producing one score per expert, and everything " +
+        "the router does is downstream of those " + NE + " numbers. " +
+        "Specialisation, where it appears at all, is an emergent property of " +
+        "training. Toy: " + MM.n_tokens + " tokens, " + NE + " experts, top-" +
+        KK + ", d = " + DMO + ", d_ff = " + DFO + ", EP " + EPD +
+        ", generated by <span class='mono'>" + MM.generated_by + "</span>."),
+        "f-fade")
+    ];
+  }
+});
+
+/* --------------------------------------------------- V4. the router, once */
+S({
+  chapter: "MoE · the router",
+  plain: "logits → softmax → top-" + KK + " → renormalise, on one token",
+  notes: "The router in full, on one token, so the six-token animation " +
+    "afterwards is a repetition rather than a reveal. Token 0 is “" +
+    MTOK[0] + "”. Multiply its " + DMO + "-vector by the gate matrix and you " +
+    "get " + NE + " logits. Softmax them and you get " + NE +
+    " probabilities that sum to one. Keep the top " + KK + " — here " +
+    MRT[0].chosen.map(eN).join(" and ") + " — and throw the rest away. Then " +
+    "the step people skip: the two surviving gates are RENORMALISED over " +
+    "themselves, so they sum to exactly one instead of to " +
+    f(MRT[0].raw_gates.reduce(function (a, b) { return a + b; }, 0), 4) +
+    ". The next slide but one is entirely about why. Note how close the four " +
+    "probabilities are — " + f(Math.min.apply(null, MRT[0].probs), 3) + " to " +
+    f(Math.max.apply(null, MRT[0].probs), 3) +
+    " — because the gate is at initialisation and has learned nothing. A " +
+    "trained router is far more confident, and that confidence is exactly " +
+    "what the load-balancing section has to fight.",
+  build: function (ctx) {
+    const r = MRT[0];
+    const rawSum = r.raw_gates.reduce(function (a, b) { return a + b; }, 0);
+    ctx.bars = vocabBars({ labels: [0, 1, 2, 3].slice(0, NE).map(eN),
+                           width: 430, height: 138 });
+    ctx.bars.paint(r.probs, {
+      colorOf: function (i) {
+        return r.chosen.indexOf(i) >= 0 ? "var(--weight)" : "var(--ink-muted)"; },
+      hi: function (i) { return r.chosen.indexOf(i) >= 0; },
+      digits: 3, max: 1 / NE * 1.6
+    });
+    return [
+      kicker("MoE · <b>the router, four lines of arithmetic</b>"),
+      title("Token 0 “" + MTOK[0] + "” picks " +
+            r.chosen.map(function (e) {
+              return "<span class='v-weight'>" + eN(e) + "</span>"; }).join(" and "),
+            true),
+      frag(d("cols wide-r", [
+        d("panel w", [ph("softmax over the " + NE + " gate logits · the chosen " +
+          KK + " are labelled"), ctx.bars]),
+        derivPanel("the four steps, on token 0", [
+          drow("logits = x · W_gate = [" +
+            r.logits.map(function (v) { return fS(v, 4); }).join(", ") + "]",
+            DMO + "×" + NE + " matvec"),
+          drow("p = softmax(logits) = [" +
+            r.probs.map(function (v) { return f(v, 4); }).join(", ") + "]",
+            "sums to 1 over all " + NE),
+          drow("top-" + KK + " → " + r.chosen.map(eN).join(", ") + "  ·  raw = [" +
+            r.raw_gates.map(function (v) { return f(v, 4); }).join(", ") + "]",
+            "sums to " + f(rawSum, 4) + ", not 1"),
+          drow("w = raw ÷ Σraw = [" +
+            r.weights.map(function (v) { return f(v, 4); }).join(", ") + "]",
+            "sums to exactly 1", true)
+        ], "w")
+      ]), "f-fade"),
+      frag(d("cols3", [
+        d("panel acc tight", [ph("what is differentiable"),
+          h("small", "The softmax is. The <span class='mono'>top-" + KK +
+            "</span> is not — it is an argmax with a different name. That " +
+            "single fact shapes the whole of the training section.")]),
+        d("panel acc tight", [ph("why the gates are so close"),
+          h("small", "The gate is at initialisation: " +
+            f(Math.min.apply(null, MRT[0].probs), 3) + " to " +
+            f(Math.max.apply(null, MRT[0].probs), 3) + " against a uniform " +
+            f(1 / NE, 3) + ". A trained router is far more decisive, which is " +
+            "the problem, not the goal.")]),
+        d("panel acc tight", [ph("what it costs"),
+          h("small", "<span class='mono'>" + MTOY.gate_params + "</span> " +
+            "parameters and one " + DMO + "×" + NE + " matvec per token. The " +
+            "router is never the expensive part of a mixture of experts.")])
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------ V5. all six tokens, animated */
+S({
+  chapter: "MoE · every token routed",
+  plain: "All " + NTK + " tokens routed, one at a time — and the loads come out uneven",
+  notes: "Press play and watch two things at once: the gate distribution for " +
+    "each token, and the running count on each expert card. The routing is " +
+    "not a fixed assignment — it is recomputed for every token from that " +
+    "token's own vector, and two occurrences of the same word can go to " +
+    "different experts if their residual streams differ. Here tokens " +
+    "0 and 4 are both “" + MTOK[0] + "” and they do not route the same way, " +
+    "because by this point in a real stack the two copies carry different " +
+    "context. Then the thing to point at when the animation ends: the " +
+    "counts. " + MLB.counts.join(", ") + " against an ideal of " +
+    f(MLB.ideal_per_expert, 1) + " each. " + eN(MLB.counts.indexOf(MLB.max_load)) +
+    " took every single token; " + eN(MLB.counts.indexOf(MLB.min_load)) +
+    " took one. Nothing in the router's definition prevents that, and " +
+    "section two of this part is entirely about it.",
+  build: function (ctx) {
+    ctx.bars = vocabBars({ labels: [0, 1, 2, 3].slice(0, NE).map(eN),
+                           width: 430, height: 132 });
+    ctx.row  = expRow({});
+    ctx.cap  = h("phaselabel", "");
+    ctx.tbl  = el("tbody", {});
+    for (let t = 0; t < NTK; t++) {
+      ctx.tbl.appendChild(el("tr", { id: null }, [
+        el("td", { style: { textAlign: "left" } }, tN(t)),
+        el("td", { class: "mono v-weight" }, ""),
+        el("td", { class: "n" }, ""),
+        el("td", { class: "mono v-weight" }, ""),
+        el("td", { class: "n" }, "")
+      ]));
+    }
+    ctx.draw = function (i) {
+      const r = MRT[i];
+      ctx.bars.paint(r.probs, {
+        colorOf: function (k) {
+          return r.chosen.indexOf(k) >= 0 ? "var(--weight)" : "var(--ink-muted)"; },
+        hi: function (k) { return r.chosen.indexOf(k) >= 0; },
+        digits: 3, max: 1 / NE * 1.6
+      });
+      const upto = [];
+      for (let e = 0; e < NE; e++) upto.push(0);
+      for (let t = 0; t <= i; t++) MRT[t].chosen.forEach(function (e) { upto[e]++; });
+      ctx.row.paint(function (e) {
+        const k = r.chosen.indexOf(e);
+        return { on: k >= 0, top1: e === r.top1, idle: upto[e] === 0,
+                 v: String(upto[e]),
+                 s: k >= 0 ? "this token · gate " + f(r.weights[k], 3)
+                           : upto[e] ? "tokens so far" : "not used yet" };
+      });
+      const rows = ctx.tbl.children;
+      for (let t = 0; t < NTK; t++) {
+        const on = t <= i, rr = MRT[t];
+        rows[t].style.opacity = on ? "1" : "0.22";
+        rows[t].children[1].textContent = on ? eN(rr.chosen[0]) : "·";
+        rows[t].children[2].textContent = on ? f(rr.weights[0], 4) : "";
+        rows[t].children[3].textContent = on ? eN(rr.chosen[1]) : "·";
+        rows[t].children[4].textContent = on ? f(rr.weights[1], 4) : "";
+      }
+      plab(ctx.cap, "token " + i + " “" + MTOK[i] + "” → <b class='v-weight'>" +
+        r.chosen.map(eN).join("</b> + <b class='v-weight'>") + "</b> · gates " +
+        r.weights.map(function (v) { return f(v, 3); }).join(" and ") +
+        ", summing to " + f(r.weights.reduce(function (a, b) { return a + b; }, 0), 4));
+    };
+    ctx.play = playbar({ count: NTK, ms: 1100, frame: ctx.draw,
+      label: function (i) { return "token " + i + " · “" + MTOK[i] + "”"; } });
+    /* Settle on the finished picture at BUILD time so the overview thumbnail
+       and a backwards arrival both show the whole run; render() rewinds to
+       frame 0 whenever the slide is entered at build step 0. The transport
+       still owns its own index — nothing here touches the build counter. */
+    ctx.play.set(NTK - 1);
+    return [
+      kicker("MoE · <b>press play · watch the counts, not the bars</b>"),
+      title("Every token routes independently", true),
+      d("cols wide-l", [
+        d("panel w", [ph("gate distribution for the current token"),
+          ctx.bars, ctx.play, ctx.cap]),
+        d("panel acc", [ph("the routing table, filling in"),
+          el("table", { class: "data nowrap" }, [
+            el("thead", {}, el("tr", {}, [
+              el("th", { style: { textAlign: "left" } }, "token"),
+              el("th", {}, "1st"), el("th", {}, "gate"),
+              el("th", {}, "2nd"), el("th", {}, "gate")])),
+            ctx.tbl
+          ])])
+      ]),
+      frag(d("panel acc tight", [ph("running load · " + NE +
+        " experts, ideal " + f(MLB.ideal_per_expert, 1) + " each"), ctx.row]), "f-fade"),
+      frag(h("small muted",
+        "Every value is a row of <span class='mono'>MOE.routing</span>. The " +
+        "final loads are <b>" + MLB.counts.join(", ") + "</b> — a " +
+        vX(MLB.imbalance_ratio, 1) + " imbalance out of " + NTK +
+        " tokens, which is the subject of the next section."), "f-fade")
+    ];
+  },
+  render: function (n, ctx) { if (n === 0 && ctx.play) ctx.play.set(0); }
+});
+
+/* ------------------------------------------------- V6. why renormalise */
+S({
+  chapter: "MoE · why renormalise",
+  plain: "Σ raw gates swings between tokens; Σ weights is exactly 1 for all of them",
+  notes: "A small step with a real consequence, and it is the kind of thing " +
+    "that gets dropped from a re-implementation and then quietly costs you " +
+    "half a point of loss. After the top-" + KK + ", the surviving gate " +
+    "values are whatever the softmax happened to give them. Read the middle " +
+    "column: across these " + NTK + " tokens the raw kept mass ranges from " +
+    f(Math.min.apply(null, MRT.map(function (r) {
+      return r.raw_gates.reduce(function (a, b) { return a + b; }, 0); })), 4) +
+    " to " + f(Math.max.apply(null, MRT.map(function (r) {
+      return r.raw_gates.reduce(function (a, b) { return a + b; }, 0); })), 4) +
+    ". If you blended with those, a token whose router was confident would " +
+    "come out of the layer with a systematically larger vector than one " +
+    "whose router was undecided — a scale that varies per token, injected " +
+    "into the residual stream, for no modelling reason at all. Worse, the " +
+    "scale would depend on k: route to one expert and you multiply by " +
+    "roughly a quarter, route to two and you multiply by roughly a half. " +
+    "Dividing by the kept sum makes the blend a convex combination, so the " +
+    "output has the same scale whatever the router decided and whatever k " +
+    "is. Right-hand column: exactly 1, every row.",
+  build: function () {
+    const rows = MRT.map(function (r) {
+      const raw = r.raw_gates.reduce(function (a, b) { return a + b; }, 0);
+      const wsum = r.weights.reduce(function (a, b) { return a + b; }, 0);
+      return el("tr", {}, [
+        el("td", { style: { textAlign: "left" } }, tN(r.token)),
+        el("td", { class: "mono muted" }, r.chosen.map(eN).join(" + ")),
+        el("td", { class: "n" }, r.raw_gates.map(function (v) {
+          return f(v, 4); }).join("  ")),
+        el("td", { class: "n v-critical" }, f(raw, 4)),
+        el("td", { class: "n" }, r.weights.map(function (v) {
+          return f(v, 4); }).join("  ")),
+        el("td", { class: "n v-good" }, f(wsum, 6))
+      ]);
+    });
+    const raws = MRT.map(function (r) {
+      return r.raw_gates.reduce(function (a, b) { return a + b; }, 0); });
+    return [
+      kicker("MoE · <b>the step people drop</b>"),
+      title("Without it, the layer's output scale depends on how sure the router was",
+            true),
+      frag(d("panel acc", [ph("kept gate mass before and after renormalising"),
+        el("table", { class: "data nowrap" }, [
+          el("thead", {}, el("tr", {}, [
+            el("th", { style: { textAlign: "left" } }, "token"),
+            el("th", {}, "chosen"), el("th", {}, "raw gates"),
+            el("th", {}, "Σ raw"), el("th", {}, "weights"), el("th", {}, "Σ w")])),
+          el("tbody", {}, rows)
+        ])]), "f-fade"),
+      frag(d("cols3", [
+        NN.formula({ rule: "Σ raw gates", sub: "varies with the router's confidence",
+          result: f(Math.min.apply(null, raws), 4) + " … " +
+                  f(Math.max.apply(null, raws), 4), cls: "gradient" }),
+        NN.formula({ rule: "w = raw ÷ Σ raw", sub: "a convex combination",
+          result: "Σ w = 1, exactly", cls: "activation" }),
+        NN.formula({ rule: "and it removes k", sub: "top-1 and top-" + KK +
+          " both sum to 1", result: "output scale independent of k",
+          cls: "activation" })
+      ]), "f-fade"),
+      frag(NN.callout("key", "It is a scale bug, not a normalisation nicety",
+        "Blend with the raw gates and every token leaves the layer multiplied " +
+        "by its own router confidence — a per-token gain of between " +
+        f(Math.min.apply(null, raws), 3) + " and " +
+        f(Math.max.apply(null, raws), 3) + " injected into the residual " +
+        "stream, carrying no information about the token and everything about " +
+        "how undecided the gate was. It also makes top-1 and top-" + KK +
+        " incomparable: routing to two experts would double the output where " +
+        "routing to one halves it. Dividing by the kept sum removes both " +
+        "problems in one line."), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------------------ V7. the naive way */
+S({
+  chapter: "MoE · the naive way",
+  plain: "The obvious implementation is " + (NTK * KK) +
+         " tiny GEMVs, and it is the wrong shape for a GPU",
+  notes: "Write the layer the way the definition reads and you get this: for " +
+    "each token, for each of its " + KK + " experts, run that expert on that " +
+    "one token and blend. " + NTK + " × " + KK + " = " + (NTK * KK) +
+    " matrix-VECTOR products of shape 1×" + DMO + " by " + DMO + "×" + DFO +
+    ". It is correct — the run uses exactly this as the reference answer — " +
+    "and it is the wrong shape for the hardware. Part IV already taught why: " +
+    "a GEMV reads a whole weight matrix to do one row of arithmetic, so its " +
+    "arithmetic intensity is about one. Here it is worse than that, because " +
+    "you also pay a kernel launch per pair and the matrices are tiny. Scale " +
+    "it up: at " + MBIG.name + "'s shapes a batch of a thousand tokens at " +
+    "top-" + MBIG.top_k + " would be " + NN.count(1000 * MBIG.top_k) +
+    " separate GEMVs per layer. Nobody does this. The next slide is what " +
+    "everybody does instead.",
+  build: function () {
+    const pairs = [];
+    MRT.forEach(function (r) {
+      r.chosen.forEach(function (e, k) {
+        pairs.push({ t: r.token, e: e, k: k, w: r.weights[k] });
+      });
+    });
+    const rows = pairs.map(function (p) {
+      return el("tr", {}, [
+        el("td", { class: "mono" }, tS(p.t)),
+        el("td", { class: "mono v-weight" }, eN(p.e)),
+        el("td", { class: "mono muted" }, "1×" + DMO + " @ " + DMO + "×" + DFO),
+        el("td", { class: "n" }, f(p.w, 4))
+      ]);
+    });
+    const half = Math.ceil(rows.length / 2);
+    const tbl = function (rs) {
+      return el("table", { class: "data nowrap" }, [
+        el("thead", {}, el("tr", {}, [
+          el("th", {}, "token"), el("th", {}, "expert"),
+          el("th", {}, "shape"), el("th", {}, "gate")])),
+        el("tbody", {}, rs)
+      ]);
+    };
+    return [
+      kicker("MoE · <b>the implementation that reads like the definition</b>"),
+      title("<span class='v-critical'>" + (NTK * KK) + "</span> tiny GEMVs, " +
+            "one per (token, expert) pair", true),
+      frag(d("cols", [
+        d("panel crit", [ph("loop tokens, loop their experts"),
+          d("rowflex top", [tbl(rows.slice(0, half)), tbl(rows.slice(half))])]),
+        d("stack", [
+          NN.formula({ rule: "calls per layer", sub: "tokens × k = " + NTK +
+            " × " + KK, result: String(NTK * KK) + " GEMVs", cls: "gradient" }),
+          NN.formula({ rule: "each one reads", sub: "the whole " + DMO + "×" +
+            DFO + " and " + DFO + "×" + DMO + " pair",
+            result: MTOY.params_per_expert + " parameters, for one row",
+            cls: "weight" }),
+          NN.callout("warn", "This is exactly the part IV problem, one layer down",
+            "A matrix-vector product reads an entire weight matrix to do one " +
+            "row's worth of arithmetic. That is the decode bottleneck from " +
+            "part four, reproduced here on purpose by a bad implementation. " +
+            "It is the reference answer for the proof three slides from now, " +
+            "and it is not what anyone ships.")
+        ])
+      ]), "f-fade"),
+      frag(h("small muted",
+        "The reference path is <span class='mono'>reference()</span> in " +
+        "<span class='mono'>" + MM.generated_by + "</span> — per token, loop " +
+        "its chosen experts, blend. Correct, slow, and the thing the grouped " +
+        "path has to agree with."), "f-fade")
+    ];
+  }
+});
+
+/* ---------------------------------------- V8. gather, GEMM, scatter */
+S({
+  chapter: "MoE · grouping",
+  plain: "Group by expert: gather → one GEMM per expert → scatter",
+  notes: "The idea that makes a mixture of experts viable at all, and it is " +
+    "pure bookkeeping. Instead of looping tokens, sort the (token, expert) " +
+    "pairs BY EXPERT. Now expert e has a contiguous block of rows, and it " +
+    "runs once, as a single matrix-matrix product over its whole group. " +
+    "Press play. Phase one gathers: every token's vector is copied into the " +
+    "row block of each expert it chose. Phase two is the compute, and the " +
+    "labels are the point — " + MPE.map(function (p) {
+      return p.n_tokens + "×" + DMO; }).join(", ") + ", four GEMMs instead of " +
+    (NTK * KK) + " GEMVs. Phase three scatters the rows back to the tokens " +
+    "they came from and blends them with the gate weights. Two things worth " +
+    "saying. The groups are RAGGED — " + MLB.counts.join(", ") +
+    " — so this is a batch of matrix multiplies with different M and the same " +
+    "K and N, which is precisely what a grouped-GEMM kernel exists for. And " +
+    "the gather and the scatter are permutations: they move bytes and compute " +
+    "nothing, which is why on a single GPU they are nearly free and, once " +
+    "the experts live on different GPUs, they become the most expensive part " +
+    "of the layer.",
+  build: function (ctx) {
+    ctx.viz = moeFlow();
+    ctx.cap = h("phaselabel", "");
+    ctx.caps = [
+      "Six tokens arrive. Every expert is idle and every expert's weights " +
+        "are resident.",
+      "<b>gather</b> — each token's vector is copied into the row block of " +
+        "each of the " + KK + " experts it chose. " + (NTK * KK) +
+        " rows in total, and no arithmetic yet.",
+      "<b>one GEMM per expert</b> — " + MPE.map(function (p) {
+        return eN(p.expert) + " runs " + p.n_tokens + "×" + DMO; }).join(", ") +
+        ". Ragged in M, identical in K and N.",
+      "<b>scatter</b> — every result row goes back to its token and is " +
+        "blended with that token's gate weight. Two rows land on every token."
+    ];
+    ctx.play = playbar({ count: 4, ms: 1300,
+      frame: function (i) { ctx.viz.phase(i); plab(ctx.cap, ctx.caps[i]); },
+      label: function (i) {
+        return ["arrive", "gather", "GEMM", "scatter"][i]; } });
+    ctx.play.set(3);
+    return [
+      kicker("MoE · <b>press play</b>"),
+      title("One matmul per expert, over its whole group", true),
+      d("panel acc", [ctx.viz, ctx.play, ctx.cap]),
+      frag(d("cols3", [
+        d("panel a tight", [ph("gather · a permutation"),
+          h("small", "Copies " + (NTK * KK) + " rows into " + NE +
+            " contiguous blocks. Moves bytes, computes nothing.")]),
+        d("panel w tight", [ph("compute · " + NE + " GEMMs"),
+          h("small", "Ragged in M — " + MLB.counts.join(", ") +
+            " rows — identical in K and N. This is what a grouped-GEMM " +
+            "kernel is for.")]),
+        d("panel a tight", [ph("scatter · the inverse permutation"),
+          h("small", "Sends every result row home and blends the " + KK +
+            " contributions with the renormalised gate weights.")])
+      ]), "f-fade")
+    ];
+  },
+  render: function (n, ctx) { if (n === 0 && ctx.play) ctx.play.set(0); }
+});
+
+/* ----------------------------------------- V9. the GEMM on real matrices */
+S({
+  chapter: "MoE · one expert's GEMM",
+  plain: eN(0) + "'s group is one " + MPE[0].n_tokens + "×" + DMO +
+         " matrix through the same two weights",
+  notes: "The grouped path, on the actual numbers, for expert 0. Its group " +
+    "is tokens " + MPE[0].tokens.map(tS).join(", ") + ", so the input is a " +
+    MPE[0].n_tokens + "×" + DMO + " matrix — three rows of " +
+    "MOE.per_expert[0].input, which are just those three tokens' vectors " +
+    "stacked. One matmul against W_up gives " + MPE[0].n_tokens + "×" + DFO +
+    ", the GELU is elementwise, one matmul against W_down brings it back to " +
+    MPE[0].n_tokens + "×" + DMO + ". Point out what did NOT change: the " +
+    "weights are the same two matrices from three slides ago, used once, for " +
+    "all three tokens. That is the entire saving. The middle matrix is " +
+    "recomputed in the browser from MOE.input rather than shipped, and the " +
+    "output on the right is the shipped MOE.per_expert[0].output. The check " +
+    "beneath them is this page's own arithmetic against the generator's, and " +
+    "it lands at the last bit of a double — a small rehearsal of the proof " +
+    "two slides from now.",
+  build: function () {
+    const E0 = MXIN.experts[0];
+    const Xe = MPE[0].input;
+    const U  = vmm(Xe, E0.W_up);
+    const H  = vmap(U, vgelu);
+    const Y  = vmm(H, E0.W_down);
+    const err = vmax(Y, MPE[0].output);
+    return [
+      kicker("MoE · <b>the same two weights, three tokens at once</b>"),
+      title("<span class='v-weight'>" + eN(0) + "</span>'s group: " +
+            MPE[0].tokens.map(tS).join(", ") + " in one matmul", true),
+      frag(d("arrowline", "<span class='mono'>X_" + eN(0) + "</span>" +
+        "<span class='ar'>→</span><span class='mono'>· W_up, GELU</span>" +
+        "<span class='ar'>→</span><span class='mono'>H</span>" +
+        "<span class='ar'>→</span><span class='mono'>· W_down</span>" +
+        "<span class='ar'>→</span><span class='mono'>Y_" + eN(0) + "</span>"),
+        "f-fade"),
+      frag(d("rowflex top cellsm", [
+        tn({ name: "X_" + eN(0), shape: [MPE[0].n_tokens, DMO], values: Xe,
+             cls: "activation", digits: 3,
+             note: MPE[0].tokens.map(tS).join(", ") }),
+        tn({ name: "H", shape: [MPE[0].n_tokens, DFO], values: H,
+             cls: "activation", digits: 3, signed: true,
+             note: "derived in-page" }),
+        tn({ name: "Y_" + eN(0), shape: [MPE[0].n_tokens, DMO], values: MPE[0].output,
+             cls: "activation", digits: 4, signed: true,
+             note: "MOE.per_expert" })
+      ]), "f-fade"),
+      frag(d("cols3", [
+        NN.formula({ rule: "one GEMM, not " + MPE[0].n_tokens + " GEMVs",
+          sub: MPE[0].n_tokens + "×" + DMO + " @ " + DMO + "×" + DFO,
+          result: MPE[0].n_tokens + "×" + DFO, cls: "activation" }),
+        NN.formula({ rule: "weights read", sub: "once, for the whole group",
+          result: MTOY.params_per_expert + " parameters", cls: "weight" }),
+        vbox(err < 1e-12, "recomputed here vs " +
+          "<span class='mono'>MOE.per_expert[0].output</span> — max|Δ| = <b>" +
+          f(err, 1) + "</b>")
+      ]), "f-fade"),
+      frag(NN.callout("key", "The rows are independent; the weight read is not",
+        "Nothing couples the three rows to each other — the same three answers " +
+        "come out either way, which is what the next slide proves. What " +
+        "changes is that <span class='mono'>W_up</span> and " +
+        "<span class='mono'>W_down</span> cross the memory bus once instead " +
+        "of " + MPE[0].n_tokens + " times. Group size is arithmetic " +
+        "intensity, and section three of this part is what happens when the " +
+        "group size falls to one."), "f-fade")
+    ];
+  }
+});
+
+/* -------------------------------------------------------- V10. the blend */
+S({
+  chapter: "MoE · the blend",
+  plain: "One token's output is a convex combination of its " + KK + " experts' rows",
+  notes: "Close the loop on one token so the scatter is concrete. Token 0 " +
+    "went to " + MRT[0].chosen.map(eN).join(" and ") + ". " +
+    eN(MRT[0].chosen[0]) + " produced one row and " + eN(MRT[0].chosen[1]) +
+    " produced one row — they are in two different group matrices, at two " +
+    "different row indices, because the groups are sorted by expert and not " +
+    "by token. The scatter finds them and combines them with the " +
+    "renormalised gate weights, " + f(MRT[0].weights[0], 4) + " and " +
+    f(MRT[0].weights[1], 4) + ", which sum to one. Read the arithmetic on " +
+    "the slide channel by channel; the result is row 0 of " +
+    "MOE.reference_output, exactly. Two structural points. The blend is a " +
+    "weighted sum, so the gradient flows back into the gate weights as well " +
+    "as into the experts — the router is trained by the same backward pass " +
+    "as everything else. And the two rows came from experts that, under " +
+    "expert parallelism, live on different GPUs; this addition is what the " +
+    "second all-to-all exists to make possible.",
+  build: function () {
+    const r = MRT[0];
+    const ea = r.chosen[0], eb = r.chosen[1];
+    const ia = MPE[ea].tokens.indexOf(0), ib = MPE[eb].tokens.indexOf(0);
+    const ya = MPE[ea].output[ia], yb = MPE[eb].output[ib];
+    const out = MOE.reference_output[0];
+    const rows = [];
+    for (let c = 0; c < DMO; c++) {
+      rows.push(el("tr", {}, [
+        el("td", { class: "mono muted" }, "channel " + c),
+        el("td", { class: "n" }, f(r.weights[0], 4) + " × " + fS(ya[c], 5)),
+        el("td", { class: "n" }, f(r.weights[1], 4) + " × " + fS(yb[c], 5)),
+        el("td", { class: "n v-activation" }, fS(out[c], 6))
+      ]));
+    }
+    return [
+      kicker("MoE · <b>scatter and blend</b>"),
+      title("y₀ = " + f(r.weights[0], 4) + "·" + eN(ea) + " + " +
+            f(r.weights[1], 4) + "·" + eN(eb), true),
+      frag(d("cutrow", [
+        d("panel a", [ph("token 0 “" + MTOK[0] + "” · the two rows and their sum"),
+          el("table", { class: "data nowrap" }, [
+            el("thead", {}, el("tr", {}, [
+              el("th", { style: { textAlign: "left" } }, ""),
+              el("th", {}, "w · " + eN(ea) + " row " + ia),
+              el("th", {}, "w · " + eN(eb) + " row " + ib),
+              el("th", {}, "y₀")])),
+            el("tbody", {}, rows)
+          ])]),
+        d("stack cutkeys", [
+          NN.formula({ rule: "the blend", sub: "Σₖ wₖ · yₑ(ₖ)",
+            result: "a convex combination · Σ w = 1", cls: "activation" }),
+          NN.formula({ rule: "where the rows are",
+            sub: eN(ea) + " row " + ia + " and " + eN(eb) + " row " + ib,
+            result: "different matrices, sorted by expert", cls: "weight" }),
+          NN.callout("why", "This addition is why there are TWO all-to-alls",
+            "Under expert parallelism " + eN(ea) + " and " + eN(eb) +
+            " can sit on different GPUs, and neither of them owns token 0. " +
+            "Both rows have to travel back to the rank that does before this " +
+            "sum can be taken. Dispatch out, combine back — the next section " +
+            "is that round trip.")
+        ])
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* --------------------------------------------------------- V11. the proof */
+S({
+  chapter: "MoE · the proof",
+  plain: "Grouped output vs per-token reference: max|Δ| = " + f(MEQ.max_abs_err, 1),
+  notes: "The claim, checked rather than asserted, on all " + NTK +
+    " tokens and all " + DMO + " channels. The reference path loops tokens " +
+    "and runs one expert at a time on one vector at a time. The grouped path " +
+    "sorts by expert, runs " + NE + " matrix-matrix products and permutes the " +
+    "answer back. Maximum absolute difference across the whole " + NTK + "×" +
+    DMO + " output: " + f(MEQ.max_abs_err, 1) +
+    ". Not small — zero, because the two paths perform the same multiplies " +
+    "and the same additions in the same order per output element, and " +
+    "reassociating rows does not reassociate the sums inside a row. Say why " +
+    "this matters more than it looks. Grouping is the optimisation that " +
+    "makes the whole architecture affordable, and every optimisation of that " +
+    "kind is a chance to change the answer by accident. The generator " +
+    "refuses to emit the file if this check fails.",
+  build: function () {
+    const rows = [];
+    for (let t = 0; t < NTK; t++) {
+      const a = MOE.reference_output[t], b = MOE.grouped_output[t];
+      let mx = 0;
+      for (let c = 0; c < DMO; c++) mx = Math.max(mx, Math.abs(a[c] - b[c]));
+      rows.push(el("tr", {}, [
+        el("td", { style: { textAlign: "left" } }, tN(t)),
+        el("td", { class: "mono muted" }, MRT[t].chosen.map(eN).join(" + ")),
+        el("td", { class: "n" }, a.map(function (v) { return fS(v, 4); }).join("  ")),
+        el("td", { class: "n" }, b.map(function (v) { return fS(v, 4); }).join("  ")),
+        el("td", { class: "n ok" }, f(mx, 1))
+      ]));
+    }
+    return [
+      kicker("MoE · <b>proven, not asserted</b>"),
+      title("Grouping changes <span class='v-good'>nothing</span> about what is computed",
+            true),
+      frag(d("panel acc", [ph("all " + NTK + " tokens × " + DMO +
+        " channels · reference loop vs grouped GEMMs"),
+        el("table", { class: "data nowrap" }, [
+          el("thead", {}, el("tr", {}, [
+            el("th", { style: { textAlign: "left" } }, "token"),
+            el("th", {}, "experts"),
+            el("th", {}, "reference — loop tokens"),
+            el("th", {}, "grouped — one GEMM per expert"),
+            el("th", {}, "max|Δ|")])),
+          el("tbody", {}, rows)
+        ])]), "f-fade"),
+      frag(vbox(MEQ.passed, "<b>max|Δ| = " + f(MEQ.max_abs_err, 1) + "</b> over " +
+        (NTK * DMO) + " values — " + (MEQ.passed ? "PASS" : "FAIL") +
+        ". <span class='mono'>" + MM.generated_by + "</span> raises rather " +
+        "than emitting the file if this fails."), "f-pop"),
+      frag(NN.callout("key", "What the proof is for", MEQ.claim), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------------- V12. what it costs */
+S({
+  chapter: "MoE · what it costs",
+  plain: "Sparsity buys capacity, not memory: every expert is resident either way",
+  notes: "Close the section on the bill, because everything in the next two " +
+    "sections is a consequence of it. Sparse activation does not make a model " +
+    "smaller. Every expert has to be resident on some device before the first " +
+    "token arrives, because which expert a token wants is decided at run time " +
+    "and there is no way to know in advance. In this toy that is " +
+    MTOY.params_total + " parameters standing behind " +
+    MTOY.params_active_per_token + " per token. On " + MBIG.name +
+    " it is " + BY(MBIG.mlp_params_total * BF16B) + " of bf16 MLP weights " +
+    "standing behind " + BY(MBIG.mlp_params_active * BF16B) + " of work — " +
+    "roughly " + Math.ceil(MBIG.mlp_params_total * BF16B / GPU_B) + " " +
+    GPUD.name + "s before you can serve one token, for a model whose " +
+    "per-token compute is that of something far smaller. That is the trade, " +
+    "stated honestly: you are buying capacity with HBM and paying for it in " +
+    "the number of cards, not in the time per token. The rest of part five " +
+    "is the two bills this creates — communication in training, and " +
+    "arithmetic intensity in serving.",
+  build: function () {
+    const usedB = MBIG.mlp_params_active * BF16B;
+    const holdB = MBIG.mlp_params_total * BF16B;
+    return [
+      kicker("MoE · <b>close of section</b>"),
+      title("Sparsity buys <span class='v-weight'>capacity</span>, " +
+            "not <span class='v-weight'>memory</span>", true),
+      frag(d("cols wide-l", [
+        d("panel w", [ph(MBIG.name + " · MLP weights in bf16 · one bar, split " +
+          "by what a single token actually reads"),
+          NN.memstrip([
+            { cls: "activation", bytes: usedB, label: "touched by one token" },
+            { cls: "weight", bytes: holdB - usedB,
+              label: "resident, untouched by this token" }], holdB),
+          h("small muted", "held · " + f(MBIG.mlp_params_total / 1e9, 1) +
+            "B parameters = " + BY(holdB) + " · touched per token · " +
+            f(MBIG.mlp_params_active / 1e9, 1) + "B = " + BY(usedB) + ", " +
+            vPc(usedB / holdB, 1) + " of the bar. The other " +
+            vPc(1 - usedB / holdB, 1) + " is resident and idle, and it is " +
+            "resident because the router had not decided yet.")]),
+        NN.tiles([
+          { k: "toy · held", v: String(MTOY.params_total),
+            s: "resident whatever the batch does", cls: "weight" },
+          { k: "toy · touched", v: String(MTOY.params_active_per_token),
+            s: "per token", cls: "activation" },
+          { k: MBIG.name.split(" ")[0] + " · cards to hold it",
+            v: String(Math.ceil(holdB / GPU_B)),
+            s: GPUD.name + " · " + CAP(GPU_B) + " each" }
+        ])
+      ]), "f-fade"),
+      frag(d("cols", [
+        NN.callout("mem", "Every expert is resident, touched or not",
+          "The router decides at run time, per token, so there is no batch " +
+          "for which you can safely leave an expert off the device. In this " +
+          "toy " + eN(MLB.counts.indexOf(MLB.min_load)) + " received " +
+          MLB.min_load + " token" + (MLB.min_load === 1 ? "" : "s") +
+          " out of " + (NTK * KK) + " and still cost the full " +
+          MTOY.params_per_expert + " parameters of HBM. Sparsity is a " +
+          "statement about FLOPs. It is not a statement about bytes."),
+        NN.callout("why", "Which is why the next two sections exist",
+          "If the weights must all be resident and one device cannot hold " +
+          "them, they get split across devices — and then the tokens have to " +
+          "travel, which is section two. And if the weights must all be read " +
+          "but only a few tokens use each one, arithmetic intensity collapses " +
+          "— which is section three.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* ======================================================================== */
+/*  SECTION 2 · MoE TRAINING                                                */
+/* ======================================================================== */
+SEP("moetrain");
+
+/* ------------------------------------------------- W1. expert parallelism */
+S({
+  chapter: "MoE training · expert parallelism",
+  plain: "EP " + EPD + ": " + MEP.experts_per_gpu +
+         " experts per GPU, tokens sharded by sequence",
+  notes: "A fourth axis, and it is not one of the three from part three. " +
+    "Tensor parallelism cuts a matrix; pipeline parallelism cuts the layer " +
+    "stack; data parallelism cuts the batch. Expert parallelism cuts the " +
+    "EXPERT LIST: rank g holds a disjoint subset of the experts, whole, " +
+    "uncut. Here EP is " + EPD + ", so GPU 0 owns " +
+    MEP.gpus[0].experts.map(eN).join(" and ") + " and GPU 1 owns " +
+    MEP.gpus[1].experts.map(eN).join(" and ") + " — " +
+    MEP.gpus[0].expert_params + " parameters each rather than " +
+    (NE * MTOY.params_per_expert) + " on both. Now look at the other half of " +
+    "the picture, which is where all the difficulty comes from: the TOKENS " +
+    "are sharded by sequence, exactly as data parallelism left them. GPU 0 " +
+    "holds " + MEP.gpus[0].home_tokens.map(tS).join(", ") + " and GPU 1 holds " +
+    MEP.gpus[1].home_tokens.map(tS).join(", ") + ". Nothing lines those two " +
+    "shardings up. A token's home rank and its expert's owner rank are " +
+    "independent facts, and one of them was decided by the data loader while " +
+    "the other was decided by the router half a millisecond ago.",
+  build: function () {
+    const cards = NN.gpu.grid({ count: EPD, render: function (g) {
+      const gp = MEP.gpus[g];
+      return [
+        el("div", { class: "gpu-line", style: { color: "var(--weight)" } },
+          "experts held: " + gp.experts.map(eN).join(", ")),
+        vShard({ name: "expert list", parts: NE, own: gp.experts,
+                 color: "var(--weight)" }),
+        el("div", { class: "gpu-line" },
+          gp.expert_params + " of " + (NE * MTOY.params_per_expert) +
+          " expert parameters"),
+        el("div", { class: "gpu-line", style: { color: "var(--activation)" } },
+          "home tokens: " + gp.home_tokens.map(tS).join(", ")),
+        vShard({ name: "token shard", parts: NTK, own: gp.home_tokens,
+                 color: "var(--activation)" }),
+        el("div", { class: "gpu-line" },
+          gp.tokens_after_dispatch + " (token, expert) rows to run after dispatch")
+      ];
+    } });
+    return [
+      kicker("MoE training · <b>a fourth axis</b>"),
+      title("Expert parallelism cuts the <span class='v-weight'>expert list</span>, " +
+            "not the matrices", true),
+      frag(cards, "f-pop"),
+      frag(d("cols3", [
+        d("panel w tight", [ph("what EP shards"),
+          h("small", "Whole experts, uncut. No matrix is split, so there is " +
+            "no partial sum to reduce and no all-reduce anywhere in this axis.")]),
+        d("panel a tight", [ph("what EP does not shard"),
+          h("small", "The tokens. They arrive sharded by sequence from the " +
+            "data-parallel split, and that sharding has nothing to do with " +
+            "which expert they want.")]),
+        d("panel g tight", [ph("what that costs"),
+          h("small", "A token on the wrong rank has to travel — and which " +
+            "rank is “wrong” is a run-time property of the router. That is " +
+            "the next slide.")])
+      ]), "f-fade"),
+      frag(NN.callout("mem", "What EP replaces, and what it does not",
+        "EP divides the expert weights by " + EPD + " with no communication " +
+        "at all inside the axis — unlike tensor parallelism, no matrix is " +
+        "cut, so nothing has to be summed back together. What it does not " +
+        "touch is attention, the embeddings or the LayerNorms; those stay " +
+        "replicated or sharded by whatever else you are running. In " +
+        "production EP composes with TP and DP rather than replacing " +
+        "either, which is the last slide of this section."), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------------ W2. the eighth collective */
+S({
+  chapter: "MoE training · the eighth collective",
+  plain: "The deck taught " + (VCOLL ? VCOLL.length : 9) +
+         " collectives and has used every one but this",
+  notes: "Say this out loud, because it is the reason part five exists in " +
+    "this deck at all. The collectives section taught " +
+    (VCOLL ? VCOLL.length : 9) + " operations. Every part since has applied " +
+    "them: broadcast at startup, scatter for the batch, all-reduce for DDP " +
+    "gradients and for tensor parallelism, reduce-scatter and all-gather for " +
+    "ZeRO and FSDP, gather for checkpointing, point-to-point for the " +
+    "pipeline. One has never appeared, and it is not because we ran out of " +
+    "slides. It is because nothing in a dense model needs it. all_to_all is " +
+    "a distributed transpose: rank i sends its j-th chunk to rank j, all " +
+    "ranks at once. There is no dense operation shaped like that. Routing " +
+    "is: the tokens on my rank are destined for experts spread across every " +
+    "other rank, and the tokens on every other rank include some destined " +
+    "for mine. Read its ring factor next to all-reduce's — half, because a " +
+    "chunk travels once instead of twice — and then read the row that says " +
+    "its inverse is itself, because the combine phase is the same operation " +
+    "run the other way.",
+  build: function () {
+    if (!VCOLL) {
+      return [kicker("MoE training · the eighth collective"),
+        title("all_to_all", true),
+        NN.callout("warn", "parallel.js is not loaded",
+          "This slide reads <span class='mono'>PARALLEL.collectives</span>. " +
+          "Run <span class='mono'>python3 code/parallel_toy.py</span>.")];
+    }
+    const used = {
+      broadcast: "startup · handing out the initial weights",
+      scatter: "handing out the batch",
+      gather: "checkpointing, evaluation, logging",
+      all_gather: "ZeRO-3 / FSDP re-materialising a layer",
+      reduce: "rare in training — the root-only variant",
+      reduce_scatter: "ZeRO-2 · gradients land on their owner",
+      all_reduce: "DDP gradients, tensor-parallel partial sums",
+      p2p: "pipeline stage boundaries",
+      all_to_all: null
+    };
+    const rows = VCOLL.map(function (c) {
+      const un = used[c.op] === null;
+      const col = NN.gpu.opColor(c.op);
+      return el("tr", { class: un ? "deadparam" : "" }, [
+        el("td", { html: "<span class='mono' style='color:" + col + "'>" +
+          c.op + "</span>" }),
+        el("td", { class: "mono muted" }, c.ring_factor),
+        el("td", { style: { textAlign: "left" }, class: un ? "v-critical" : "" },
+          un ? "NEVER USED — until now" : (used[c.op] || "—")),
+        el("td", { class: "mono muted" }, c.inverse)
+      ]);
+    });
+    return [
+      kicker("MoE training · <b>the one we never used</b>"),
+      title("<span class='mono'>all_to_all</span> — " + VA2A.what, true),
+      frag(d("cols wide-l", [
+        d("panel acc", [ph("every collective in the deck, and where it has appeared"),
+          el("table", { class: "data nowrap" }, [
+            el("thead", {}, el("tr", {}, [
+              el("th", {}, "op"), el("th", {}, "sent per GPU · ring"),
+              el("th", { style: { textAlign: "left" } }, "where the deck used it"),
+              el("th", {}, "inverse")])),
+            el("tbody", {}, rows)
+          ])]),
+        d("stack", [
+          NN.formula({ rule: "all_to_all", sub: VA2A.ring_factor,
+            result: "half of all_reduce's " + VAR.ring_factor,
+            cls: "activation" }),
+          NN.callout("key", "Nothing dense is shaped like this",
+            "Every other collective on that table either replicates something " +
+            "(broadcast, all-gather), combines something (reduce, all-reduce) " +
+            "or splits something along a fixed axis (scatter, reduce-scatter). " +
+            "A transpose across ranks is what you need when the DESTINATION " +
+            "of each piece of data is a run-time property of the data itself. " +
+            "In a dense model there is no such property. In a mixture of " +
+            "experts there is exactly one, and it is called the router."),
+          h("small muted", VA2A.used_for)
+        ])
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* ---------------------------------------------------- W3. dispatch, animated */
+S({
+  chapter: "MoE training · dispatch",
+  plain: MEP.pairs_crossing_gpus + " of " + MEP.pairs_total +
+         " (token, expert) pairs cross a GPU boundary",
+  notes: "The all-to-all, one hop at a time, on the toy's own routing table. " +
+    "There are " + MEP.pairs_total + " (token, expert) pairs — " + NTK +
+    " tokens times top-" + KK + " — and each one is a row of activations that " +
+    "must end up on the rank that owns its expert. Press play. Dashed hops " +
+    "stay on their own GPU and cost nothing; solid animated hops cross. " +
+    MEP.pairs_local + " stay, " + MEP.pairs_crossing_gpus +
+    " cross. Two things to point at when it finishes. The dispatch matrix — " +
+    "row i column j is how many rows rank i sends to rank j, here " +
+    JSON.stringify(MEP.dispatch_matrix).replace(/\[\[/, "[").replace(/\]\]/, "]") +
+    " — is exactly the send-count matrix an all-to-all takes as its argument, " +
+    "and it is the thing you cannot know before the router has run. And the " +
+    "off-diagonal is not symmetric: GPU 0 sends " + MEP.dispatch_matrix[0][1] +
+    " rows right and receives " + MEP.dispatch_matrix[1][0] +
+    " back. An all-to-all does not require balanced traffic and, with a " +
+    "router involved, never gets it.",
+  build: function (ctx) {
+    ctx.viz = a2aSVG({});
+    ctx.cap = h("phaselabel", "");
+    ctx.draw = function (k) {
+      ctx.viz.show(k);
+      if (k === 0) {
+        plab(ctx.cap, "before dispatch — every token sits on its home rank " +
+          "and every expert sits on its owner");
+        return;
+      }
+      const hp = MEP.detail[k - 1];
+      plab(ctx.cap, "hop <b>" + k + "</b> of " + MEP.pairs_total + " · " +
+        tS(hp.token) + " “" + MTOK[hp.token] + "” → <b class='v-weight'>" +
+        eN(hp.expert) + "</b> · " + (hp.local
+          ? "<b>local</b> — stays on GPU " + hp.from_gpu + ", nothing on the wire"
+          : "<b class='v-critical'>crosses</b> — GPU " + hp.from_gpu +
+            " → GPU " + hp.to_gpu + ", " + DMO + " elements"));
+    };
+    ctx.play = playbar({ count: MEP.pairs_total + 1, ms: 700, frame: ctx.draw,
+      label: function (k) { return k === 0 ? "before"
+        : "hop " + k + " / " + MEP.pairs_total; } });
+    ctx.play.set(MEP.pairs_total);
+    const dm = MEP.dispatch_matrix;
+    return [
+      kicker("MoE training · <b>press play · dashed stays, solid crosses</b>"),
+      title("<span class='mono'>all_to_all</span> dispatch — " +
+            MEP.pairs_crossing_gpus + " of " + MEP.pairs_total + " hops leave the rank",
+            true),
+      d("panel acc", [ctx.viz, ctx.play, ctx.cap]),
+      frag(d("cols3", [
+        d("panel g tight", [ph("dispatch matrix · rows send, columns receive"),
+          el("table", { class: "data nowrap" }, [
+            el("thead", {}, el("tr", {}, [el("th", {}, "")].concat(
+              dm.map(function (_, j) { return el("th", {}, "→ GPU " + j); })))),
+            el("tbody", {}, dm.map(function (r, i) {
+              return el("tr", {}, [el("td", { class: "mono" }, "GPU " + i)].concat(
+                r.map(function (v, j) {
+                  return el("td", { class: "n" + (i === j ? " muted" : " v-critical") },
+                    String(v)); })));
+            }))
+          ])]),
+        NN.tiles([
+          { k: "pairs total", v: String(MEP.pairs_total),
+            s: NTK + " tokens × top-" + KK },
+          { k: "stay local", v: String(MEP.pairs_local),
+            s: "diagonal · free", cls: "activation" },
+          { k: "cross", v: String(MEP.pairs_crossing_gpus),
+            s: "off-diagonal · on the wire", cls: "gradient" }
+        ]),
+        d("panel a tight", [ph("payload, this batch"),
+          h("small", "<span class='mono'>" +
+            MEP.collectives_per_layer[0].elements + "</span> elements — " +
+            MEP.pairs_crossing_gpus + " crossing rows × " + DMO +
+            " channels. Next batch it will be a different number.")])
+      ]), "f-fade")
+    ];
+  },
+  render: function (n, ctx) { if (n === 0 && ctx.play) ctx.play.set(0); }
+});
+
+/* ------------------------------------------------------- W4. combine */
+S({
+  chapter: "MoE training · combine",
+  plain: "The results make the same trip in reverse — all_to_all is its own inverse",
+  notes: "The second half of the round trip, and it is the same collective " +
+    "run backwards. Each expert has now produced one output row per token it " +
+    "received. Those rows are useless where they are: token 0's contribution " +
+    "from " + eN(MRT[0].chosen[0]) + " has to be added to its contribution " +
+    "from " + eN(MRT[0].chosen[1]) + ", and that addition can only happen on " +
+    "the rank that owns token 0. So every row travels back along exactly the " +
+    "path it came, which is why the collectives table says all_to_all's " +
+    "inverse is itself. Same " + MEP.pairs_crossing_gpus +
+    " crossings, same " + MEP.collectives_per_layer[1].elements +
+    " elements, opposite direction. Then say the total out loud, because it " +
+    "is the number that matters for a training step: two all-to-alls per MoE " +
+    "layer in the forward pass, and the backward pass mirrors both, so four " +
+    "per layer per step. In a model where every second block is an MoE " +
+    "block, that is a lot of collectives on the critical path.",
+  build: function (ctx) {
+    ctx.viz = a2aSVG({ combine: true });
+    ctx.cap = h("phaselabel", "");
+    ctx.draw = function (k) {
+      ctx.viz.show(k);
+      if (k === 0) {
+        plab(ctx.cap, "after the expert GEMMs — every result row is sitting " +
+          "on the rank that computed it, which is not the rank that needs it");
+        return;
+      }
+      const hp = MEP.detail[k - 1];
+      plab(ctx.cap, "return hop <b>" + k + "</b> of " + MEP.pairs_total + " · " +
+        eN(hp.expert) + "'s row for " + tS(hp.token) + " → GPU " +
+        hp.from_gpu + " · " + (hp.local
+          ? "<b>local</b> — it was already there"
+          : "<b class='v-critical'>crosses</b> back from GPU " + hp.to_gpu));
+    };
+    ctx.play = playbar({ count: MEP.pairs_total + 1, ms: 700, frame: ctx.draw,
+      label: function (k) { return k === 0 ? "computed"
+        : "hop " + k + " / " + MEP.pairs_total; } });
+    ctx.play.set(MEP.pairs_total);
+    return [
+      kicker("MoE training · <b>the return trip</b>"),
+      title("<span class='mono'>all_to_all</span> combine — the same hops, " +
+            "the other way", true),
+      d("panel acc", [ctx.viz, ctx.play, ctx.cap]),
+      frag(d("cols3", [
+        NN.formula({ rule: "forward, per MoE layer", sub: MEP.collectives_per_layer
+          .map(function (c) { return c.phase; }).join(" + "),
+          result: VA2A_FWD + " all_to_alls", cls: "activation" }),
+        NN.formula({ rule: "backward, per MoE layer",
+          sub: "the mirror of both", result: VA2A_FWD + " more", cls: "gradient" }),
+        NN.formula({ rule: "per layer per step",
+          sub: VA2A_FWD + " forward + " + VA2A_FWD + " backward",
+          result: VA2A_STEP + " all_to_alls", cls: "gradient" })
+      ]), "f-fade"),
+      frag(d("cols", [
+        NN.callout("key", "Its own inverse, and that is not a coincidence",
+          "The collectives table gives <span class='mono'>all_to_all</span>'s " +
+          "inverse as <span class='mono'>" + (VA2A ? VA2A.inverse : "itself") +
+          "</span>. Dispatch is a permutation of rows across ranks; combine " +
+          "is the inverse permutation. The backward pass needs both again, " +
+          "with the roles swapped — the gradient of a dispatch is a combine — " +
+          "so a single MoE layer costs " + VA2A_STEP +
+          " of these per training step."),
+        NN.callout("warn", "And they are on the critical path",
+          "Unlike the data-parallel gradient all-reduce, which overlaps with " +
+          "the backward pass, these sit between two halves of the same layer. " +
+          "The expert GEMMs cannot start until dispatch lands and the residual " +
+          "add cannot start until combine lands. There is nothing to hide " +
+          "them behind except other micro-batches.")
+      ]), "f-fade")
+    ];
+  },
+  render: function (n, ctx) { if (n === 0 && ctx.play) ctx.play.set(0); }
+});
+
+/* --------------------------------------------- W5. the payload is data-dependent */
+S({
+  chapter: "MoE training · the hard part",
+  plain: "Unlike an all-reduce, the payload size is decided by the router at run time",
+  notes: "This is the slide that makes MoE communication different in kind " +
+    "from everything in part three, so give it the room. Every collective " +
+    "the deck has shown so far has a payload you can compute before the job " +
+    "starts. A DDP all-reduce moves the parameter count. A tensor-parallel " +
+    "all-reduce moves batch times sequence times d_model. Those are shapes; " +
+    "they do not depend on the data. The MoE all-to-all's payload is the " +
+    "dispatch matrix, and the dispatch matrix is the router's output. This " +
+    "batch it was " + JSON.stringify(MEP.dispatch_matrix) +
+    " and " + MEP.pairs_crossing_gpus + " of " + MEP.pairs_total +
+    " rows crossed. Next batch it will be something else. Three consequences " +
+    "worth naming: you cannot size the buffers in advance, so real " +
+    "implementations either exchange the counts first — an extra small " +
+    "collective on the critical path — or pad to a worst case and waste " +
+    "bandwidth; the traffic is not symmetric, so one rank can be the " +
+    "bottleneck; and the whole thing is unpredictable step to step, which " +
+    "makes it very hard to overlap with anything.",
+  build: function () {
+    const dm = MEP.dispatch_matrix;
+    const rows = [
+      ["DDP · all_reduce of gradients", "parameter count", "fixed at build time",
+       "yes — overlaps with backward"],
+      ["TP · all_reduce per block", "batch × seq × d_model",
+       "fixed at build time", "no — but the size is known"],
+      ["ZeRO-3 · all_gather per layer", "layer parameter count",
+       "fixed at build time", "yes — prefetchable"],
+      ["PP · p2p at a boundary", "micro-batch × seq × d_model",
+       "fixed at build time", "yes — spread over the schedule"],
+      ["MoE · all_to_all ×2", "however the router split this batch",
+       "KNOWN ONLY AT RUN TIME", "no — and the size is not known either"]
+    ].map(function (r, i) {
+      const last = i === 4;
+      return el("tr", { class: last ? "deadparam" : "" }, [
+        el("td", { style: { textAlign: "left" },
+                   class: last ? "v-critical" : "v-weight" }, r[0]),
+        el("td", { class: "mono muted", style: { textAlign: "left" } }, r[1]),
+        el("td", { style: { textAlign: "left" },
+                   class: last ? "v-critical" : "" }, r[2]),
+        el("td", { style: { textAlign: "left" }, class: "muted" }, r[3])
+      ]);
+    });
+    return [
+      kicker("MoE training · <b>why this collective is genuinely hard</b>"),
+      title("Every other payload in this deck is a <span class='v-weight'>shape</span>. " +
+            "This one is <span class='v-critical'>data</span>.", true),
+      frag(d("panel acc", [ph("what each collective in the deck moves, and " +
+        "whether you can know how much before the step"),
+        el("table", { class: "data nowrap" }, [
+          el("thead", {}, el("tr", {}, [
+            el("th", { style: { textAlign: "left" } }, "where"),
+            el("th", { style: { textAlign: "left" } }, "payload"),
+            el("th", { style: { textAlign: "left" } }, "known when?"),
+            el("th", { style: { textAlign: "left" } }, "hideable?")])),
+          el("tbody", {}, rows)
+        ])]), "f-fade"),
+      frag(d("cols wide-l", [
+        NN.callout("warn", "You cannot size the buffers in advance",
+          "The receive buffer on rank j has to be big enough for whatever " +
+          "every other rank decides to send it, and that is not known until " +
+          "the router has run. Implementations pick one of two bad options: " +
+          "exchange the counts first, which is an extra latency-bound " +
+          "collective on the critical path of every MoE layer; or pad every " +
+          "buffer to a worst case, which moves bytes that are not there. " +
+          "Expert capacity, four slides from now, is the third option — " +
+          "make the size fixed by <em>refusing</em> the overflow."),
+        d("panel g tight", [ph("this batch's dispatch matrix"),
+          el("table", { class: "data nowrap" }, [
+            el("tbody", {}, dm.map(function (r, i) {
+              return el("tr", {}, [el("td", { class: "mono" }, "GPU " + i)].concat(
+                r.map(function (v, j) {
+                  return el("td", { class: "n" + (i === j ? " muted" : " v-critical") },
+                    String(v)); })));
+            }))
+          ]),
+          h("small muted", "GPU 0 sends " + dm[0][1] + " rows right and gets " +
+            dm[1][0] + " back. Not symmetric, and no reason it should be.")])
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------------------ W6. load balance */
+S({
+  chapter: "MoE training · load balance",
+  plain: "Loads " + MLB.counts.join(", ") + " against an ideal of " +
+         f(MLB.ideal_per_expert, 1) + " — " + vX(MLB.imbalance_ratio, 1) +
+         " imbalance from " + NTK + " tokens",
+  notes: "Nothing in the router's definition makes it balanced, and here is " +
+    "what that looks like on six tokens. " + (NTK * KK) +
+    " (token, expert) pairs spread over " + NE + " experts is " +
+    f(MLB.ideal_per_expert, 1) + " each if it is uniform. The actual loads " +
+    "are " + MLB.counts.join(", ") + ". " +
+    eN(MLB.counts.indexOf(MLB.max_load)) + " took all " + MLB.max_load +
+    " tokens — every single token in the batch put it in its top " + KK + " — " +
+    "and " + eN(MLB.counts.indexOf(MLB.min_load)) + " took " + MLB.min_load +
+    ". That is a " + vX(MLB.imbalance_ratio, 1) + " imbalance out of a batch " +
+    "of six, at initialisation, with no training and no adversary. Real " +
+    "routers are worse, because training rewards confidence and confidence " +
+    "concentrates. Now the consequence, which is the next slide: the GPUs " +
+    "holding the quiet experts finish early and wait.",
+  build: function () {
+    return [
+      kicker("MoE training · <b>the failure mode nothing prevents</b>"),
+      title("Ideal " + f(MLB.ideal_per_expert, 1) + " each. Actual " +
+            MLB.counts.join(", ") + ".", true),
+      frag(d("cols wide-l", [
+        d("panel w", [ph("(token, expert) pairs received, per expert"),
+          NN.chart.bars({
+            items: MLB.counts.map(function (c, e) {
+              return { label: eN(e) + " · " + MPE[e].tokens.map(tS).join(" "),
+                       value: c, color: c > MLB.ideal_per_expert
+                         ? "var(--critical)" : "var(--weight)",
+                       sub: "· " + vPc(MLB.fraction[e], 1) + " of the batch" };
+            }),
+            unit: "pairs", max: MLB.max_load * 1.12,
+            limit: { value: MLB.ideal_per_expert, label: "uniform" } })]),
+        d("stack", [
+          NN.tiles([
+            { k: "busiest", v: String(MLB.max_load),
+              s: eN(MLB.counts.indexOf(MLB.max_load)) + " · " +
+                 vPc(MLB.fraction[MLB.counts.indexOf(MLB.max_load)], 0) +
+                 " of all pairs", cls: "gradient" },
+            { k: "quietest", v: String(MLB.min_load),
+              s: eN(MLB.counts.indexOf(MLB.min_load)) + " · resident anyway",
+              cls: "weight" },
+            { k: "imbalance", v: vX(MLB.imbalance_ratio, 1),
+              s: "busiest ÷ ideal", cls: "gradient" }
+          ]),
+          NN.callout("why", "Why routers collapse rather than spread",
+            "The gate is trained by the same loss as everything else, and " +
+            "the loss rewards routing a token to whichever expert is " +
+            "currently best at it. An expert that gets more tokens improves " +
+            "faster, which makes it a better choice, which gets it more " +
+            "tokens. Left alone the router finds a fixed point where a " +
+            "handful of experts do everything and the rest are dead weight " +
+            "— resident, initialised, and never updated.")
+        ])
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------------------- W7. the straggler */
+S({
+  chapter: "MoE training · the straggler",
+  plain: "A step costs what the busiest expert costs; the other ranks idle",
+  notes: "The reason imbalance is a systems problem and not just an " +
+    "aesthetic one. Read the generator's own note: a step costs what the " +
+    "BUSIEST expert costs, and an imbalance ratio of r means the GPUs " +
+    "holding the quiet experts idle for one minus one over r of the layer. " +
+    "At " + vX(MLB.imbalance_ratio, 1) + " that is " +
+    vPc(1 - 1 / MLB.imbalance_ratio, 0) + " of the layer spent waiting. And " +
+    "it is worse than the per-expert picture suggests once EP is on, because " +
+    "what actually blocks is the rank: GPU 1 here has " +
+    MEP.gpus[1].tokens_after_dispatch + " rows to run against GPU 0's " +
+    MEP.gpus[0].tokens_after_dispatch + ", and the combine all-to-all is a " +
+    "synchronisation point that nobody passes until everybody arrives. Two " +
+    "honest caveats. The imbalance in a real step is over thousands of " +
+    "tokens, not six, so the law of large numbers helps a lot — but it does " +
+    "not help with a systematically collapsed router, which is exactly the " +
+    "failure mode. And expert compute is not the only term; with small " +
+    "experts the all-to-all can dominate, which makes the imbalance matter " +
+    "less and the communication matter more.",
+  build: function () {
+    const busy = MEP.gpus.map(function (g) { return g.tokens_after_dispatch; });
+    const mx = Math.max.apply(null, busy);
+    return [
+      kicker("MoE training · <b>the cost of the imbalance</b>"),
+      title("<span class='v-critical'>" +
+            vPc(1 - 1 / MLB.imbalance_ratio, 0) + "</span> of the layer, " +
+            "spent waiting", true),
+      frag(d("cols", [
+        d("panel g", [ph("rows to run per GPU, after dispatch"),
+          NN.chart.bars({
+            items: MEP.gpus.map(function (g) {
+              return { label: "GPU " + g.gpu + " · " +
+                         g.experts.map(eN).join(", "),
+                       value: g.tokens_after_dispatch,
+                       color: g.tokens_after_dispatch === mx
+                         ? "var(--critical)" : "var(--activation)",
+                       sub: "· " + vPc(g.tokens_after_dispatch / (NTK * KK), 0) +
+                            " of the work" };
+            }),
+            unit: "rows", max: mx * 1.15,
+            limit: { value: NTK * KK / EPD, label: "if it were balanced" } }),
+          h("small muted", "The slower rank sets the step time. The faster " +
+            "one waits at the combine all-to-all, which is a barrier.")]),
+        d("stack", [
+          NN.formula({ rule: "step time", sub: "max over experts, not mean",
+            result: "the busiest one", cls: "gradient" }),
+          NN.formula({ rule: "idle fraction", sub: "1 − 1/r, at r = " +
+            f(MLB.imbalance_ratio, 1),
+            result: vPc(1 - 1 / MLB.imbalance_ratio, 0), cls: "gradient" }),
+          NN.callout("warn", "The generator's own note", MLB.straggler_note),
+          NN.callout("why", "Why six tokens overstates it — and why it still matters",
+            "A real step routes hundreds of thousands of tokens, and random " +
+            "imbalance averages out. What does not average out is a router " +
+            "that has genuinely learned to prefer a few experts, and that is " +
+            "the case the auxiliary loss exists for.")
+        ])
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* --------------------------------------------------- W8. the auxiliary loss */
+S({
+  chapter: "MoE training · the auxiliary loss",
+  plain: MLB.aux_loss_formula + " = " + f(MLB.aux_loss, 4) + " here, against " +
+         f(MLB.aux_loss_if_uniform, 1) + " for a uniform router",
+  notes: "The standard fix, from the Switch Transformer paper, and it is one " +
+    "line: add N times the sum over experts of f_e times P_e to the loss. " +
+    "f_e is the FRACTION of the batch's routing slots that went to expert e " +
+    "— a hard count, straight off the dispatch table. P_e is the MEAN ROUTER " +
+    "PROBABILITY assigned to expert e across the batch — a soft quantity, " +
+    "straight off the softmax before the top-k. Look at the two rows side by " +
+    "side. f is spiky: " + MLB.fraction.map(function (v) {
+      return f(v, 3); }).join(", ") + ". P is nearly flat: " +
+    MLB.mean_prob.map(function (v) { return f(v, 3); }).join(", ") +
+    ", because the gate has not been trained. Their dot product times N is " +
+    f(MLB.aux_loss, 4) + " against " + f(MLB.aux_loss_if_uniform, 1) +
+    " for a perfectly uniform router. The product is minimised exactly when " +
+    "both are uniform, which is what you want, and it is minimised by " +
+    "pushing DOWN the probability of experts that are already busy. The next " +
+    "slide is the part that makes it work at all.",
+  build: function (ctx) {
+    const labs = MLB.counts.map(function (_, e) { return eN(e); });
+    ctx.fb = vocabBars({ labels: labs, width: 400, height: 122 });
+    ctx.pb = vocabBars({ labels: labs, width: 400, height: 122 });
+    ctx.fb.paint(MLB.fraction, { color: "var(--gradient)", digits: 3,
+      max: Math.max.apply(null, MLB.fraction) * 1.15,
+      hi: function (i) { return MLB.fraction[i] > 1 / NE; } });
+    ctx.pb.paint(MLB.mean_prob, { color: "var(--weight)", digits: 3,
+      max: Math.max.apply(null, MLB.fraction) * 1.15,
+      hi: function (i) { return MLB.mean_prob[i] > 1 / NE; } });
+    const terms = MLB.counts.map(function (_, e) {
+      return el("tr", {}, [
+        el("td", { class: "mono" }, eN(e)),
+        el("td", { class: "n v-gradient" }, f(MLB.fraction[e], 4)),
+        el("td", { class: "n v-weight" }, f(MLB.mean_prob[e], 4)),
+        el("td", { class: "n" }, f(MLB.fraction[e] * MLB.mean_prob[e], 5))
+      ]);
+    });
+    return [
+      kicker("MoE training · <b>one extra term in the loss</b>"),
+      title("<span class='mono'>L_aux = " + MLB.aux_loss_formula + "</span> = " +
+            f(MLB.aux_loss, 4), true),
+      frag(d("cols3", [
+        d("panel g", [ph("f — fraction of slots · a HARD count, no gradient"),
+          ctx.fb]),
+        d("panel w", [ph("P — mean router probability · SOFT, differentiable"),
+          ctx.pb]),
+        d("panel acc tight", [ph("f · P, term by term"),
+          el("table", { class: "data nowrap" }, [
+            el("thead", {}, el("tr", {}, [
+              el("th", {}, ""), el("th", {}, "f"), el("th", {}, "P"),
+              el("th", {}, "f·P")])),
+            el("tbody", {}, terms)
+          ])])
+      ]), "f-fade"),
+      frag(d("cols3", [
+        NN.formula({ rule: "this batch", sub: NE + " × Σ f·P",
+          result: f(MLB.aux_loss, 4), cls: "gradient" }),
+        NN.formula({ rule: "a uniform router", sub: NE + " × " + NE +
+          " × (1/" + NE + ")²", result: f(MLB.aux_loss_if_uniform, 1) + " — the minimum",
+          cls: "activation" }),
+        NN.formula({ rule: "the excess", sub: f(MLB.aux_loss, 4) + " − " +
+          f(MLB.aux_loss_if_uniform, 1),
+          result: "+" + f(MLB.aux_loss - MLB.aux_loss_if_uniform, 4),
+          cls: "gradient" })
+      ]), "f-fade"),
+      frag(h("small muted",
+        "The scaling by N = " + NE + " is what makes the uniform case score " +
+        "exactly " + f(MLB.aux_loss_if_uniform, 1) + " for any expert count, " +
+        "so the same coefficient works across models. Values from " +
+        "<span class='mono'>MOE.load_balance</span>."), "f-fade")
+    ];
+  }
+});
+
+/* --------------------------------------- W9. only P carries the gradient */
+S({
+  chapter: "MoE training · the trick",
+  plain: "Only P is differentiable — which is how you push an argmax around without differentiating it",
+  notes: "This is the clever part and it is worth slowing down for. The " +
+    "routing decision is a top-k, which is an argmax with a bigger k. It has " +
+    "no useful derivative: nudge a logit and either nothing changes or the " +
+    "chosen set jumps discontinuously. You cannot backpropagate through it " +
+    "and every attempt to do so — straight-through estimators, Gumbel " +
+    "softmax, reinforcement-style gradients — is either biased or high " +
+    "variance. The auxiliary loss sidesteps the whole problem. In N times " +
+    "sum f_e P_e, the f term is a hard count and autograd treats it as a " +
+    "constant; only P_e, the mean softmax probability, carries gradient. So " +
+    "dL_aux/dP_e is N times f_e — a positive number proportional to how " +
+    "overloaded that expert already is — and the optimizer responds by " +
+    "pushing that expert's logits down for every token in the batch. The " +
+    "hard count is used as a WEIGHT on a soft quantity. Nobody differentiates " +
+    "through the argmax; the argmax just tells the gradient where to push.",
+  build: function () {
+    const rows = MLB.counts.map(function (_, e) {
+      const g = NE * MLB.fraction[e];
+      return el("tr", {}, [
+        el("td", { class: "mono" }, eN(e)),
+        el("td", { class: "n muted" }, String(MLB.counts[e])),
+        el("td", { class: "n v-gradient" }, f(MLB.fraction[e], 4)),
+        el("td", { class: "n v-weight" }, f(MLB.mean_prob[e], 4)),
+        el("td", { class: "n", html: "<span class='v-gradient'>" +
+          fS(g, 4) + "</span>" }),
+        el("td", { style: { textAlign: "left" }, class: "muted" },
+          MLB.fraction[e] > 1 / NE ? "overloaded — push its logits down"
+            : MLB.fraction[e] < 1 / NE ? "underused — pushed down least, so it wins ground"
+            : "at the ideal share")
+      ]);
+    });
+    return [
+      kicker("MoE training · <b>the trick worth remembering</b>"),
+      title("A discrete decision, pushed toward balance, " +
+            "<span class='v-good'>without</span> differentiating an argmax", true),
+      frag(d("panel acc", [ph("∂L_aux/∂P_e = N · f_e · the hard count is a " +
+        "coefficient, never a variable"),
+        el("table", { class: "data nowrap" }, [
+          el("thead", {}, el("tr", {}, [
+            el("th", {}, "expert"), el("th", {}, "slots"),
+            el("th", {}, "f — no gradient"), el("th", {}, "P — differentiable"),
+            el("th", {}, "∂L_aux/∂P"),
+            el("th", { style: { textAlign: "left" } }, "what the optimizer does")])),
+          el("tbody", {}, rows)
+        ])]), "f-fade"),
+      frag(d("cols3", [
+        eqline("∂L_aux/∂P<sub>e</sub>", [
+          { sym: "N", val: String(NE), role: "expert count", cls: null },
+          { sym: "f_e", val: "hard count", role: "constant to autograd",
+            rule: "no gradient path", cls: "gradient" }
+        ], true),
+        d("panel crit tight", [ph("what nobody does"),
+          h("small", "Differentiate through <span class='mono'>top-" + KK +
+            "</span>. It is an argmax; its derivative is zero almost " +
+            "everywhere and undefined at the jumps.")]),
+        d("panel a tight", [ph("what happens instead"),
+          h("small", "The counts weight a term in the SOFT probabilities. " +
+            "The gradient lands on the gate matrix, the next batch's argmax " +
+            "comes out slightly flatter, and nothing discrete was " +
+            "differentiated.")])
+      ]), "f-fade"),
+      frag(NN.callout("key", "Only P carries gradient — and that is the point",
+        MLB.aux_gradient_note), "f-fade")
+    ];
+  }
+});
+
+/* --------------------------------------------------- W10. the ceiling is N/k */
+S({
+  chapter: "MoE training · the ceiling",
+  plain: "With top-" + KK + " routing the auxiliary loss cannot exceed " +
+         f(MLB.aux_loss_max_at_this_k, 1) + " — N/k, not N",
+  notes: "A correction worth making in public, because the wrong version of " +
+    "this is in a lot of write-ups including, until recently, this project's " +
+    "own generator. The auxiliary loss is usually described as ranging from " +
+    "1 when balanced to N when fully collapsed. The second half is only true " +
+    "at k equals one. With top-k routing every token occupies k slots spread " +
+    "over k DISTINCT experts, so no single expert can hold more than one " +
+    "over k of the slots: f_e is bounded by 1/k, and therefore N times sum " +
+    "f_e P_e is bounded by N over k. At k = " + KK + " with " + NE +
+    " experts the ceiling is " + f(MLB.aux_loss_max_at_this_k, 1) + ", not " +
+    f(MLB.aux_loss_if_collapsed_k1, 0) + ". How it was caught is the good " +
+    "part: page " + VPAGE33 + " of the site has a collapse slider, and the " +
+    "slider could " +
+    "not reach the number the data claimed. A visualisation that refuses to " +
+    "agree with its own data source is a test, and this one failed. Two " +
+    "practical consequences: your aux-loss coefficient is not comparable " +
+    "across k, and a loss of " + f(MLB.aux_loss_max_at_this_k, 1) +
+    " at k = " + KK + " is total collapse, not a mild problem.",
+  build: function () {
+    const ks = [];
+    for (let k = 1; k <= NE; k++) ks.push(k);
+    const rows = ks.map(function (k) {
+      const here = k === KK;
+      return el("tr", { class: here ? "deadparam" : "" }, [
+        el("td", { class: "mono" + (here ? " v-critical" : "") },
+          "top-" + k + (here ? "  ← this toy" : "")),
+        el("td", { class: "n" }, f(1 / k, 4)),
+        el("td", { class: "n" }, f(MLB.aux_loss_if_uniform, 1)),
+        el("td", { class: "n" + (here ? " v-critical" : " v-gradient") },
+          f(NE / k, 2)),
+        el("td", { style: { textAlign: "left" }, class: "muted" },
+          k === 1 ? "the only k at which the ceiling is N"
+                  : "one token cannot put " + k + " slots on one expert")
+      ]);
+    });
+    return [
+      kicker("MoE training · <b>a number that was wrong, and how it was caught</b>"),
+      title("f<sub>e</sub> ≤ 1/k, so the ceiling is <span class='v-critical'>" +
+            f(MLB.aux_loss_max_at_this_k, 1) + "</span>, not " +
+            f(MLB.aux_loss_if_collapsed_k1, 0), true),
+      frag(d("cols wide-l", [
+        d("panel acc", [ph("the bound, per k, at N = " + NE + " experts"),
+          el("table", { class: "data nowrap" }, [
+            el("thead", {}, el("tr", {}, [
+              el("th", {}, "routing"), el("th", {}, "max f_e"),
+              el("th", {}, "min L_aux"), el("th", {}, "max L_aux = N/k"),
+              el("th", { style: { textAlign: "left" } }, "why")])),
+            el("tbody", {}, rows)
+          ])]),
+        d("stack", [
+          NN.tiles([
+            { k: "this batch", v: f(MLB.aux_loss, 4), s: "at k = " + KK,
+              cls: "gradient" },
+            { k: "balanced", v: f(MLB.aux_loss_if_uniform, 1), s: "the floor" },
+            { k: "collapsed at k = " + KK, v: f(MLB.aux_loss_max_at_this_k, 1),
+              s: "the real ceiling", cls: "gradient" },
+            { k: "collapsed at k = 1", v: f(MLB.aux_loss_if_collapsed_k1, 0),
+              s: "N — unreachable here" }
+          ]),
+          NN.callout("warn", "How it was found", "The generator used to publish " +
+            f(MLB.aux_loss_if_collapsed_k1, 0) + " as the collapse value at " +
+            "every k. Page " + VPAGE33 + " of the site draws a slider that " +
+            "collapses the " +
+            "router by hand, and the slider could not reach " +
+            f(MLB.aux_loss_if_collapsed_k1, 0) +
+            " no matter how far it was pushed. A picture that will not agree " +
+            "with its own data source is a test — and this one failed.")
+        ])
+      ]), "f-fade"),
+      frag(NN.callout("key", "The bound, in the generator's words",
+        MLB.collapsed_bound_note + " In practice that means an auxiliary-loss " +
+        "coefficient tuned at one k is not comparable at another, and a " +
+        "reading of " + f(MLB.aux_loss_max_at_this_k, 1) + " at k = " + KK +
+        " is not “a bit unbalanced” — it is the worst the metric can " +
+        "describe."), "f-fade")
+    ];
+  }
+});
+
+/* --------------------------------------------- W11. capacity and dropping */
+S({
+  chapter: "MoE training · capacity",
+  plain: "Capacity factor " + MLB.capacity_factor + " → " +
+         MLB.capacity_per_expert + " slots per expert → " + MLB.n_dropped +
+         " token-slots dropped",
+  notes: "The other half of the answer, and it is blunter than the auxiliary " +
+    "loss. Give every expert a fixed number of slots and throw away anything " +
+    "that does not fit. The capacity factor is " + MLB.capacity_factor +
+    ", so each expert takes ceil(" + MLB.capacity_factor + " × " +
+    (NTK * KK) + " ÷ " + NE + ") = " + MLB.capacity_per_expert +
+    " slots. Three experts are under it. " +
+    eN(MLB.counts.indexOf(MLB.max_load)) + " received " + MLB.max_load +
+    " and keeps " + MLB.capacity_per_expert + ", so " + MLB.n_dropped +
+    " token-slots are dropped. Press through the build and look at WHICH: " +
+    MLB.dropped.map(function (dd) { return tS(dd.token); }).join(" and ") +
+    " lose their " + eN(MLB.dropped[0].expert) + " contribution, and for " +
+    "both of them that was their TOP-1 expert, not their second choice — " +
+    "because capacity fills in token order and they arrived last. A dropped " +
+    "token is not an error and it is not routed elsewhere. It simply does " +
+    "not get that expert's contribution; if it had another expert, it comes " +
+    "out of the layer with one contribution instead of " + KK +
+    ", and if this was its only one, the residual passes through unchanged. " +
+    "Say why anybody accepts this: it makes every buffer a fixed, known " +
+    "size, which is the problem the data-dependence slide left open.",
+  build: function (ctx) {
+    ctx.grid = capGrid();
+    ctx.cap  = h("phaselabel", "");
+    plab(ctx.cap, "every (token, expert) pair that the router produced — " +
+      MLB.counts.join(", ") + " across the " + NE + " experts");
+    const drops = MLB.dropped.map(function (dd) {
+      const slot = MRT[dd.token].chosen.indexOf(dd.expert);
+      return el("tr", {}, [
+        el("td", { style: { textAlign: "left" } }, tN(dd.token)),
+        el("td", { class: "mono v-critical" }, eN(dd.expert)),
+        el("td", { class: "mono" }, slot === 0 ? "top-1" : "top-" + (slot + 1)),
+        el("td", { class: "n" }, f(wOf(dd.token, dd.expert), 4)),
+        el("td", { style: { textAlign: "left" }, class: "muted" },
+          "keeps " + eN(MRT[dd.token].chosen[1 - slot]) + " only")
+      ]);
+    });
+    return [
+      kicker("MoE training · <b>the fixed-size answer</b>"),
+      title("Capacity " + MLB.capacity_per_expert + " per expert · " +
+            "<span class='v-critical'>" + MLB.n_dropped + "</span> token-slots dropped",
+            true),
+      d("panel acc", [ph("capacity = ⌈" + MLB.capacity_factor + " × " +
+        (NTK * KK) + " ÷ " + NE + "⌉ = " + MLB.capacity_per_expert +
+        " · the ⟂ marks the cut"), ctx.grid, ctx.cap]),
+      frag(d("cols wide-l", [
+        d("panel crit tight", [ph("what was actually lost"),
+          el("table", { class: "data nowrap" }, [
+            el("thead", {}, el("tr", {}, [
+              el("th", { style: { textAlign: "left" } }, "token"),
+              el("th", {}, "expert"), el("th", {}, "which choice"),
+              el("th", {}, "gate"),
+              el("th", { style: { textAlign: "left" } }, "what it keeps")])),
+            el("tbody", {}, drops)
+          ])]),
+        NN.callout("warn", "A dropped token is a real loss, chosen on purpose",
+          "It is not rerouted and it is not an error path. The token simply " +
+          "does not receive that expert's contribution — it leaves the layer " +
+          "with " + (KK - 1) + " of " + KK + " contributions, or with the " +
+          "residual alone if it lost both. That is a deliberate loss of " +
+          "computation, accepted because the alternative — variable-size " +
+          "buffers for a collective whose sizes are not known until the " +
+          "router has run — is worse. Raise the capacity factor and you drop " +
+          "fewer tokens and move more padding; lower it and the reverse.")
+      ]), "f-fade")
+    ];
+  },
+  render: function (n, ctx) {
+    if (!ctx.grid) return;
+    ctx.grid.reveal(n >= 1 ? 1 : 0);
+    plab(ctx.cap, n >= 1
+      ? "capacity applied — " + MLB.n_dropped + " slot" +
+        (MLB.n_dropped === 1 ? "" : "s") + " past the cut are <b class='v-critical'>" +
+        "dropped</b>, and both belonged to " + eN(MLB.dropped[0].expert)
+      : "every (token, expert) pair the router produced — " +
+        MLB.counts.join(", ") + " across the " + NE + " experts");
+  }
+});
+
+/* ---------------------------------------------------------- W12. composing */
+S({
+  chapter: "MoE training · composing the axes",
+  plain: "EP × TP × DP — a fourth axis on top of part III's three",
+  notes: "Where expert parallelism goes in the picture part three built. It " +
+    "is a fourth factor of the GPU count and it composes with the other " +
+    "three rather than replacing any of them, but its communication profile " +
+    "is its own. Rank it the way the topology slide in part three ranked the " +
+    "others. EP's payload is the routed tokens, its collective is an " +
+    "all-to-all, it is on the critical path, it cannot be overlapped, and " +
+    "its size is not known in advance — so it wants to be inside the fastest " +
+    "domain you have, alongside tensor parallelism rather than outside it. " +
+    "In practice that means EP and TP share the NVLink domain and compete " +
+    "for it, which is the genuinely hard configuration question in a large " +
+    "MoE run: TP shrinks each expert, EP spreads the expert list, and they " +
+    "are drawing on the same wire. Send people back to the 3D slide if they " +
+    "want the arithmetic for the other three axes.",
+  build: function () {
+    const n3d = slideNumberByPlain("factorises the GPU count");
+    const rows = [
+      ["expert parallel", "all_to_all ×4 per layer per step",
+       "routed tokens — SIZE NOT KNOWN", "no — critical path, both ends",
+       "the expert list"],
+      ["tensor parallel", "all_reduce ×2 per block",
+       "batch × seq × d_model", "no — critical path", "every matrix"],
+      ["pipeline parallel", "p2p at stage boundaries",
+       "micro-batch activations", "yes — spread over the schedule", "the depth"],
+      ["data parallel (+ZeRO)", "all_reduce of gradients",
+       "one per parameter", "yes — behind backward", "the batch"]
+    ].map(function (r, i) {
+      const ep = i === 0;
+      return el("tr", { class: ep ? "deadparam" : "" }, [
+        el("td", { class: ep ? "v-critical" : "v-weight" }, r[0]),
+        el("td", { class: "mono muted", style: { textAlign: "left" } }, r[1]),
+        el("td", { style: { textAlign: "left" },
+                   class: ep ? "v-critical" : "" }, r[2]),
+        el("td", { style: { textAlign: "left" } }, r[3]),
+        el("td", { class: "muted", style: { textAlign: "left" } }, r[4])
+      ]);
+    });
+    return [
+      kicker("MoE training · <b>where the fourth axis goes</b>"),
+      title("<span class='mono'>N = EP × TP × PP × DP</span>", true),
+      frag(d("panel acc", [ph("the four axes, ranked by how much pain their " +
+        "communication causes"),
+        el("table", { class: "data nowrap" }, [
+          el("thead", {}, el("tr", {}, [
+            el("th", { style: { textAlign: "left" } }, "axis"),
+            el("th", { style: { textAlign: "left" } }, "collective"),
+            el("th", { style: { textAlign: "left" } }, "payload"),
+            el("th", { style: { textAlign: "left" } }, "hideable?"),
+            el("th", { style: { textAlign: "left" } }, "what it splits")])),
+          el("tbody", {}, rows)
+        ])]), "f-fade"),
+      frag(d("cols", [
+        NN.callout("key", "EP and TP want the same wire",
+          "Both are unoverlappable, both sit on the critical path of every " +
+          "block, and both want to stay inside the NVLink domain. On a " +
+          "node of " + VPER_NODE + " GPUs, EP × TP has to fit in " +
+          VPER_NODE + " or one of them crosses the network — and the one " +
+          "that crosses becomes the step time. That is the real configuration " +
+          "question in a large MoE run, and it does not have a general answer: " +
+          "TP shrinks each expert, EP spreads the expert list, and which you " +
+          "want depends on whether one expert fits." +
+          (n3d ? " The arithmetic for the other three axes is on slide " +
+                 n3d + "." : "")),
+        NN.callout("why", "Why EP is not just “TP for experts”",
+          "Tensor parallelism cuts a matrix, so every rank holds a piece of " +
+          "every expert and the partial sums must be all-reduced. Expert " +
+          "parallelism cuts the LIST, so every rank holds whole experts and " +
+          "there is nothing to reduce — but the tokens have to move instead. " +
+          "One trades a fixed-size reduction for a variable-size permutation. " +
+          "Large runs use both: TP inside an expert when a single expert is " +
+          "too big, EP across experts when the list is.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* ======================================================================== */
+/*  SECTION 3 · MoE INFERENCE                                               */
+/* ======================================================================== */
+SEP("moeinfer");
+
+/* --------------------------------------------- X1. a different problem */
+S({
+  chapter: "MoE inference · a different problem",
+  plain: "In training the batch fills every expert. In decode it scatters.",
+  notes: "Reset the frame before any numbers. Training and inference are not " +
+    "two views of one problem for a mixture of experts — they are different " +
+    "problems, and the thing that makes MoE efficient in one makes it " +
+    "pathological in the other. In training a step routes hundreds of " +
+    "thousands of tokens, so even with " + (MIF.rows ? "256" : "many") +
+    " experts each one receives thousands and its GEMM is a genuine " +
+    "matrix-matrix product with a large M. Grouping does exactly what the " +
+    "first section promised. In decode the batch is a handful of sequences " +
+    "and each contributes ONE token, so the pairs scatter: with top-k over " +
+    "many experts, most experts that are touched at all are touched by a " +
+    "single token. And you still read the entire weight matrix for each one. " +
+    "That is the same failure the naive per-token implementation had in " +
+    "section one, except now it is not an implementation mistake — it is " +
+    "what the workload actually looks like.",
+  build: function () {
+    const r1 = MIF.rows[0];
+    const big = MIF.rows[MIF.rows.length - 1];
+    return [
+      kicker("MoE inference · <b>the frame</b>"),
+      title("The same grouping that saves training " +
+            "<span class='v-critical'>cannot help</span> decode", true),
+      frag(d("cols", [
+        d("panel w", [ph("training · a large batch"),
+          h("say", "Hundreds of thousands of tokens per step. Every expert " +
+            "receives thousands of rows, so each group is a real GEMM with a " +
+            "large M and the weight read is amortised over all of them. At " +
+            "batch " + big.batch + " in this model each expert averages " +
+            f(big.avg_tokens_per_expert, 0) + " tokens.")]),
+        d("panel a", [ph("decode · a small batch that scatters"),
+          h("say", "Batch " + r1.batch + " produces " + r1.pairs +
+            " (token, expert) pairs spread over " + r1.experts_touched +
+            " experts — " + f(r1.avg_tokens_per_expert, 1) +
+            " token each. Every one of those " + r1.experts_touched +
+            " weight matrices is read in full to process a single row.")])
+      ]), "f-pop"),
+      frag(d("cols3", [
+        d("panel acc tight", [ph("what stays the same"),
+          h("small", "The router, the grouping, the gather and scatter, the " +
+            "proof. Nothing in section one becomes wrong.")]),
+        d("panel acc tight", [ph("what changes"),
+          h("small", "M. The group size falls from thousands to one, and " +
+            "group size <em>is</em> arithmetic intensity — the identity three " +
+            "slides from here.")]),
+        d("panel acc tight", [ph("what it does to part IV"),
+          h("small", "Decode was already the memory-bound end of the " +
+            "roofline for a dense model. A mixture of experts moves it " +
+            "further down, not up.")])
+      ]), "f-fade"),
+      frag(h("small muted",
+        "Model for this section: <b>" + MIF.model + "</b>, priced on " +
+        GPUD.name + ". Rows from <span class='mono'>MOE.inference.rows</span>."),
+        "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------------------- X2. the rows */
+S({
+  chapter: "MoE inference · the rows",
+  plain: "Every expert touched at batch " + MIF.rows[0].batch + " sees exactly " +
+         f(MIF.rows[0].avg_tokens_per_expert, 1) + " token",
+  notes: "The table the rest of the section reads from. Each row is one " +
+    "decode step at a given batch size on " + MIF.model +
+    ". Read across. Pairs is batch times k. Experts touched is the smaller " +
+    "of that and the expert count, because you cannot touch more experts " +
+    "than exist. Average tokens per expert is the ratio. Bytes read is the " +
+    "number of experts touched times the size of one expert in bf16 — and " +
+    "notice it STOPS GROWING once you are touching every expert, which is " +
+    "the whole shape of the argument. FLOPs keep growing. So the intensity " +
+    "column, which is FLOPs over bytes, is flat at " +
+    f(MIF.rows[0].intensity, 1) + " while the batch is small enough that " +
+    "every pair lands on its own expert, and only then starts to climb. The " +
+    "first three rows have identical intensity at batch " +
+    MIF.rows.slice(0, 3).map(function (r) { return r.batch; }).join(", ") +
+    " — a thirty-two-fold increase in batch size that buys nothing at all.",
+  build: function () {
+    const nExp = Math.max.apply(null, MIF.rows.map(function (r) {
+      return r.experts_touched; }));
+    const rows = MIF.rows.map(function (r) {
+      const sat = r.experts_touched >= nExp;
+      return el("tr", { class: sat ? "" : "deadparam" }, [
+        el("td", { class: "n" }, String(r.batch)),
+        el("td", { class: "n muted" }, String(r.pairs)),
+        el("td", { class: "n" + (sat ? "" : " v-critical") },
+          String(r.experts_touched) + (sat ? " (all)" : "")),
+        el("td", { class: "n v-activation" }, f(r.avg_tokens_per_expert, 2)),
+        el("td", { class: "n" }, BY(r.bytes_read)),
+        el("td", { class: "n" }, f(r.flops / 1e9, 1) + " GFLOP"),
+        el("td", { class: "n v-activation" }, f(r.intensity, 2)),
+        el("td", { class: "n" },
+          VRIDGE ? vPc(r.intensity / VRIDGE, 2) : "—")
+      ]);
+    });
+    return [
+      kicker("MoE inference · <b>one decode step, six batch sizes</b>"),
+      title("Bytes stop growing at " + nExp + " experts. FLOPs do not.", true),
+      frag(d("panel acc", [ph(MIF.model + " · bf16 weights · " +
+        "shaded rows are the ones that do not yet touch every expert"),
+        el("table", { class: "data nowrap" }, [
+          el("thead", {}, el("tr", {}, [
+            el("th", {}, "batch"), el("th", {}, "pairs"),
+            el("th", {}, "experts touched"), el("th", {}, "tokens/expert"),
+            el("th", {}, "bytes read"), el("th", {}, "FLOPs"),
+            el("th", {}, "intensity"),
+            el("th", {}, VRIDGE ? "of " + GPUD.name + " peak" : "of peak")])),
+          el("tbody", {}, rows)
+        ])]), "f-fade"),
+      frag(d("cols3", [
+        NN.formula({ rule: "pairs", sub: "batch × top-" +
+          (MIF.rows[0].pairs / MIF.rows[0].batch),
+          result: "rows of work", cls: "activation" }),
+        NN.formula({ rule: "bytes", sub: "experts_touched × one expert × " +
+          BF16B + " B", result: "capped at " + BY(MIF.rows[MIF.rows.length - 1].bytes_read),
+          cls: "weight" }),
+        NN.formula({ rule: "intensity", sub: "FLOPs ÷ bytes",
+          result: f(MIF.rows[0].intensity, 2) + " at batch " + MIF.rows[0].batch,
+          cls: "activation" })
+      ]), "f-fade"),
+      frag(h("small muted",
+        "One expert at these shapes is <span class='mono'>" +
+        NN.count(MIF.rows[0].flops / (2 * MIF.rows[0].pairs)) +
+        "</span> parameters, derived from the row's own FLOP and pair counts " +
+        "rather than typed. " + MIF.model + "."), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------------- X3. the collapse */
+S({
+  chapter: "MoE inference · the collapse",
+  plain: "Intensity " + f(MIF.rows[0].intensity, 1) + " against a ridge of " +
+         (VRIDGE ? f(VRIDGE, 2) : "the device's") + " — " +
+         (VRIDGE ? vPc(MIF.rows[0].intensity / VRIDGE, 1) : "a fraction") + " of peak",
+  notes: "The number, on its own slide, in the same shape part four used for " +
+    "dense decode. At batch one, top-" +
+    (MIF.rows[0].pairs / MIF.rows[0].batch) + " routing over " +
+    Math.max.apply(null, MIF.rows.map(function (r) { return r.experts_touched; })) +
+    " experts touches " + MIF.rows[0].experts_touched + " experts with one " +
+    "token each. The arithmetic intensity of that step is exactly " +
+    f(MIF.rows[0].intensity, 1) + " FLOP per byte — not approximately, " +
+    "exactly, for a reason the next slide gives. Against " + GPUD.name +
+    "'s ridge of " + (VRIDGE ? f(VRIDGE, 2) : "its balance point") +
+    " that reaches " + (VRIDGE ? vPc(MIF.rows[0].intensity / VRIDGE, 2) : "under one per cent") +
+    " of the device's dense peak. You read " + MIF.rows[0].experts_touched +
+    " entire expert weight matrices to perform " +
+    MIF.rows[0].experts_touched + " tokens' worth of arithmetic. Anchor it " +
+    "against part four: a dense model at batch one was already at " +
+    "intensity one and that was the shocking slide. A mixture of experts at " +
+    "batch one is at the same intensity — and stays there while you batch.",
+  build: function () {
+    const r1 = MIF.rows[0];
+    const nExp = Math.max.apply(null, MIF.rows.map(function (r) {
+      return r.experts_touched; }));
+    const nPrefdec = slideNumberByPlain("of peak FLOPs");
+    return [
+      kicker("MoE inference · <b>the size of it</b>"),
+      title(VRIDGE
+        ? "<span class='v-activation'>" + vPc(r1.intensity / VRIDGE, 2) +
+          "</span> of " + GPUD.name + "'s peak FLOPs"
+        : "<span class='v-activation'>" + f(r1.intensity, 1) +
+          "</span> FLOP per byte"),
+      frag(d("cols3", [
+        d("panel a", [ph("MoE decode · batch " + r1.batch),
+          h("bignum v-activation", f(r1.intensity, 1)),
+          h("small muted", "FLOP per byte · " + r1.experts_touched +
+            " experts × " + f(r1.avg_tokens_per_expert, 1) + " token each")]),
+        d("panel acc", [ph(VRIDGE ? "the ridge on " + GPUD.name : "the ridge"),
+          h("bignum", VRIDGE ? f(VRIDGE, 2) : "—"),
+          h("small muted", "FLOP per byte · the balance point of the device")]),
+        d("panel crit", [ph("the gap"),
+          h("bignum v-critical", VRIDGE ? vX(VRIDGE / r1.intensity, 0) : "—"),
+          h("small muted", "below the ridge · memory-bound by two orders of " +
+            "magnitude")])
+      ]), "f-pop"),
+      frag(d("cols wide-l", [
+        NN.callout("key", "You read " + r1.experts_touched +
+          " whole weight matrices to do " + r1.experts_touched + " tokens of work",
+          "One decode token at top-" + (r1.pairs / r1.batch) + " over " +
+          nExp + " experts moves " + BY(r1.bytes_read) + " to perform " +
+          f(r1.flops / 1e9, 1) + " GFLOP. Every one of those " +
+          r1.experts_touched + " experts contributes a single row. The " +
+          "grouping trick from section one is still running, still correct, " +
+          "and has nothing to group." +
+          (nPrefdec ? " Slide " + nPrefdec + " is the dense version of this " +
+                      "picture; this is what it looks like with the " +
+                      "parameters spread over " + nExp + " experts." : "")),
+        NN.tiles([
+          { k: "bytes moved", v: BY(r1.bytes_read),
+            s: "for one token", cls: "weight" },
+          { k: "arithmetic done", v: f(r1.flops / 1e9, 1) + " GFLOP",
+            s: "for the same token", cls: "activation" },
+          { k: "tokens per expert", v: f(r1.avg_tokens_per_expert, 1),
+            s: "the number that IS the intensity", cls: "activation" }
+        ])
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------------------- X4. the chart */
+S({
+  chapter: "MoE inference · against a dense model",
+  plain: "MoE intensity is flat while a dense model's climbs — " +
+         (VWORST ? vX(VGAP, 1) + " worse at batch " + VWORST.batch
+                 : "far worse once the dense curve takes off"),
+  notes: "The two curves on one axis, and the shape is the argument. The " +
+    "dense line is " + (VBAT ? VBAT.model : "a dense model") +
+    " from part four's batching data, on the same device. It climbs almost " +
+    "linearly with batch, because a dense model reads its weights once per " +
+    "STEP and every extra sequence in the batch rides along for free — that " +
+    "is the slide from part four that made batching look like a free lunch. " +
+    "The MoE line is flat at " + f(MIF.rows[0].intensity, 1) +
+    " for the first three points and only then starts to climb, because " +
+    "until the batch is large enough to put more than one token on an " +
+    "expert, every extra sequence brings its own extra weight reads with " +
+    "it. The widest gap over the batch sizes the two payloads share is at " +
+    "batch " + (VWORST ? VWORST.batch : "the middle of the range") + ": the " +
+    "dense model is at " + (VWORST ? f(vDenseAt(VWORST.batch), 1) : "far more") +
+    " and the MoE is still at " + (VWORST ? f(VWORST.intensity, 1) : "one") +
+    " — " + (VGAP ? vX(VGAP, 1) : "far") + " worse. Both are still " +
+    "well below the ridge; this is not MoE versus a compute-bound model, it " +
+    "is a bad position made worse.",
+  build: function () {
+    if (!VDROWS || !VRIDGE) {
+      return [kicker("MoE inference · against a dense model"),
+        title("Intensity vs batch", true),
+        NN.callout("warn", "infer.js is not loaded",
+          "This slide reads <span class='mono'>INFER.batching</span> and " +
+          "<span class='mono'>INFER.roofline</span>. Run " +
+          "<span class='mono'>python3 code/inference_toy.py</span>."),
+        d("panel a", [ph("the MoE rows, which are available"),
+          h("small", MIF.rows.map(function (r) {
+            return "batch " + r.batch + " → " + f(r.intensity, 2); }).join(" · "))])];
+    }
+    const lx = function (b) { return Math.log2(b); };
+    const moePts = MIF.rows.map(function (r) { return [lx(r.batch), r.intensity]; });
+    const denPts = VDROWS.map(function (r) { return [lx(r.batch), r.intensity]; });
+    const xhi = Math.max(moePts[moePts.length - 1][0], denPts[denPts.length - 1][0]);
+    return [
+      kicker("MoE inference · <b>the same axis as part IV</b>"),
+      title("A dense model's intensity climbs with batch. This one does not.", true),
+      d("cols wide-l", [
+        frag(d("panel acc", [ph("arithmetic intensity vs decode batch · " +
+          GPUD.name + " · log y"),
+          NN.chart.line({
+            series: [
+              { name: "MoE", color: "var(--activation)", points: moePts },
+              { name: "dense", color: "var(--weight)", dash: "6 4", points: denPts },
+              { name: "ridge", color: "var(--critical)", dash: "2 5", dots: false,
+                points: [[0, VRIDGE], [xhi, VRIDGE]] }
+            ],
+            width: 560, height: 244, logY: true,
+            xlabel: "log₂(decode batch)", ylabel: "FLOP per byte" }),
+          chartKey([
+            { name: MIF.model.replace("one ", "").replace(" MoE layer", ""),
+              color: "var(--activation)" },
+            { name: "dense " + VBAT.model + " · dashed", color: "var(--weight)" },
+            { name: "ridge " + f(VRIDGE, 2) + " · dotted", color: "var(--critical)" }
+          ])]), "f-left"),
+        d("stack", [
+          frag(d("panel acc tight", [ph("at the same batch sizes"),
+            el("table", { class: "data nowrap" }, [
+              el("thead", {}, el("tr", {}, [
+                el("th", {}, "batch"), el("th", {}, "MoE"),
+                el("th", {}, "dense"), el("th", {}, "ratio")])),
+              el("tbody", {}, VCMP.map(function (r) {
+                const dv = vDenseAt(r.batch);
+                return el("tr", { class: VWORST && r.batch === VWORST.batch
+                  ? "deadparam" : "" }, [
+                  el("td", { class: "n" }, String(r.batch)),
+                  el("td", { class: "n v-activation" }, f(r.intensity, 2)),
+                  el("td", { class: "n v-weight" }, f(dv, 2)),
+                  el("td", { class: "n" + (dv / r.intensity > 1.05
+                    ? " v-critical" : " muted") },
+                    dv / r.intensity > 1.05
+                      ? vX(dv / r.intensity, 1) + " worse" : "level")
+                ]);
+              }))
+            ])]), "f-right"),
+          frag(h("small muted",
+            "The dense curve is " + VBAT.model + " at seq " +
+            NN.count(VBAT.by_seq[0].seq) + " from " +
+            "<span class='mono'>INFER.batching</span> — the same data part " +
+            "four's batching section plots. Both curves are decode steps on " +
+            GPUD.name + "; neither reaches the ridge."), "f-right")
+        ])
+      ])
+    ];
+  }
+});
+
+/* ------------------------------------------------- X5. the identity */
+S({
+  chapter: "MoE inference · the identity",
+  plain: "intensity ≡ average tokens per expert, exactly — pe and the 2 cancel",
+  notes: "Two columns of that table were the same number and it is worth " +
+    "showing rather than hiding, because the identity is the whole " +
+    "explanation. Write the two quantities out. The FLOPs of a decode step " +
+    "are two times the expert size times the number of (token, expert) " +
+    "pairs. The bytes are the number of experts touched times the expert " +
+    "size times two, because the weights are bf16. Divide: the expert size " +
+    "cancels, the factor of two cancels, and what is left is pairs over " +
+    "experts touched — which is the definition of the average tokens per " +
+    "expert. So an expert's arithmetic intensity IS how many tokens it " +
+    "received. Nothing about the model shape survives the division. That is " +
+    "why batching does nothing until it starts putting a second token on an " +
+    "expert, and it is also why the answer at batch one is exactly one " +
+    "rather than approximately one. The same identity holds for a dense " +
+    "layer, where it says intensity equals batch size — which is the part " +
+    "four result, recovered as a special case with one expert.",
+  build: function () {
+    const r = MIF.rows[0];
+    const pe = r.flops / (2 * r.pairs);
+    return [
+      kicker("MoE inference · <b>why it is exactly 1.0</b>"),
+      title("An expert's arithmetic intensity <span class='v-activation'>is</span> " +
+            "how many tokens it got", true),
+      frag(d("cols wide-l", [
+        derivPanel("the division, in full", [
+          drow("FLOPs = 2 · pe · pairs",
+            "two per multiply-accumulate"),
+          drow("bytes = experts_touched · pe · " + BF16B,
+            "every touched expert read in full, bf16"),
+          drow("intensity = (2 · pe · pairs) ÷ (experts_touched · pe · " +
+            BF16B + ")", "substitute"),
+          drow("pe cancels · the 2 and the " + BF16B + " cancel",
+            "the model shape drops out"),
+          drow("intensity = pairs ÷ experts_touched = avg tokens per expert",
+            "an identity, not an approximation", true)
+        ], "a"),
+        d("stack", [
+          NN.tiles([
+            { k: "one expert, bf16", v: BY(pe * BF16B),
+              s: NN.count(pe) + " parameters", cls: "weight" },
+            { k: "cancels", v: "entirely", s: "pe appears on both sides" },
+            { k: "what is left", v: f(r.avg_tokens_per_expert, 1),
+              s: "tokens per expert = intensity", cls: "activation" }
+          ]),
+          NN.callout("key", "The dense case is the same statement",
+            "Put one expert in and every token goes to it: pairs is the " +
+            "batch size, experts touched is one, and the identity says the " +
+            "intensity of a decode step is the batch size. That is exactly " +
+            "part four's result — weights are read once per step and every " +
+            "sequence in the batch rides along. A mixture of experts does " +
+            "not break that rule; it divides the batch across " +
+            Math.max.apply(null, MIF.rows.map(function (x) {
+              return x.experts_touched; })) + " copies of it.")
+        ])
+      ]), "f-fade"),
+      frag(h("small muted", MIF.identity), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------- X6. batching helps, then stops */
+S({
+  chapter: "MoE inference · batching",
+  plain: "Batching helps MORE here — until every expert is touched, after which it is a dense model",
+  notes: "The optimistic half, stated carefully because it is easy to " +
+    "overclaim. Once the batch is big enough that experts start receiving " +
+    "more than one token, each extra token is nearly free — it rides on a " +
+    "weight read that has already been paid for. So the marginal return to " +
+    "batching is steeper for a mixture of experts than for a dense model in " +
+    "that regime: the intensity goes " +
+    MIF.rows.slice(2).map(function (r) { return f(r.intensity, 0); }).join(" → ") +
+    " while the bytes read do not move at all. But read the left half of the " +
+    "table too. Below the saturation point, batching buys literally nothing " +
+    "— the first " + MIF.rows.filter(function (r) {
+      return r.avg_tokens_per_expert <= 1; }).length +
+    " rows have identical intensity — because every new sequence brings its " +
+    "own new experts with it. And above the saturation point, what you have " +
+    "is a dense model whose parameter count is the ACTIVE count: same " +
+    "curve, same asymptote, same rules as part four. The interesting region " +
+    "is narrow and it sits at batch sizes that also cost you KV cache.",
+  build: function () {
+    const nExp = Math.max.apply(null, MIF.rows.map(function (r) {
+      return r.experts_touched; }));
+    const sat = MIF.rows.filter(function (r) { return r.experts_touched >= nExp; })[0];
+    const nBatch = slideNumberByPlain("Weights are read once per STEP");
+    const rows = MIF.rows.map(function (r, i) {
+      const prev = MIF.rows[i - 1];
+      const gain = prev ? r.intensity / prev.intensity : null;
+      const bump = prev ? r.batch / prev.batch : null;
+      return el("tr", { class: r.experts_touched >= nExp ? "" : "deadparam" }, [
+        el("td", { class: "n" }, String(r.batch)),
+        el("td", { class: "n muted" }, String(r.experts_touched)),
+        el("td", { class: "n" }, BY(r.bytes_read)),
+        el("td", { class: "n v-activation" }, f(r.intensity, 2)),
+        el("td", { class: "n" }, bump ? vX(bump, 0) : "—"),
+        el("td", { class: "n" + (gain && gain > 1 ? " v-good" : " v-critical") },
+          gain ? vX(gain, 2) : "—")
+      ]);
+    });
+    return [
+      kicker("MoE inference · <b>the optimistic half, read carefully</b>"),
+      title("Nothing below batch " + sat.batch + ". Dense-model behaviour above it.",
+            true),
+      frag(d("cols wide-l", [
+        d("panel acc", [ph("what each doubling of the batch actually buys"),
+          el("table", { class: "data nowrap" }, [
+            el("thead", {}, el("tr", {}, [
+              el("th", {}, "batch"), el("th", {}, "experts"),
+              el("th", {}, "bytes read"), el("th", {}, "intensity"),
+              el("th", {}, "batch ×"), el("th", {}, "intensity ×")])),
+            el("tbody", {}, rows)
+          ]),
+          h("small muted", "Shaded rows do not yet touch all " + nExp +
+            " experts. Their bytes grow exactly as fast as their FLOPs, so " +
+            "the ratio does not move.")]),
+        d("stack", [
+          NN.callout("why", "Batching helps more here — until it doesn't",
+            "Above batch " + sat.batch + " the bytes are pinned at " +
+            BY(sat.bytes_read) + " and every further token is pure FLOPs, so " +
+            "the intensity rises one-for-one with the batch. That is a " +
+            "steeper return than a dense model gets. Below it, the bytes rise " +
+            "with the batch and the return is exactly zero." +
+            (nBatch ? " Slide " + nBatch + " is the dense version of this " +
+                      "argument." : "")),
+          NN.callout("warn", "And then it is just a dense model",
+            "Past saturation, a mixture of experts behaves like a dense model " +
+            "whose parameter count is the ACTIVE count — " +
+            f(MBIG.mlp_params_active / 1e9, 1) + "B for " + MBIG.name +
+            " — with the full " + f(MBIG.mlp_params_total / 1e9, 1) +
+            "B still occupying HBM. You get a small model's compute profile " +
+            "and a large model's memory bill, which is the honest one-line " +
+            "summary of MoE serving.")
+        ])
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* --------------------------------------------------- X7. the memory problem */
+S({
+  chapter: "MoE inference · the memory problem",
+  plain: "Dense-model latency, with a footprint " + vX(MBIG.sparsity) + " larger",
+  notes: "The second bill, and for most people deploying an MoE it is the " +
+    "one that decides whether they can deploy it at all. Every expert has to " +
+    "be resident, because the router decides per token at run time. For " +
+    MBIG.name + " that is " + BY(MBIG.mlp_params_total * BF16B) +
+    " of bf16 MLP weights, which is " + Math.ceil(MBIG.mlp_params_total * BF16B / GPU_B) +
+    " " + GPUD.name + "s before attention, embeddings or a single byte of KV " +
+    "cache. The compute profile, meanwhile, is that of a model with " +
+    f(MBIG.mlp_params_active / 1e9, 1) + "B active parameters. So you are " +
+    "renting the memory of a very large model and getting the arithmetic of " +
+    "a much smaller one — which is the trade, and it is a good trade if you " +
+    "have the cards and a terrible one if you do not. Put the comparison on " +
+    "the slide: a dense model that ran at the same speed would need " +
+    "roughly the active parameter count in HBM, and the difference between " +
+    "those two bars is what sparsity actually costs.",
+  build: function () {
+    const holdB = MBIG.mlp_params_total * BF16B;
+    const useB  = MBIG.mlp_params_active * BF16B;
+    return [
+      kicker("MoE inference · <b>what you rent versus what you use</b>"),
+      title(BY(holdB) + " resident to run " + BY(useB) + " of arithmetic", true),
+      frag(d("cols wide-l", [
+        d("panel w", [ph(MBIG.name + " · MLP weights, bf16 · what you rent, " +
+          "and the slice of it a token reads"),
+          NN.memstrip([
+            { cls: "activation", bytes: useB, label: "read per token" },
+            { cls: "weight", bytes: holdB - useB,
+              label: "resident — the experts this token did not choose" }], holdB),
+          h("small muted", "resident · " + BY(holdB) + " · " +
+            Math.ceil(holdB / GPU_B) + " × " + GPUD.name + " at " + CAP(GPU_B) +
+            " each, before attention or KV cache"),
+          h("small muted", "read per token · " + BY(useB) + " · " +
+            vPc(useB / holdB, 1) + " of the bar — and it is that slice, not " +
+            "the whole bar, that sets the step time")]),
+        d("stack", [
+          NN.tiles([
+            { k: "resident", v: BY(holdB), s: "all " + MBIG.n_experts +
+              " experts, always", cls: "weight" },
+            { k: "read per token", v: BY(useB),
+              s: "top-" + MBIG.top_k + " + shared", cls: "activation" },
+            { k: "cards to hold it", v: String(Math.ceil(holdB / GPU_B)),
+              s: GPUD.name + " · MLP weights alone" }
+          ]),
+          NN.callout("mem", "A dense model's latency, a large model's footprint",
+            "The step time is set by the " + BY(useB) + " you read; the " +
+            "cluster size is set by the " + BY(holdB) + " you hold. Those two " +
+            "sentences are the whole of MoE serving. It is why MoE is " +
+            "attractive to anyone who already has the GPUs and unattractive " +
+            "to anyone who is counting them.")
+        ])
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------- X8. offloading, not simulated */
+S({
+  chapter: "MoE inference · offloading",
+  plain: "Expert offloading and hot-expert caching — the two escape hatches, neither simulated",
+  notes: "The two things people reach for when the weights do not fit, " +
+    "flagged clearly as not simulated because nothing in this project " +
+    "measures them. Offloading keeps cold experts in host memory and pulls " +
+    "them across PCIe on demand. Do the arithmetic before believing it: " +
+    (VPCIE ? VPCIE.name + " is " + VPCIE.per_dir_GBps + " GB/s per direction " +
+      "against " + (VGPU ? f(VGPU.hbm_bw_bytes_per_s / 1e12, 2) + " TB/s" : "HBM") +
+      " of HBM, roughly " + (VGPU && VPCIE
+        ? f(VGPU.hbm_bw_bytes_per_s / (VPCIE.per_dir_GBps * 1e9), 0) + "×"
+        : "an order of magnitude") + " slower"
+      : "the host link is at least an order of magnitude slower than HBM") +
+    ", so a decode step that has to fetch even one expert pays more for that " +
+    "fetch than for every weight read it was already doing. It works when " +
+    "the fetch can be overlapped or when the batch is large; it does not " +
+    "rescue batch-one latency. Hot-expert caching is the softer version: " +
+    "expert usage is genuinely skewed in trained models, so keep the popular " +
+    "ones in HBM and page the rest. Both are real techniques in real " +
+    "systems, and both are outside what this project measures — say that " +
+    "plainly rather than quoting a speedup nobody here computed.",
+  build: function () {
+    const hbm = VGPU ? VGPU.hbm_bw_bytes_per_s : null;
+    const pci = VPCIE ? VPCIE.per_dir_GBps * 1e9 : null;
+    const peB = MIF.rows[0].flops / (2 * MIF.rows[0].pairs) * BF16B;
+    return [
+      kicker("MoE inference · <b>not simulated</b>"),
+      title("Two escape hatches, and the arithmetic you should do first", true),
+      frag(d("rowflex", [
+        d("pill model", "NOT SIMULATED"),
+        d("pill", "nothing in this project measures either technique"),
+        d("pill", "the bandwidth figures below are vendor numbers, quoted")
+      ]), "f-pop"),
+      frag(d("cols", [
+        d("panel a", [ph("expert offloading · cold experts live in host memory"),
+          h("say", "Keep the experts this batch does not want in host RAM and " +
+            "fetch on demand. The fetch is the whole story: " +
+            (pci && hbm
+              ? "<span class='mono'>" + VPCIE.name + "</span> moves " +
+                BY(pci) + "/s against HBM's " + BY(hbm) + "/s, so one " +
+                BY(peB) + " expert takes " +
+                f(peB / pci * 1e3, 2) + " ms to arrive and " +
+                f(peB / hbm * 1e3, 3) + " ms to read once it is there."
+              : "the host link is far slower than HBM.") +
+            " It buys capacity at batch sizes where the transfer can hide " +
+            "behind compute. It does not rescue batch-one latency.")]),
+        d("panel a", [ph("hot-expert caching · keep the popular ones resident"),
+          h("say", "Expert usage in a trained model is skewed — the same " +
+            "imbalance the auxiliary loss spends the whole training run " +
+            "fighting is, at serving time, a cache-hit rate. Pin the busiest " +
+            "experts in HBM, page the tail. The upside is bounded by how " +
+            "skewed the traffic actually is, which is a property of the " +
+            "model and the workload, not of the technique.")])
+      ]), "f-fade"),
+      frag(NN.callout("warn", "Why these get their own slide and no number",
+        "Both are standard, both are shipped in real systems, and neither is " +
+        "modelled anywhere in this project. Every other figure in part five " +
+        "comes out of <span class='mono'>" + MM.generated_by + "</span>, " +
+        "<span class='mono'>INFER</span> or <span class='mono'>PARALLEL</span>. " +
+        "The two bandwidths above are vendor specifications quoted from " +
+        "<span class='mono'>PARALLEL.interconnects</span>, and the transfer " +
+        "times are that arithmetic and nothing more — no overlap, no " +
+        "prefetch, no cache-hit model. Anyone who needs a real answer here " +
+        "should measure it."), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------------- X9. the honest caveat */
+S({
+  chapter: "MoE inference · the caveat",
+  plain: "The intensity model above ignores the all-to-all, which in decode is often the real bottleneck",
+  notes: "The honesty slide, and the caveat ships with the data so it goes on " +
+    "the screen word for word. Everything in this section counted HBM " +
+    "traffic and nothing else. That is the right first model — it is the " +
+    "model part four used for a dense model, and it is what makes the " +
+    "intensity identity clean. It is also incomplete in a way that matters " +
+    "specifically for a mixture of experts. If the experts are spread across " +
+    "GPUs, every decode token pays two all-to-alls per MoE layer, and in " +
+    "decode those are pure latency: the payload is a handful of " +
+    "d_model-sized rows, far too small for bandwidth to be the constraint, " +
+    "so what you pay is the fixed cost of a collective, once per layer, per " +
+    "token, with nothing to overlap it against. On a deep model that is " +
+    "dozens of round trips inside a step that is only a few milliseconds " +
+    "long. Section two's point that these sit on the critical path is much " +
+    "sharper here than it was in training, because in training there was at " +
+    "least a large compute step to hide behind.",
+  build: function () {
+    const nInfPar = slideNumberByPlain("Weights are read once per STEP");
+    return [
+      kicker("MoE inference · <b>what the model above leaves out</b>"),
+      title("The weight reads are not the only cost, and often not the biggest",
+            true),
+      frag(NN.callout("warn", "MOE.inference.caveat, verbatim",
+        "“" + MIF.caveat + "”"), "f-fade"),
+      frag(d("cols3", [
+        d("panel a tight", [ph("what section three counted"),
+          h("small", "HBM traffic only. Bytes of expert weights read, FLOPs " +
+            "performed, and the ratio. Exactly the model part four used for " +
+            "a dense decode step.")]),
+        d("panel g tight", [ph("what it did not count"),
+          h("small", "The " + VA2A_FWD + " all-to-alls per MoE layer that " +
+            "expert parallelism forces in the forward pass. In decode their " +
+            "payload is tiny, so they cost latency, not bandwidth.")]),
+        d("panel crit tight", [ph("why that is worse in decode"),
+          h("small", "A latency cost paid once per layer per TOKEN, inside a " +
+            "step that is milliseconds long, with no other work to hide it " +
+            "behind. In training there was a large compute step to overlap " +
+            "with. Here there is not.")])
+      ]), "f-fade"),
+      frag(NN.callout("key", "The same shape as part IV's inference-parallelism result",
+        "Part four found that tensor parallelism's all-reduce is cheap in " +
+        "bytes and impossible to hide in decode, because the payload shrinks " +
+        "by exactly batch × sequence while the fixed cost does not. Expert " +
+        "parallelism's all-to-all has the same property and there are more of " +
+        "them. It is the reason large MoE serving systems work so hard to " +
+        "keep expert parallelism inside one NVLink domain, and the reason " +
+        "some choose to replicate experts rather than shard them." +
+        (nInfPar ? " The dense form of the argument is on slide " + nInfPar +
+                   " and the sections around it." : "")), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------- X10. tie back to part IV */
+S({
+  chapter: "MoE inference · close of part V",
+  plain: "One extra degree of freedom, and it lands on the same number part IV was about",
+  notes: "Close part five by folding it back into part four. The whole of " +
+    "part four was one number — FLOPs performed per byte moved — and seven " +
+    "attacks on it. A mixture of experts is not an eighth attack. It is a " +
+    "change to the model that moves the number in the WRONG direction at " +
+    "small batch, in exchange for a capacity increase that has nothing to do " +
+    "with the number at all. Read the table: the cache, batching, paging, " +
+    "quantisation, speculation and the parallelism recipe all still apply " +
+    "unchanged — a MoE model has a KV cache like anything else and " +
+    "quantising its experts helps for the same reason quantising a dense " +
+    "model does. What MoE adds is a second axis, capacity, that dense " +
+    "models simply do not have, and a second bill, communication, that they " +
+    "do not pay. Finish on the honest summary: you get a small model's " +
+    "arithmetic, a large model's memory, and a collective the rest of the " +
+    "field never has to think about.",
+  build: function () {
+    const r1 = MIF.rows[0];
+    const rows = [
+      ["The KV cache", "unchanged — attention is dense either way",
+       "same bytes per token", "no effect"],
+      ["Batching", "helps more above saturation, nothing below it",
+       "flat until every expert is touched, then one-for-one",
+       "intensity ↑↑ / ↔"],
+      ["Quantisation", "the experts ARE the weights — the biggest win here",
+       "same accuracy questions as a dense model", "bytes ↓↓"],
+      ["Speculative decoding", "unchanged — verifies k tokens per weight read",
+       "and the extra tokens raise tokens-per-expert too", "tokens/byte ↑"],
+      ["Tensor parallelism", "still divides the HBM read",
+       "now competing with EP for the same NVLink domain", "bytes/GPU ↓"],
+      ["Expert parallelism", "the only way to hold the model at all",
+       VA2A_FWD + " all-to-alls per layer, per token, pure latency",
+       "capacity ↑ / latency ↑"],
+      ["Sparse routing itself", "capacity without per-token FLOPs",
+       "intensity " + f(r1.intensity, 1) + " at batch " + r1.batch +
+       ", and every expert resident", "intensity ↓"]
+    ].map(function (r, i) {
+      const last = i >= 5;
+      return el("tr", { class: i === 6 ? "deadparam" : "" }, [
+        el("td", { style: { textAlign: "left" },
+                   class: last ? "v-critical" : "v-weight" }, r[0]),
+        el("td", { style: { textAlign: "left" } }, r[1]),
+        el("td", { style: { textAlign: "left" }, class: "muted" }, r[2]),
+        el("td", { class: "n v-activation" }, r[3])
+      ]);
+    });
+    return [
+      kicker("Part V · <b>close</b>"),
+      title("Everything from part IV still applies. MoE adds a second axis.", true),
+      frag(d("panel acc", [ph("part IV's techniques on a mixture of experts, " +
+        "and the two things only MoE has"),
+        el("table", { class: "data nowrap" }, [
+          el("thead", {}, el("tr", {}, [
+            el("th", { style: { textAlign: "left" } }, "technique"),
+            el("th", { style: { textAlign: "left" } }, "on an MoE"),
+            el("th", { style: { textAlign: "left" } }, "the difference"),
+            el("th", {}, "which term")])),
+          el("tbody", {}, rows)
+        ])]), "f-fade"),
+      frag(d("cols wide-l", [
+        NN.callout("key", "A small model's arithmetic, a large model's memory",
+          "That is the trade in one line, and every consequence in this part " +
+          "follows from it. " + MBIG.name + " reads " +
+          BY(MBIG.mlp_params_active * BF16B) + " per token and holds " +
+          BY(MBIG.mlp_params_total * BF16B) + ". The compute is a bargain, " +
+          "the memory is not, and the communication is a problem the dense " +
+          "half of the field never has to solve."),
+        NN.tiles([
+          { k: "capacity bought", v: vX(MBIG.sparsity),
+            s: "parameters, per unit of compute", cls: "weight" },
+          { k: "intensity paid", v: f(r1.intensity, 1),
+            s: "FLOP per byte at batch " + r1.batch, cls: "activation" },
+          { k: "collectives added", v: String(VA2A_STEP),
+            s: "all_to_all, per MoE layer, per step" }
+        ])
+      ]), "f-fade")
+    ];
+  }
+});
+
+}  /* end if (MOE) — part V */
+
+/* ======================================================================== */
+/*  CLOSE · the whole arc                                                   */
+/*  The deck used to end at part III and closed on four bullet points about */
+/*  a training step. It now runs five parts, so the close does too: the two */
+/*  organising ideas one per half, the checks that were run rather than     */
+/*  asserted, and where to go next. Every row below is guarded on the       */
+/*  payload it reads, so the close degrades with the rest of the deck.      */
+/* ======================================================================== */
+
+/* The two intensity figures the close quotes. Part IV's own copies live
+   inside its guard, so they are recovered here from window.INFER — same
+   object, same rows, no retyped number. */
+const VRLC = (function () {
+  if (!INF) return null;
+  const g = INF.roofline.filter(function (r) { return r.gpu === GPUD.name; })[0];
+  if (!g) return null;
+  const row = g.rows.filter(function (r) {
+    return r.model === MODEL.name && r.batch === 1; })[0];
+  return row ? { ridge: g.ridge_flops_per_byte, d1: row.decode_intensity } : null;
+})();
+
+/* Every numerical claim the project checks rather than states, collected
+   from whichever payloads happen to be loaded. Nothing here is retyped:
+   each row quotes the field the generator wrote and the flag it set. */
+const PROOFS = (function () {
+  const out = [];
+  const add = function (part, claim, where, err, ok) {
+    if (err === undefined || err === null) return;
+    out.push({ part: part, claim: claim, where: where, err: err, ok: ok !== false });
+  };
+  const W_ = window;
+  add("I", "Every gradient agrees with a finite difference",
+      "T.gradcheck", T.gradcheck.max_abs_error, T.gradcheck.passed);
+  if (W_.TF2 && W_.TF2.gradcheck) {
+    add("II", "The hand-derived transformer backward pass, likewise",
+        "TF2.gradcheck", W_.TF2.gradcheck.max_abs_err, W_.TF2.gradcheck.passed);
+  }
+  if (W_.TFORMER && W_.TFORMER.attn && W_.TFORMER.attn.softmax_check) {
+    add("II", "Every softmax row sums to one",
+        "TFORMER.attn.softmax_check",
+        W_.TFORMER.attn.softmax_check.max_abs_deviation,
+        W_.TFORMER.attn.softmax_check.passed);
+  }
+  if (W_.LM && W_.LM.cross_entropy_gradient) {
+    add("II", "dL/dlogits is the prediction minus the truth, exactly",
+        "LM.cross_entropy_gradient", W_.LM.cross_entropy_gradient.max_abs_err,
+        W_.LM.cross_entropy_gradient.passed);
+  }
+  if (W_.ROPE && W_.ROPE.equivariance) {
+    add("II", "Attention without positions is permutation-equivariant",
+        "ROPE.equivariance", W_.ROPE.equivariance.max_abs_err,
+        W_.ROPE.equivariance.passed);
+  }
+  if (W_.ATTNVAR && W_.ATTNVAR.equivalences) {
+    const worst = W_.ATTNVAR.equivalences.reduce(function (a, b) {
+      return b.max_abs_err > a.max_abs_err ? b : a; }, W_.ATTNVAR.equivalences[0]);
+    add("II", "MHA, GQA and MQA are one code path with a rank limit",
+        "ATTNVAR.equivalences", worst.max_abs_err,
+        W_.ATTNVAR.equivalences.every(function (e) { return e.passed; }));
+  }
+  if (W_.FLASH && W_.FLASH.equivalence) {
+    add("II", "FlashAttention is exact, not an approximation",
+        "FLASH.equivalence", W_.FLASH.equivalence.output_max_abs_err,
+        W_.FLASH.equivalence.passed);
+  }
+  if (W_.PARALLEL) {
+    const st = W_.PARALLEL.strategies;
+    add("III", "Data parallelism reproduces the full-batch gradient",
+        "PARALLEL.strategies.ddp.verify", st.ddp.verify.grad_max_err,
+        st.ddp.verify.passed);
+    add("III", "Tensor parallelism reproduces the single-GPU forward pass",
+        "PARALLEL.strategies.tp.verify", st.tp.verify.forward_max_err,
+        st.tp.verify.passed);
+    add("III", "ZeRO-3 reproduces it too, holding a shard of every layer",
+        "PARALLEL.strategies.zero3.verify", st.zero3.verify.forward_max_err,
+        st.zero3.verify.passed);
+    add("III", "Pipeline parallelism reproduces both, across stages",
+        "PARALLEL.strategies.pp.verify", st.pp.verify.grad_max_err,
+        st.pp.verify.passed);
+  }
+  if (W_.SEQPAR && W_.SEQPAR.equivalence) {
+    add("III", "Sequence parallelism changes where activations live, not what is computed",
+        "SEQPAR.equivalence", W_.SEQPAR.equivalence.sp_err,
+        W_.SEQPAR.equivalence.passed);
+  }
+  if (W_.INFER && W_.INFER.generation && W_.INFER.generation.cache_equivalence) {
+    add("IV", "The KV cache equals a full recompute of the prefix",
+        "INFER.generation.cache_equivalence",
+        W_.INFER.generation.cache_equivalence.max_abs_err,
+        W_.INFER.generation.cache_equivalence.passed);
+  }
+  if (W_.QUANT && W_.QUANT.quant && W_.QUANT.quant.smoothquant) {
+    add("IV", "SmoothQuant's migration is an exact rewrite before rounding",
+        "QUANT.quant.smoothquant",
+        W_.QUANT.quant.smoothquant.exactness_max_rel_err,
+        W_.QUANT.quant.smoothquant.exactness_passed);
+  }
+  if (W_.QUANT && W_.QUANT.spec && W_.QUANT.spec.proof) {
+    add("IV", "Speculative decoding emits the target model's distribution",
+        "QUANT.spec.proof.analytic", W_.QUANT.spec.proof.analytic.max_abs_err,
+        W_.QUANT.spec.proof.passed);
+  }
+  if (W_.MOE && W_.MOE.equivalence) {
+    add("V", "Grouping tokens by expert changes nothing about what is computed",
+        "MOE.equivalence", W_.MOE.equivalence.max_abs_err,
+        W_.MOE.equivalence.passed);
+  }
+  return out;
+})();
+
+/* --------------------------------------------------- close 1. two ideas */
+S({
+  chapter: "Close · the two ideas",
+  plain: "Two organising ideas, one per half: four tensor classes, then one ratio",
+  notes: "Close the whole arc, not just the last part. This deck has exactly " +
+    "two ideas in it and everything else is arithmetic around them. The " +
+    "first half — parts one, two and three, everything about training — is " +
+    "organised by the FOUR TENSOR CLASSES. Every byte a training step " +
+    "touches is a weight, a gradient, an activation or optimizer state, the " +
+    "four are distinguished by lifetime rather than by shape, and every " +
+    "parallel strategy in part three is one question asked again: which of " +
+    "the four do we stop replicating, and what collective do we pay to put " +
+    "it back together. The second half — parts four and five, everything " +
+    "about serving — is organised by ARITHMETIC INTENSITY, FLOPs performed " +
+    "per byte moved out of memory. Two of the four classes stop existing, " +
+    "the bill stops being proportional to a number you chose and starts " +
+    "being proportional to the tokens in flight, and every technique is an " +
+    "attack on one ratio. Say the hinge out loud: part five is where the two " +
+    "meet, because a mixture of experts is a memory decision that shows up " +
+    "as an intensity problem. If people leave with these two frames and " +
+    "nothing else, the deck worked.",
+  build: function () {
+    const classIdea = d("panel acc", [
+      ph("parts I–III · training · " + T.memory.per_tensor.length +
+         " tensors, four classes, one question"),
+      NN.legend(),
+      gap(6),
+      h("small", "Every byte a training step touches is one of four things, " +
+        "told apart by <b>lifetime</b> rather than by shape. Weights and " +
+        "optimizer state live for the whole run; activations live from the " +
+        "forward pass to the backward pass; gradients live from backward to " +
+        "the step. That taxonomy is the whole of part one, it survives the " +
+        "change to a real transformer in part two, and part three is one " +
+        "question asked six times — <b>which class do we stop replicating, " +
+        "and what collective is the price?</b>"),
+      gap(6),
+      h("small muted", "Mixed precision on " + MODEL.name + ": " +
+        BPP_MIXED + " bytes per parameter, of which the weights are " + R_W +
+        ". The other " + (BPP_MIXED - R_W) + " are the reason part III exists.")
+    ]);
+    const intIdea = d("panel acc", [
+      ph("parts IV–V · serving · two classes, and one ratio"),
+      d("rowflex", [
+        d("pill", "weights — kept"), d("pill hot", "gradients — gone"),
+        d("pill", "activations — reshaped into a KV cache"),
+        d("pill hot", "optimizer — gone")
+      ]),
+      gap(6),
+      h("small", "Serving drops half the taxonomy and needs a new organising " +
+        "idea, and it is a single number: <b>FLOPs performed per byte moved " +
+        "out of memory</b>. Prefill sits far above the device's ridge and " +
+        "decode far below it, and the cache, the scheduler, the allocator, " +
+        "the integer grid, the draft model and the parallelism recipe are " +
+        "six attacks on that one ratio. Part five is where the two halves " +
+        "meet: sparse routing is a <b>memory</b> decision that arrives as an " +
+        "<b>intensity</b> problem."),
+      gap(6),
+      h("small muted", VRLC
+        ? MODEL.name + " decode intensity " + f(VRLC.d1, 2) +
+          " FLOP per byte against " + GPUD.name + "'s ridge of " +
+          f(VRLC.ridge, 2) +
+          (MOE ? "; a routed MoE layer at batch " + MOE.inference.rows[0].batch +
+                 " sits at " + f(MOE.inference.rows[0].intensity, 1) : "") + "."
+        : "Every intensity figure in the second half comes from " +
+          "INFER.roofline and MOE.inference.")
+    ]);
+    return [
+      kicker("Close · <b>the whole deck, in two frames</b>"),
+      title("Four classes for training. One ratio for serving.", true),
+      frag(d("cols", [classIdea, intIdea]), "f-pop"),
+      frag(NN.callout("key", "Why two frames and not one",
+        "They are not competing descriptions — they answer different " +
+        "questions. The four classes tell you <em>what is in memory and " +
+        "when</em>, which is the training question, because a training step " +
+        "is dominated by state you chose to keep. Arithmetic intensity tells " +
+        "you <em>what the machine is waiting for</em>, which is the serving " +
+        "question, because a decode step is dominated by traffic you cannot " +
+        "avoid. Use the wrong frame and the numbers still add up and the " +
+        "conclusions come out backwards — which is exactly what happens in " +
+        "part four, where every result from part three inverts."), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------- close 2. proven, not asserted */
+S({
+  chapter: "Close · what was proven",
+  plain: PROOFS.length + " numerical claims that were checked, not asserted",
+  notes: "The slide to leave up while you take questions. Everything in this " +
+    "deck that could be checked was checked, by the generator, before it " +
+    "would emit its data file — and this table is those checks, read out of " +
+    "the payloads themselves rather than retyped. Read the pattern in the " +
+    "error column: almost every one is at or below the last bit of a double, " +
+    "because these are not approximations that happen to be close. They are " +
+    "rearrangements. FlashAttention computes the same sum in a different " +
+    "order. Grouping an MoE performs the same multiplies on the same rows. " +
+    "Tensor parallelism splits a contraction and adds the pieces back. " +
+    "Sequence parallelism moves where a tensor lives. In every case the " +
+    "claim is an identity, and a number that is merely small would mean the " +
+    "claim was wrong. Two honest notes. Finite-difference checks are the " +
+    "exception — those are genuinely approximate and land near 1e-10, which " +
+    "is what a central difference at this step size can do. And a test that " +
+    "cannot fail is not evidence, which is why the speculative-decoding run " +
+    "also puts a deliberately wrong acceptance rule through the identical " +
+    "test and watches it fail.",
+  build: function () {
+    const rows = PROOFS.map(function (p) {
+      return el("tr", {}, [
+        el("td", { class: "mono muted" }, p.part),
+        el("td", { style: { textAlign: "left" } }, p.claim),
+        el("td", { class: "mono muted" }, p.where),
+        el("td", { class: "n ok" }, f(p.err, 1)),
+        el("td", { html: "<span class='badge " + (p.ok ? "pass" : "fail") +
+          "'>" + (p.ok ? "pass" : "fail") + "</span>" })
+      ]);
+    });
+    const allOk = PROOFS.every(function (p) { return p.ok; });
+    return [
+      kicker("Close · <b>proven, not asserted</b>"),
+      title("<span class='v-good'>" + PROOFS.length + "</span> claims the " +
+            "generators check before they will write a file", true),
+      frag(d("panel acc", [
+        ph("max absolute error · read out of the payloads, not retyped"),
+        el("table", { class: "data nowrap" }, [
+          el("thead", {}, el("tr", {}, [
+            el("th", {}, "part"),
+            el("th", { style: { textAlign: "left" } }, "the claim"),
+            el("th", {}, "field"), el("th", {}, "max|Δ|"), el("th", {}, "")])),
+          el("tbody", {}, rows)
+        ])]), "f-fade"),
+      frag(d("cols wide-l", [
+        NN.callout("key", "Why these are zeros and not small numbers",
+          "Almost every row is an <em>identity</em> rather than an " +
+          "approximation. FlashAttention sums the same terms in a different " +
+          "order; grouping an MoE performs the same multiplies on the same " +
+          "rows; tensor parallelism splits a contraction and adds the pieces " +
+          "back. A number that was merely small would mean the claim was " +
+          "wrong. The finite-difference rows are the exception and are " +
+          "supposed to be approximate."),
+        vbox(allOk, "<b>" + PROOFS.length + " of " + PROOFS.length +
+          "</b> " + (allOk ? "pass" : "PASS/FAIL mixed") +
+          " on the payloads loaded in this browser right now. Open the " +
+          "console and check any of them: the field name in the third " +
+          "column is a live path.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------------ close 3. where to go next */
+S({
+  chapter: "Close · where to go next",
+  plain: "Where to go next: the code in this repo, then five papers, then a real system",
+  notes: "Send people somewhere specific rather than wishing them luck. " +
+    "Three tiers. First, this repository: every number in the deck was " +
+    "produced by a Python file in code/, each of which asserts its claims " +
+    "and refuses to write its output if one fails, and all of them are pure " +
+    "standard library — you can read any of them end to end in an evening " +
+    "and change a shape to see what moves. Second, the papers, one per idea " +
+    "rather than a reading list: ZeRO for the memory taxonomy, Megatron-LM " +
+    "for the tensor cut, FlashAttention for the IO-aware framing, " +
+    "PagedAttention for the allocator, Switch Transformer for the routing " +
+    "and the auxiliary loss. Third, a real system — read vLLM's scheduler or " +
+    "SGLang's, and read a real MoE kernel, because the gap between the " +
+    "grouped-GEMM picture on these slides and a production implementation is " +
+    "where the remaining engineering lives. And one genuine open problem to " +
+    "leave them with, which is the one the deck could not close: activations " +
+    "are the class that does not divide cleanly, and long context is that " +
+    "sentence with money attached.",
+  build: function () {
+    const papers = [
+      ["ZeRO / FSDP", "the memory taxonomy, and what to stop replicating", "III"],
+      ["Megatron-LM", "column-parallel then row-parallel, and why they pair", "III"],
+      ["FlashAttention", "IO-aware attention — the seq² matrix need not exist", "II"],
+      ["PagedAttention / vLLM", "the KV cache needed an operating system", "IV"],
+      ["Switch Transformer / GShard", "top-k routing, capacity, and the auxiliary loss", "V"]
+    ].map(function (r) {
+      return el("tr", {}, [
+        el("td", { style: { textAlign: "left" }, class: "v-weight" }, r[0]),
+        el("td", { style: { textAlign: "left" } }, r[1]),
+        el("td", { class: "mono muted" }, "part " + r[2])
+      ]);
+    });
+    return [
+      kicker("Close · <b>what to read next</b>"),
+      title("Three tiers: this repository, five papers, one real system", true),
+      frag(d("cols wide-l", [
+        d("panel w tight", [ph("2 · one paper per idea, not a reading list"),
+          el("table", { class: "data" }, [el("tbody", {}, papers)])]),
+        d("stack", [
+          d("panel a tight", [ph("1 · the generators in this repository"),
+            h("small", "Pure standard library, no dependencies, each " +
+              "asserting its own claims and refusing to write its output if " +
+              "one fails. Start with <span class='mono'>ground_truth.py</span>, " +
+              "then <span class='mono'>parallel_toy.py</span>, then " +
+              "<span class='mono'>" +
+              (MOE ? MOE.meta.generated_by.replace("code/", "") : "moe_toy.py") +
+              "</span>. Change a shape and rerun.")]),
+          d("panel acc tight", [ph("3 · one production system"),
+            h("small", "A real serving stack's scheduler, and a real " +
+              "grouped-GEMM MoE kernel. The distance between these slides " +
+              "and a shipped implementation is almost entirely those two " +
+              "things — and both are readable code rather than research.")])
+        ])
+      ]), "f-pop"),
+      frag(d("cols", [
+        NN.callout("why", "The problem this deck could not close",
+          "Weights, gradients and optimizer state all divide cleanly by the " +
+          "world size. <b>Activations do not</b> — regenerated every step, " +
+          "scaling with the data you push through rather than the model you " +
+          "chose, and <span class='mono'>seq²</span> worse than that. Every " +
+          "lever left is a different kind of answer to that asymmetry, which " +
+          "is why long context is hard."),
+        NN.callout("key", "And the one part V opened",
+          "A mixture of experts buys capacity with HBM and pays in cards and " +
+          "in a collective whose size nobody can predict. Offloading, " +
+          "hot-expert caching and expert-choice routing are live attempts; " +
+          "the honest position here is that the memory bill and the " +
+          "all-to-all are both still open.")
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------------------------- close 4. the whole arc */
+S({
+  chapter: "Close · the whole arc",
+  plain: SECTIONS.filter(function (x) { return x.kind === "part"; }).length +
+         " parts, " + NN.PAGES.length + " chapters, and every number generated",
+  notes: "The last slide. Five parts: the mechanics of one training step on " +
+    NPARAM + " parameters; a real transformer; many GPUs; inference; and " +
+    "mixture of experts. " + NN.PAGES.length + " written chapters on the " +
+    "site cover the same ground at reading pace with the interactivity these " +
+    "slides can only gesture at — every one of them is a link on this slide " +
+    "and every one runs from a file:// URL with no server. Then the " +
+    "provenance line, and mean it: there is not a single hand-typed model " +
+    "number anywhere in this project. Every value on every slide was read " +
+    "out of a generated payload, and where a figure had to be derived it was " +
+    "derived in the browser from those payloads rather than pasted. The " +
+    "handful of genuinely external numbers — published model shapes, vendor " +
+    "bandwidths, device capacities — are quoted with their source attached " +
+    "and are marked as quoted wherever they appear. Finish by inviting " +
+    "people to open the console and type NN.T, or window.MOE, and go and " +
+    "look at the thing they have just been shown.",
   build: function () {
     const links = NN.PAGES.map(function (p) {
       return el("a", { class: "pill", href: "../site/" + p.file, title: p.blurb },
                 p.n + " · " + p.title);
     });
+    /* only the parts that were actually placed: if a payload failed to load
+       its whole part is skipped, exactly as finishSections() sees it */
+    const parts = SECTIONS.filter(function (x) {
+      return x.kind === "part" && x.index !== undefined; });
+    const partRows = parts.map(function (p) {
+      const topics = SECTIONS.filter(function (x) {
+        return x.kind !== "part" && x.part === p.part && x.index !== undefined; });
+      return el("tr", {}, [
+        el("td", { class: "mono muted" }, "part " + ROMAN[p.part]),
+        el("td", { style: { textAlign: "left" }, class: "v-weight" }, p.title),
+        el("td", { class: "n" }, p.first + "–" + p.last),
+        el("td", { class: "n muted" }, String(topics.length)),
+        el("td", { style: { textAlign: "left" }, class: "muted" }, p.q)
+      ]);
+    });
     return [
-      kicker("Close"),
-      title("Four things to remember"),
-      frag(d("cols4", [
-        panel("w", [ph("one"), h("say",
-          "A parameter is <b>" + FP32B + " bytes</b> at an address. A model is " +
-          "nothing but a large number of them — " + NPARAM + " here, " +
-          bn(CFG.params) + " there.")]),
-        panel("a", [ph("two"), h("say",
-          "The backward pass <b>re-reads what the forward pass wrote</b>. That " +
-          "is why activations must be kept, and why memory scales with batch " +
-          "and sequence, not just with the model.")]),
-        panel("o", [ph("three"), h("say",
-          "Weights are the <b>small part of the bill</b>: " + R_W + " of " +
-          BPP_MIXED + " bytes per parameter. Gradients and optimizer state are " +
-          "the rest.")]),
-        panel("g", [ph("four"), h("say",
-          "Every parallelism strategy is a decision about <b>which of the four " +
-          "classes to stop replicating</b> — and the price is always a " +
-          "collective.")])
-      ]), "f-pop"),
+      kicker("Close · <b>" + SLIDES.length + " slides, " + NN.PAGES.length +
+             " chapters, " + parts.length + " parts</b>"),
+      title("Every number on every slide was generated", true),
+      frag(d("panel acc", [ph("the arc, and where each part sits in this deck"),
+        el("table", { class: "data" }, [
+          el("thead", {}, el("tr", {}, [
+            el("th", {}, ""),
+            el("th", { style: { textAlign: "left" } }, "part"),
+            el("th", {}, "slides"), el("th", {}, "sections"),
+            el("th", { style: { textAlign: "left" } }, "the question it answers")])),
+          el("tbody", {}, partRows)
+        ])]), "f-pop"),
       frag(d("stack", [
-        h("small muted", "Work through the same trace interactively:"),
-        d("rowflex", links)
+        h("small muted", "The same material at reading pace, with the " +
+          "interactivity these slides only gesture at — each page runs from " +
+          "a <span class='mono'>file://</span> URL with no server:"),
+        d("rowflex pglist", links)
       ]), "f-fade"),
       frag(h("small muted",
-        "Every number in this deck came from <span class='mono'>NN.T</span> " +
+        "Payloads: <span class='mono'>NN.T</span> " +
         "(<span class='mono'>code/ground_truth.py</span>), " +
-        "<span class='mono'>window.TFORMER</span> " +
-        "(<span class='mono'>code/transformer_block.py</span>) and " +
-        "<span class='mono'>window.PARALLEL</span> " +
-        "(<span class='mono'>code/parallel_toy.py</span>). Gradients agree " +
-        "with finite differences to " + f(T.gradcheck.max_abs_error, 1) +
+        "<span class='mono'>TFORMER</span>, <span class='mono'>TF2</span>, " +
+        "<span class='mono'>LM</span>, <span class='mono'>ROPE</span>, " +
+        "<span class='mono'>ATTNVAR</span>, <span class='mono'>FLASH</span>, " +
+        "<span class='mono'>DYN</span>, <span class='mono'>PARALLEL</span>, " +
+        "<span class='mono'>SEQPAR</span>, <span class='mono'>INFER</span>, " +
+        "<span class='mono'>SERVING</span>, <span class='mono'>QUANT</span> and " +
+        "<span class='mono'>MOE</span>. Gradients agree with finite " +
+        "differences to " + f(T.gradcheck.max_abs_error, 1) +
         (PA ? "; data parallelism reproduces the full-batch gradient to " +
               f(PA.strategies.ddp.verify.grad_max_err, 1) +
               " and tensor parallelism the forward pass to " +
               f(PA.strategies.tp.verify.forward_max_err, 1) : "") +
-        ". Open the console and type <span class='mono'>NN.T</span>."), "f-fade")
+        (MOE ? "; grouped expert compute matches the per-token " +
+              "reference to " + f(MOE.equivalence.max_abs_err, 1) : "") +
+        ". The only quoted figures in the project are published model shapes " +
+        "and vendor bandwidths, and they carry their source. Open the " +
+        "console and type <span class='mono'>NN.T</span>."), "f-fade")
     ];
   }
 });

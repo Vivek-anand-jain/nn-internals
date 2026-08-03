@@ -533,3 +533,145 @@ footer.site {
 
 /* a strategy-comparison table gets its winner column tinted */
 td.best, th.best { background: color-mix(in srgb, var(--good) 12%, transparent); }
+
+/* ==========================================================================
+   NN.viz primitives  (assets/js/viz.js)
+   Added after an audit found 78-89% of slides carried no diagram, because
+   the kit had no way to show change over time and everything became a table.
+   ========================================================================== */
+
+/* ---- grow: a buffer gaining a row per step ---- */
+.vgrow { margin: 14px 0; }
+.vgrow-t { font-family: var(--mono); font-size: .78rem; color: var(--ink-muted);
+  margin-bottom: 6px; text-transform: uppercase; letter-spacing: .07em; }
+.vgrow-body { display: inline-grid; gap: 3px; padding: 7px;
+  background: var(--surface-2); border: 1px solid var(--hairline);
+  border-radius: 8px; }
+.vgrow-h, .vgrow-rl { font-family: var(--mono); font-size: .68rem;
+  color: var(--ink-muted); display: flex; align-items: center;
+  justify-content: center; padding: 0 6px; }
+.vgrow-rl { justify-content: flex-end; transition: opacity .3s; }
+.vgrow-c { font-family: var(--mono); font-size: .78rem; text-align: right;
+  padding: 5px 8px; border-radius: 4px; font-variant-numeric: tabular-nums;
+  transition: opacity .35s, transform .35s, box-shadow .35s; }
+.vgrow-c.off, .vgrow-rl.off { opacity: .12; }
+.vgrow-c.fresh { box-shadow: 0 0 0 2px currentColor; transform: scale(1.04); }
+.vgrow-rl.fresh { color: var(--ink); font-weight: 700; }
+.vgrow-cap { font-size: .8rem; color: var(--ink-muted); margin-top: 7px;
+  font-family: var(--mono); }
+
+/* ---- roofline ---- */
+.vroof { display: block; margin: 10px auto; }
+
+/* ---- timeline: occupancy over discrete time ---- */
+.vtl { display: grid; gap: 1px; font-family: var(--mono); }
+.vtl-h { font-size: .55rem; color: var(--ink-muted); text-align: center;
+  padding-bottom: 2px; }
+.vtl-l { font-size: .68rem; color: var(--ink-2); display: flex;
+  align-items: center; padding-right: 8px; white-space: nowrap; }
+.vtl-c { height: 20px; border-radius: 2px; font-size: .52rem; color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden; outline: 2px solid transparent; transition: outline-color .15s; }
+.vtl-c.k-idle { background: repeating-linear-gradient(45deg,
+  var(--surface-3), var(--surface-3) 3px, var(--surface-2) 3px, var(--surface-2) 6px); }
+.vtl-c.k-prefill { background: var(--weight); }
+.vtl-c.k-decode  { background: var(--activation); }
+.vtl-c.k-busy    { background: var(--activation); }
+.vtl-c.k-blocked { background: var(--critical); opacity: .55; }
+.vtl-c.k-bubble  { background: repeating-linear-gradient(45deg,
+  var(--surface-3), var(--surface-3) 3px, var(--surface-2) 3px, var(--surface-2) 6px); }
+.vtl-c.now { outline-color: var(--ink); }
+.vtl-key { display: flex; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
+.vtl-kk { font-family: var(--mono); font-size: .7rem; color: var(--ink-2);
+  display: inline-flex; align-items: center; gap: 6px; }
+.vtl-kk::before { content: ""; width: 12px; height: 12px; border-radius: 2px;
+  display: inline-block; }
+.vtl-kk.k-prefill::before { background: var(--weight); }
+.vtl-kk.k-decode::before  { background: var(--activation); }
+.vtl-kk.k-busy::before    { background: var(--activation); }
+.vtl-kk.k-blocked::before { background: var(--critical); opacity: .55; }
+.vtl-kk.k-idle::before, .vtl-kk.k-bubble::before {
+  background: repeating-linear-gradient(45deg,
+  var(--surface-3), var(--surface-3) 3px, var(--surface-2) 3px, var(--surface-2) 6px); }
+
+/* ---- flow: chunks moving between boxes ---- */
+.vflow { display: block; margin: 10px auto; }
+.vflow path { transition: opacity .3s, stroke-width .3s; }
+.vflow rect { transition: stroke .3s, stroke-width .3s; }
+
+/* ---- snap: values landing on a quantisation grid ---- */
+.vsnap { display: block; margin: 10px auto; }
+
+/* ---- chain: accept / reject with rollback ---- */
+.vchain { margin: 14px 0; }
+.vchain-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.vchain-t { display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 12px; border-radius: 7px; font-family: var(--mono);
+  font-size: .82rem; border: 1px solid var(--hairline);
+  background: var(--surface-2); transition: background .3s, border-color .3s,
+  opacity .3s, transform .3s; }
+.vchain-i { font-size: .62rem; color: var(--ink-muted); }
+.vchain-t.pending   { opacity: .3; }
+.vchain-t.accepted  { border-color: var(--good);
+  background: color-mix(in srgb, var(--good) 14%, transparent); color: var(--ink); }
+.vchain-t.rejected  { border-color: var(--critical);
+  background: color-mix(in srgb, var(--critical) 16%, transparent);
+  color: var(--ink); transform: translateY(-2px); }
+.vchain-t.rejected .vchain-x { text-decoration: line-through; }
+.vchain-t.discarded { opacity: .28; border-style: dashed; }
+.vchain-t.discarded .vchain-x { text-decoration: line-through; }
+.vchain-cap { font-family: var(--mono); font-size: .8rem;
+  color: var(--ink-muted); margin-top: 9px; }
+
+/* ---- cut: a matrix with an animated partition ---- */
+.vcut { margin: 14px 0; display: inline-block; }
+.vcut-t { font-family: var(--mono); font-size: .74rem; color: var(--ink-muted);
+  margin-bottom: 6px; }
+.vcut-g { display: inline-grid; gap: 2px; padding: 6px;
+  background: var(--surface-2); border: 1px solid var(--hairline);
+  border-radius: 8px; }
+.vcut-c { font-family: var(--mono); font-size: .74rem; padding: 5px 7px;
+  border-radius: 3px; text-align: right; background: var(--surface-3);
+  color: var(--ink-2); font-variant-numeric: tabular-nums;
+  transition: background .4s, color .4s, opacity .3s, transform .4s; }
+.vcut-c.dim { opacity: .22; }
+.vcut-c.split[data-own="0"] { background: var(--weight-w);     color: var(--weight); }
+.vcut-c.split[data-own="1"] { background: var(--optimizer-w);  color: var(--optimizer); }
+.vcut-c.split[data-own="2"] { background: var(--activation-w); color: var(--activation); }
+.vcut-c.split[data-own="3"] { background: var(--gradient-w);   color: var(--gradient); }
+.vcut-key { display: flex; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
+.vcut-kk { font-family: var(--mono); font-size: .7rem;
+  display: inline-flex; align-items: center; gap: 6px; }
+.vcut-kk::before { content: ""; width: 11px; height: 11px; border-radius: 2px;
+  display: inline-block; }
+.vcut-kk[data-own="0"] { color: var(--weight); }
+.vcut-kk[data-own="0"]::before { background: var(--weight); }
+.vcut-kk[data-own="1"] { color: var(--optimizer); }
+.vcut-kk[data-own="1"]::before { background: var(--optimizer); }
+.vcut-kk[data-own="2"] { color: var(--activation); }
+.vcut-kk[data-own="2"]::before { background: var(--activation); }
+.vcut-kk[data-own="3"] { color: var(--gradient); }
+.vcut-kk[data-own="3"]::before { background: var(--gradient); }
+
+/* ---- heat: heatmap with a stated ramp and hatched masking ---- */
+.vheat { margin: 14px 0; display: inline-block; }
+.vheat-g { display: inline-grid; gap: 2px; padding: 6px;
+  background: var(--surface-2); border: 1px solid var(--hairline);
+  border-radius: 8px; }
+.vheat-rl { font-family: var(--mono); font-size: .68rem; color: var(--ink-muted);
+  display: flex; align-items: center; justify-content: flex-end; padding-right: 7px; }
+.vheat-c { height: 34px; border-radius: 3px; font-family: var(--mono);
+  font-size: .68rem; display: flex; align-items: center; justify-content: center;
+  color: var(--ink); outline: 2px solid transparent;
+  transition: outline-color .2s, transform .2s; }
+.vheat-c:hover { transform: scale(1.06); outline-color: var(--ink-muted); }
+.vheat-c.masked { background: repeating-linear-gradient(45deg,
+  var(--surface-3), var(--surface-3) 4px, var(--surface-2) 4px, var(--surface-2) 8px);
+  color: var(--ink-muted); }
+.vheat-c.hot { outline-color: var(--ink); }
+.vheat-key { display: flex; align-items: center; gap: 8px; margin-top: 8px;
+  font-family: var(--mono); font-size: .68rem; color: var(--ink-muted); }
+.vheat-ramp { display: flex; height: 11px; border-radius: 2px; overflow: hidden; }
+.vheat-ramp i { width: 15px; display: block; }
+.vheat-mk { margin-left: 10px; padding-left: 10px;
+  border-left: 1px solid var(--hairline); }
