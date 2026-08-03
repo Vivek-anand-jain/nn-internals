@@ -2980,19 +2980,19 @@ window.ATTNVAR = {
    "variant": "MHA",
    "max_abs_err": 0.0,
    "passed": true,
-   "claim": "MHA equals MHA whose key/value projection repeats each of its 4 blocks 1x across the 4 query heads. Same code path, same output."
+   "claim": "MHA is the control: nothing is tied, so widening the projection is the identity and the two paths must agree trivially. If this row ever failed, the test itself would be wrong."
   },
   {
    "variant": "GQA",
    "max_abs_err": 0.0,
    "passed": true,
-   "claim": "GQA equals MHA whose key/value projection repeats each of its 2 blocks 2x across the 4 query heads. Same code path, same output."
+   "claim": "GQA equals MHA whose key/value projection is 2 distinct blocks of 2 columns, each repeated 2x to cover the 4 query heads. Same code path, same output."
   },
   {
    "variant": "MQA",
    "max_abs_err": 0.0,
    "passed": true,
-   "claim": "MQA equals MHA whose key/value projection repeats each of its 1 blocks 4x across the 4 query heads. Same code path, same output."
+   "claim": "MQA equals MHA whose key/value projection is 1 distinct block of 2 columns, each repeated 4x to cover the 4 query heads. Same code path, same output."
   }
  ],
  "ranks": {

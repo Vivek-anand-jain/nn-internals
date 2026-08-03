@@ -340,7 +340,7 @@
         tokRow, stepNote, pstrip,
         el("div", { class: "hint", style: { marginTop: "6px" } },
           "next-token distribution over the " + META.vocab + "-token vocabulary — the same "
-          + "argmax-over-logits picture as " + pageOf("lm").n + " " + pageOf("lm").title +
+          + "argmax-over-logits picture as page " + pageOf("lm").n +
           ". These weights are deterministic fillers, not trained, so the distribution is nearly "
           + "flat; the shapes are what this page is about.")
       ]),
@@ -713,7 +713,7 @@
       /* verdict + readout */
       verdict.innerHTML = "";
       verdict.appendChild(el("div", { class: "verdict bad" }, [
-        el("div", { class: "big" }, "decode reaches " + pct(row.decode_flops_utilisation) + " of peak FLOPs"),
+        el("div", { class: "big" }, "decode reaches " + pct(row.flops_utilisation) + " of peak FLOPs"),
         el("div", { class: "det" },
           m.name + " · " + g.gpu + " · batch " + batch + " · seq " + NN.count(m.seq) +
           "  —  intensity " + NN.fmt(dI, 3) + " vs ridge " + NN.fmt(ridge, 2) +
@@ -763,7 +763,7 @@
           el("td", { class: "n" }, NN.fmt(r.decode_intensity, 3)),
           el("td", {}, r.decode_bound),
           el("td", { class: "n", style: { color: "var(--critical)" } },
-            pct(r.decode_flops_utilisation))
+            pct(r.flops_utilisation))
         ]));
       });
       tb2.appendChild(body);
@@ -851,7 +851,7 @@
       { k: "the GPU spends", v: NN.fmt(tBytes / tMath, 0) + X + " longer", s: "waiting for memory than computing",
         cls: null },
       { k: "FLOP utilisation", v: pct(tMath / tBytes), s: "matches INFER.roofline: " +
-        pct(g.rows.filter(function (r) { return r.model === m.name && r.batch === 1; })[0].decode_flops_utilisation) }
+        pct(g.rows.filter(function (r) { return r.model === m.name && r.batch === 1; })[0].flops_utilisation) }
     ]));
 
     host.appendChild(el("h3", {}, "The token/second ceiling, from bandwidth alone"));
@@ -979,7 +979,7 @@
         "Weights are read once per step no matter how many sequences are in flight. Batch " +
         rowN.batch + " raises decode intensity from " + NN.fmt(row1.decode_intensity, 2) + " to " +
         NN.fmt(rowN.decode_intensity, 2) + " FLOP/byte and utilisation from " +
-        pct(row1.decode_flops_utilisation) + " to " + pct(rowN.decode_flops_utilisation) +
+        pct(row1.flops_utilisation) + " to " + pct(rowN.flops_utilisation) +
         ". It stops working when the KV term takes over: at batch " + btLast.batch + " the cache is " +
         pct(btLast.kv_share, 0) + " of the bytes moved."),
       li("paged", "packing the bytes",

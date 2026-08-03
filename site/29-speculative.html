@@ -1,0 +1,908 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 29 Speculative Decoding</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* page-local layout only; every colour comes from design.css custom properties */
+.ctlbar { display: flex; flex-wrap: wrap; gap: 16px 22px; align-items: flex-end;
+          background: var(--surface-2); border: 1px solid var(--hairline);
+          border-radius: 8px; padding: 12px 15px; margin: 16px 0; }
+.fld { min-width: 165px; flex: 1 1 165px; max-width: 320px; }
+.fld > label { display: flex; justify-content: space-between; align-items: baseline; gap: 10px;
+               font-family: var(--mono); font-size: .72rem; color: var(--ink-muted);
+               text-transform: uppercase; letter-spacing: .09em; margin-bottom: 4px; }
+.fld > label b { color: var(--ink); font-size: .86rem; letter-spacing: 0; text-transform: none; }
+.fld input[type="range"] { width: 100%; accent-color: var(--weight); }
+.segs { display: flex; flex-wrap: wrap; gap: 4px; }
+.segs button { font-family: var(--mono); font-size: .74rem; padding: 4px 9px; border-radius: 6px;
+               border: 1px solid var(--hairline); background: var(--surface-1); color: var(--ink-2);
+               cursor: pointer; }
+.segs button:hover { border-color: var(--ink-muted); color: var(--ink); }
+.segs button.on { background: var(--weight); border-color: var(--weight); color: #fff; font-weight: 700; }
+
+.panel { background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 8px;
+         padding: 13px 15px; }
+.panel h4 { margin: 0 0 9px; font-family: var(--mono); font-size: .68rem; letter-spacing: .13em;
+            text-transform: uppercase; color: var(--ink-muted); font-weight: 700; }
+
+/* ---- the propose / verify / accept strip ---- */
+.tape { display: flex; flex-wrap: wrap; gap: 7px; align-items: flex-start; margin: 10px 0; }
+.tok { position: relative; min-width: 62px; border-radius: 7px; border: 1px solid var(--hairline);
+       background: var(--surface-1); padding: 7px 9px 6px; text-align: center;
+       font-family: var(--mono); transition: transform .35s cubic-bezier(.4,0,.2,1),
+       opacity .35s, border-color .3s, background .3s; }
+.tok .w { font-size: .88rem; font-weight: 700; color: var(--ink); line-height: 1.2; }
+.tok .s { font-size: .58rem; color: var(--ink-muted); letter-spacing: .04em;
+          text-transform: uppercase; margin-top: 2px; }
+.tok .n { font-size: .58rem; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.tok.ctx  { background: var(--surface-3); border-color: var(--hairline); }
+.tok.ctx .w { color: var(--ink-2); }
+.tok.done { border-color: var(--activation); background: var(--activation-w); }
+.tok.done .w { color: var(--activation); }
+.tok.draft { border-style: dashed; border-color: var(--accent); }
+.tok.draft .w { color: var(--ink-2); }
+.tok.acc  { border-color: var(--activation); background: var(--activation-w); }
+.tok.acc .w  { color: var(--activation); }
+.tok.rej  { border-color: var(--critical); background: color-mix(in srgb, var(--critical) 14%, transparent); }
+.tok.rej .w  { color: var(--critical); text-decoration: line-through; }
+.tok.rolled { opacity: .22; transform: translateY(10px) scale(.86); }
+.tok.fix  { border-color: var(--gradient); background: var(--gradient-w); }
+.tok.fix .w  { color: var(--gradient); }
+.tok.bonus { border-color: var(--optimizer); background: var(--optimizer-w); }
+.tok.bonus .w { color: var(--optimizer); }
+.tok .badge { position: absolute; top: -8px; right: -6px; font-size: .5rem; font-weight: 700;
+              letter-spacing: .06em; padding: 1px 5px; border-radius: 99px; color: #fff; }
+.tok.acc .badge { background: var(--activation); }
+.tok.rej .badge { background: var(--critical); }
+.tok.fix .badge { background: var(--gradient); }
+.tok.bonus .badge { background: var(--optimizer); }
+.tapelbl { font-family: var(--mono); font-size: .62rem; letter-spacing: .11em;
+           text-transform: uppercase; color: var(--ink-muted); margin: 14px 0 2px; font-weight: 700; }
+
+.dicebar { height: 12px; border-radius: 3px; background: var(--surface-3); position: relative;
+           overflow: hidden; margin-top: 4px; }
+.dicebar i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--activation);
+             opacity: .5; }
+.dicebar u { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--ink);
+             text-decoration: none; }
+
+.kv { font-family: var(--mono); font-size: .8rem; font-variant-numeric: tabular-nums; }
+.kv div { display: flex; justify-content: space-between; gap: 14px; padding: 3px 0;
+          border-bottom: 1px solid var(--hairline-2); }
+.kv div:last-child { border-bottom: none; }
+.kv span.k { color: var(--ink-muted); }
+.kv span.v { color: var(--ink); font-weight: 600; }
+
+table.data { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .78rem;
+             font-variant-numeric: tabular-nums; }
+table.data th, table.data td { padding: 5px 9px; border-bottom: 1px solid var(--hairline-2);
+                               text-align: right; white-space: nowrap; }
+table.data th:first-child, table.data td:first-child { text-align: left; }
+table.data th { font-size: .63rem; letter-spacing: .1em; text-transform: uppercase;
+                color: var(--ink-muted); font-weight: 700; }
+table.data tr.hi td { background: var(--surface-3); }
+table.data tr.hi td:first-child { font-weight: 700; }
+
+.verdict { border-radius: 8px; padding: 13px 17px; margin: 15px 0; border: 1px solid var(--hairline);
+           border-left: 4px solid var(--accent); background: var(--surface-2);
+           display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 22px; }
+.verdict .big { font-size: 1.45rem; font-weight: 800; letter-spacing: -.02em; line-height: 1.2; }
+.verdict .det { font-family: var(--mono); font-size: .8rem; color: var(--ink-2); }
+.verdict.ok  { border-left-color: var(--good); }     .verdict.ok .big  { color: var(--good); }
+.verdict.bad { border-left-color: var(--critical); } .verdict.bad .big { color: var(--critical); }
+
+.chklist { list-style: none; padding: 0; margin: 12px 0 0; }
+.chklist li { display: grid; grid-template-columns: 58px 1fr; gap: 12px; padding: 8px 0;
+              border-top: 1px solid var(--hairline-2); }
+.chklist .st { font-family: var(--mono); font-size: .66rem; font-weight: 700; letter-spacing: .08em; }
+.chklist .st.p { color: var(--good); }
+.chklist .st.f { color: var(--critical); }
+.chklist .nm2 { font-weight: 600; }
+.chklist .dt { font-family: var(--mono); font-size: .72rem; color: var(--ink-muted);
+               line-height: 1.55; word-break: break-word; }
+
+.notelist { margin: 10px 0 0; padding-left: 20px; }
+.notelist li { margin: 6px 0; color: var(--ink-2); font-size: .9rem; line-height: 1.6; }
+
+.distbars { display: grid; grid-template-columns: 42px 1fr; gap: 2px 8px; align-items: center;
+            font-family: var(--mono); font-size: .66rem; }
+.dbar { height: 12px; background: var(--surface-3); border-radius: 3px; overflow: hidden;
+        display: flex; }
+.dbar i { display: block; height: 100%; }
+
+.grid2b { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.grid12 { display: grid; grid-template-columns: 1.4fr 1fr; gap: 18px; }
+@media (max-width: 900px) { .grid2b, .grid12 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 29</div>
+    <h1>Speculative Decoding</h1>
+    <p class="lede">Decode is bandwidth-bound: a forward pass costs what it costs to read the
+      weights, and reading them for one token costs the same as reading them for eight. So let a
+      small model guess the next few tokens, and have the big model check all of them in a single
+      pass. The surprising part is not the speed — it is that the guessing changes nothing. The
+      acceptance rule reproduces the big model's output distribution <em>exactly</em>, and this page
+      proves it twice: once as an identity, once by simulating a hundred and twenty thousand
+      rollouts against the enumerated truth.</p>
+    <noscript><p class="callout warn">This page derives every timing, distribution and curve in the
+      browser from <code>assets/data/quant.js</code>. With JavaScript disabled you will see an empty
+      shell.</p></noscript>
+  </div>
+
+  <section class="block" id="free">
+    <h2>1 · Why verifying k tokens is nearly free</h2>
+    <div id="freeBody"></div>
+  </section>
+
+  <section class="block" id="cycle">
+    <h2>2 · Propose, verify, accept, roll back</h2>
+    <div id="cycleBody"></div>
+  </section>
+
+  <section class="block" id="rule">
+    <h2>3 · The acceptance rule, and why it is exact</h2>
+    <div id="ruleBody"></div>
+  </section>
+
+  <section class="block" id="evidence">
+    <h2>4 · The proof, by simulation</h2>
+    <div id="evBody"></div>
+  </section>
+
+  <section class="block" id="speed">
+    <h2>5 · How much faster, and how long to draft</h2>
+    <div id="speedBody"></div>
+  </section>
+
+  <section class="block" id="notes">
+    <h2>6 · What was proved, and what was assumed</h2>
+    <div id="notesBody"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/quant.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+  const T = NN.T;
+  const Q = window.QUANT;
+  const S = Q.spec;
+  const el = NN.el, fmt = NN.fmt;
+  const TOK = S.toy.tokens;
+
+  function sci(x, d) {
+    if (x === null || x === undefined) return "–";
+    if (x === 0) return "0";
+    return x.toExponential(d === undefined ? 2 : d);
+  }
+  function pct(x, d) { return fmt(x * 100, d === undefined ? 2 : d) + "%"; }
+  function ms(s) { return fmt(s * 1e3, 2) + " ms"; }
+
+  function field(labelText, valueEl, controlEl) {
+    return el("div", { class: "fld" }, [
+      el("label", {}, [el("span", {}, labelText), valueEl || el("b", {}, "")]),
+      controlEl
+    ]);
+  }
+  function kv(rows) {
+    return el("div", { class: "kv" }, rows.map(function (r) {
+      return el("div", {}, [
+        el("span", { class: "k" }, r[0]),
+        el("span", { class: "v" + (r[2] ? " v-" + r[2] : "") }, r[1])
+      ]);
+    }));
+  }
+  function table(head, rows, hi) {
+    return el("div", { class: "scrollx" }, el("table", { class: "data" }, [
+      el("thead", {}, el("tr", {}, head.map(function (h) { return el("th", {}, h); }))),
+      el("tbody", {}, rows.map(function (r, i) {
+        return el("tr", { class: (Array.isArray(hi) ? hi.indexOf(i) >= 0 : i === hi) ? "hi" : "" },
+          r.map(function (c) {
+            return el("td", {}, typeof c === "object" && c !== null ? c : String(c));
+          }));
+      }))
+    ]));
+  }
+  function seg(opts, cur, onPick) {
+    const wrap = el("div", { class: "segs" });
+    opts.forEach(function (o) {
+      const b = el("button", { class: o.value === cur ? "on" : "" }, o.label);
+      b.addEventListener("click", function () {
+        NN.$$("button", wrap).forEach(function (x) { x.classList.remove("on"); });
+        b.classList.add("on");
+        onPick(o.value);
+      });
+      wrap.appendChild(b);
+    });
+    return wrap;
+  }
+
+  /* =====================================================================
+     1 · THE INTENSITY ARGUMENT
+     ===================================================================== */
+  function buildFree() {
+    const host = NN.$("#freeBody");
+    const V = S.verify;
+    const r1 = V.rows[0];
+
+    host.appendChild(el("p", {}, [
+      "Page 24 established the number this whole page rests on. For ",
+      el("b", {}, S.target.name), " at ", el("b", {}, NN.count(S.seq) + " tokens"),
+      " of context, batch ", el("b", {}, String(S.batch)), ", on an ",
+      el("b", {}, S.gpu.name), ", one decode step moves ",
+      el("b", {}, NN.bytes(r1.bytes)), " and does ",
+      el("b", {}, NN.count(r1.flops) + " FLOPs"), " — an arithmetic intensity of ",
+      el("b", {}, fmt(r1.intensity, 2)), " FLOP/byte against a ridge point of ",
+      el("b", {}, fmt(Q.weight_only.ridge_flops_per_byte, 0)),
+      ". The GPU's arithmetic units are almost entirely idle."
+    ]));
+
+    host.appendChild(el("p", {}, [
+      "Now feed the same forward pass ", el("b", {}, "k"),
+      " tokens instead of one. The FLOPs scale with k. The bytes do not — the " +
+      "weights are read once either way, and the KV cache is the same cache. " +
+      "So the cost is unchanged until the arithmetic finally catches up with " +
+      "the memory traffic, which on this configuration happens at:"
+    ]));
+
+    host.appendChild(NN.tiles([
+      { k: "verify 1 token", v: ms(r1.time_s), s: r1.bound + "-bound", cls: "weight" },
+      { k: "verify " + V.rows[V.rows.length - 1].k + " tokens",
+        v: ms(V.rows[V.rows.length - 1].time_s),
+        s: fmt(V.rows[V.rows.length - 1].time_ratio_vs_k1, 4) + "× of one token",
+        cls: "weight" },
+      { k: "free until", v: "k ≈ " + fmt(V.k_crossover, 0),
+        s: "where FLOPs/peak overtakes bytes/bandwidth" },
+      { k: "cost per verified token at k=" + V.rows[V.rows.length - 1].k,
+        v: ms(V.rows[V.rows.length - 1].cost_per_token), s: "if all of them stick" }
+    ]));
+
+    host.appendChild(table(
+      ["k", "FLOPs", "bytes", "intensity", "compute time", "memory time",
+       "step time", "bound", "vs k=1", "per token"],
+      V.rows.map(function (r) {
+        return [String(r.k), NN.count(r.flops), NN.bytes(r.bytes),
+          fmt(r.intensity, 2), ms(r.t_compute_s), ms(r.t_memory_s),
+          ms(r.time_s), r.bound, fmt(r.time_ratio_vs_k1, 4) + "×",
+          ms(r.cost_per_token)];
+      }), 0));
+
+    host.appendChild(NN.chart.line({
+      series: [
+        { name: "step time", color: "var(--weight)",
+          points: V.rows.map(function (r) { return [r.k, r.time_s * 1e3]; }) },
+        { name: "compute time alone", color: "var(--accent)", dash: "4 3",
+          points: V.rows.map(function (r) { return [r.k, r.t_compute_s * 1e3]; }) },
+        { name: "cost per verified token", color: "var(--activation)",
+          points: V.rows.map(function (r) { return [r.k, r.cost_per_token * 1e3]; }) }
+      ],
+      width: 900, height: 260, xlabel: "k — tokens verified in one pass",
+      ylabel: "milliseconds", yMin: 0
+    }));
+    host.appendChild(el("p", { class: "small muted" },
+      "Blue is flat: the step costs the same whether you check one token or " +
+      "sixteen. Grey is the arithmetic, which does grow with k but starts so far " +
+      "below the memory time that it has room to grow " +
+      fmt(V.k_crossover, 0) + "-fold before it matters. Green is the quotient — " +
+      "the price of a verified token, falling like 1/k. Everything after this " +
+      "section is about how many of those verified tokens you actually get to keep."));
+
+    host.appendChild(NN.callout("key", "THIS IS A PREFILL-SHAPED OPERATION",
+      "Verification is not k decode steps. It is one prefill over k tokens, with " +
+      "a warm cache — the same shape the prompt goes through on page 24, just " +
+      "very short. That is why it inherits prefill's economics inside decode's " +
+      "regime, and it is the entire mechanical basis of speculative decoding. " +
+      "Every other detail on this page exists to make that legal."));
+  }
+
+  /* =====================================================================
+     2 · THE CYCLE
+     ===================================================================== */
+  function buildCycle() {
+    const host = NN.$("#cycleBody");
+    const D = S.toy.demo;
+
+    host.appendChild(el("p", {}, [
+      "Below is a real run of the loop, taken from the generator: a target " +
+      "model with ", el("b", {}, String(S.toy.target_layers)),
+      " transformer blocks, a draft model that is the same weights with the " +
+      "blocks removed, a vocabulary of ", el("b", {}, String(S.toy.vocab)),
+      " tokens, temperature ", el("b", {}, fmt(S.toy.temperature, 2)), ", and ",
+      el("b", {}, "k = " + D.k), " proposals per round. Nothing here is staged: " +
+      "these are the tokens the sampler drew and the coin flips it made."
+    ]));
+
+    host.appendChild(el("div", { class: "legend" }, [
+      NN.chip("activation", "● accepted"),
+      NN.chip("gradient", "▼ correction from the residual"),
+      NN.chip("optimizer", "◆ bonus token"),
+      el("span", { class: "tclass", style: { color: "var(--critical)",
+        background: "color-mix(in srgb, var(--critical) 14%, transparent)" } },
+        "rejected + rolled back")
+    ]));
+
+    const labels = [];
+    D.rounds.forEach(function (r, i) {
+      labels.push("round " + (i + 1) + " · draft proposes " + r.drafted.length);
+      labels.push("round " + (i + 1) + " · target verifies all " +
+        (r.drafted.length + 1) + " positions in one pass");
+      labels.push("round " + (i + 1) + " · accept " + r.n_accepted +
+        (r.bonus ? ", all survived — bonus token" :
+          ", reject at position " + r.rejected_at + " and roll back"));
+    });
+
+    const tapeHost = el("div", {});
+    const stepHost = el("div", {});
+    const infoHost = el("div", {});
+    host.appendChild(el("div", { class: "grid12" }, [
+      el("div", {}, [tapeHost, stepHost]),
+      el("div", { class: "panel" }, [el("h4", {}, "this round, numerically"), infoHost])
+    ]));
+
+    const readout = el("div", { style: { marginTop: "14px" } });
+    host.appendChild(readout);
+
+    function tok(word, sub, cls, note, badge) {
+      return el("div", { class: "tok " + cls }, [
+        badge ? el("span", { class: "badge" }, badge) : null,
+        el("div", { class: "w" }, word),
+        el("div", { class: "s" }, sub),
+        note ? el("div", { class: "n" }, note) : null
+      ]);
+    }
+
+    /* how many tokens are settled before round i */
+    function settledBefore(ri) {
+      let n = 0;
+      for (let i = 0; i < ri; i++) n += D.rounds[i].n_emitted;
+      return n;
+    }
+
+    function render(step) {
+      const ri = Math.floor(step / 3), phase = step % 3;
+      const R = D.rounds[ri];
+      const settled = settledBefore(ri);
+
+      tapeHost.innerHTML = "";
+      tapeHost.appendChild(el("div", { class: "tapelbl" },
+        "context + committed tokens"));
+      const strip = el("div", { class: "tape" });
+      D.context.forEach(function (t) {
+        strip.appendChild(tok(TOK[t], "prompt", "ctx"));
+      });
+      for (let i = 0; i < settled; i++) {
+        strip.appendChild(tok(TOK[D.seq[i]], "committed", "done"));
+      }
+      tapeHost.appendChild(strip);
+
+      tapeHost.appendChild(el("div", { class: "tapelbl" },
+        phase === 0 ? "draft proposes — k sequential draft steps"
+          : phase === 1 ? "target scores all k+1 positions — ONE forward pass"
+            : "verdict"));
+      const prop = el("div", { class: "tape" });
+      R.drafted.forEach(function (t, i) {
+        const v = R.verdicts[i];
+        let cls = "draft", badge = null, sub = "q draws";
+        if (phase >= 2 && v) {
+          if (v.accepted) { cls = "acc"; badge = "keep"; sub = "accepted"; }
+          else { cls = "rej"; badge = "reject"; sub = "rejected"; }
+        } else if (phase >= 2 && !v) {
+          cls = "draft rolled"; sub = "never checked";
+        }
+        if (phase >= 2 && R.rejected_at !== null && i > R.rejected_at) {
+          cls = "draft rolled"; sub = "rolled back";
+        }
+        prop.appendChild(tok(TOK[t], sub, cls,
+          phase >= 1 && v ? "p " + fmt(v.p, 3) + " / q " + fmt(v.q, 3) : null, badge));
+      });
+      if (phase >= 2) {
+        if (R.bonus) {
+          prop.appendChild(tok(TOK[R.emitted], "bonus from p", "bonus", null, "free"));
+        } else {
+          prop.appendChild(tok(TOK[R.emitted], "from (p − q)+", "fix", null, "fix"));
+        }
+      }
+      tapeHost.appendChild(prop);
+
+      infoHost.innerHTML = "";
+      const emitted = R.n_emitted;
+      infoHost.appendChild(kv([
+        ["round", (ri + 1) + " of " + D.rounds.length],
+        ["proposed", String(R.drafted.length)],
+        ["accepted", String(R.n_accepted), "activation"],
+        ["rolled back", String(R.drafted.length - R.n_accepted -
+          (R.rejected_at === null ? 0 : 1))],
+        ["emitted this round", String(emitted)],
+        ["target forward passes", "1", "weight"],
+        ["draft forward passes", String(R.drafted.length)]
+      ]));
+
+      if (phase >= 1) {
+        infoHost.appendChild(el("div", { class: "tapelbl" }, "the coin flips"));
+        R.verdicts.forEach(function (v) {
+          const a = v.accept_prob;
+          infoHost.appendChild(el("div", { class: "small", style: { marginTop: "7px" } }, [
+            el("div", { class: "kv" }, el("div", {}, [
+              el("span", { class: "k" }, "pos " + v.i + " · " + TOK[v.token] +
+                " · accept if u < min(1, p/q) = " + fmt(a, 3)),
+              el("span", { class: "v" }, "u = " + fmt(v.u, 3))
+            ])),
+            el("div", { class: "dicebar" }, [
+              el("i", { style: { width: (Math.min(1, a) * 100) + "%" } }),
+              el("u", { style: { left: "calc(" + (v.u * 100) + "% - 1px)" } })
+            ])
+          ]));
+        });
+      }
+
+      readout.innerHTML = "";
+      let acc = 0, prop2 = 0, emit = 0, rounds = 0;
+      for (let i = 0; i <= ri; i++) {
+        if (i < ri || phase >= 2) {
+          acc += D.rounds[i].n_accepted;
+          prop2 += D.rounds[i].drafted.length;
+          emit += D.rounds[i].n_emitted;
+          rounds++;
+        }
+      }
+      readout.appendChild(NN.tiles([
+        { k: "tokens per step, so far", v: rounds ? fmt(emit / rounds, 2) : "–",
+          s: rounds + " round" + (rounds === 1 ? "" : "s") + ", " + emit + " tokens",
+          cls: "activation" },
+        { k: "acceptance rate, so far", v: prop2 ? pct(acc / prop2, 0) : "–",
+          s: acc + " of " + prop2 + " proposals kept" },
+        { k: "target passes spent", v: String(rounds),
+          s: "one per round regardless of k", cls: "weight" },
+        { k: "sequence so far", v: D.seq.slice(0, settled +
+            (phase >= 2 ? D.rounds[ri].n_emitted : 0))
+            .map(function (t) { return TOK[t]; }).join(" ") || "—",
+          s: "target-distributed, exactly" }
+      ]));
+    }
+
+    new NN.Stepper({
+      mount: stepHost, count: D.rounds.length * 3, labels: labels,
+      autoplayMs: 1600, onStep: function (i) { render(i); }
+    });
+
+    host.appendChild(NN.callout("why", "WHY THE TAIL IS THROWN AWAY",
+      S.rule.why_rollback + " Note what this costs: the draft's work on those " +
+      "positions is wasted, and so is the target's — but the target's was free, " +
+      "because it happened inside a pass that was going to read the weights " +
+      "anyway. Only the draft's sequential steps are a real loss, and that is " +
+      "the term that eventually makes a longer k stop paying."));
+  }
+
+  /* =====================================================================
+     3 · THE RULE
+     ===================================================================== */
+  function buildRule() {
+    const host = NN.$("#ruleBody");
+    const P = S.proof;
+    let ci = 0;
+
+    host.appendChild(el("p", {}, [
+      "A draft token is a sample from the wrong distribution. The obvious fixes " +
+      "are all wrong: keeping it when the target also likes it biases towards " +
+      "tokens both models like; throwing it away and resampling from ",
+      el("b", {}, "p"), " undoes the speedup and, done naively, still biases " +
+      "the result. The rule that works is modified rejection sampling, and it " +
+      "is five lines:"
+    ]));
+
+    const ol = el("ol", { class: "notelist" });
+    S.rule.steps.forEach(function (s) { ol.appendChild(el("li", {}, s)); });
+    host.appendChild(ol);
+
+    host.appendChild(el("h3", {}, "Why it is exact"));
+    host.appendChild(el("p", {}, [
+      "Write down the probability that the scheme emits token ", el("b", {}, "x"),
+      " at the first proposal. There are two ways it can happen: the draft " +
+      "proposed x and it was accepted, or the draft proposed something else, " +
+      "that was rejected, and the residual draw landed on x."
+    ]));
+    host.appendChild(NN.formula({
+      rule: "P(emit x) = q(x) &middot; min(1, p(x)/q(x)) &nbsp;+&nbsp; " +
+            "P(reject) &middot; norm((p &minus; q)<sup>+</sup>)(x)",
+      sub: "the first term is just min(p(x), q(x)); and P(reject) = " +
+           "&Sigma;<sub>y</sub> (p(y) &minus; q(y))<sup>+</sup>, " +
+           "which is exactly the normaliser of the residual, so it cancels",
+      result: "min(p(x), q(x)) + (p(x) − q(x))⁺ = p(x)",
+      cls: "activation"
+    }));
+    host.appendChild(el("p", {}, [
+      "The last line is an identity, not a limit or an approximation: for every " +
+      "x, either p(x) ≤ q(x) and the first term is p(x) with the second zero, or " +
+      "p(x) > q(x) and the terms are q(x) and p(x) − q(x). It holds for ",
+      el("i", {}, "any"), " draft distribution — a good draft, a bad draft, a " +
+      "draft that has nothing to do with the target. The draft affects how often " +
+      "you get to skip work. It cannot affect what comes out."
+    ]));
+
+    host.appendChild(el("div", { class: "verdict " +
+      (P.analytic.passed ? "ok" : "bad") }, [
+      el("div", { class: "big" }, P.analytic.passed ? "identity holds" : "FAILED"),
+      el("div", { class: "det" }, "max |emitted(x) − p(x)| = " +
+        sci(P.analytic.max_abs_err, 3) + " — floating-point noise, over the toy " +
+        "model's own distributions and " +
+        P.analytic.rows[P.analytic.rows.length - 1].source)
+    ]));
+
+    host.appendChild(el("h3", {}, "The two distributions, and the overlap"));
+    host.appendChild(el("p", {}, [
+      "The expected acceptance probability for one proposal is not an estimate. " +
+      "It is ", el("b", {}, "Σ min(p(x), q(x))"), " — the overlap of the two " +
+      "distributions, exactly. Pick a context:"
+    ]));
+
+    const ctxs = S.toy.alpha_measured_per_context;
+    const ctlHost = el("div", { class: "ctlbar" });
+    const distHost = el("div", {});
+    host.appendChild(ctlHost);
+    host.appendChild(distHost);
+    const cVal = el("b", {}, "");
+    ctlHost.appendChild(field("context", cVal, seg(ctxs.map(function (c, i) {
+      return { value: i, label: c.context.map(function (t) { return TOK[t]; }).join(" ") };
+    }), ci, function (v) { ci = v; renderDist(); })));
+
+    function renderDist() {
+      const c = ctxs[ci];
+      cVal.textContent = "α = " + pct(c.alpha, 1) + " overlap";
+      distHost.innerHTML = "";
+      const g = el("div", { class: "distbars" });
+      const mx = Math.max(Math.max.apply(null, c.p), Math.max.apply(null, c.q));
+      c.p.forEach(function (pv, i) {
+        const qv = c.q[i];
+        const ov = Math.min(pv, qv);
+        g.appendChild(el("div", {}, TOK[i]));
+        g.appendChild(el("div", { class: "dbar", title:
+          "p = " + fmt(pv, 4) + ", q = " + fmt(qv, 4) + ", min = " + fmt(ov, 4) }, [
+          el("i", { style: { width: (ov / mx * 100) + "%",
+            background: "var(--activation)" } }),
+          el("i", { style: { width: (Math.max(0, pv - qv) / mx * 100) + "%",
+            background: "var(--gradient)" } }),
+          el("i", { style: { width: (Math.max(0, qv - pv) / mx * 100) + "%",
+            background: "var(--accent)" } })
+        ]));
+      });
+      distHost.appendChild(g);
+      distHost.appendChild(el("p", { class: "small muted", style: { marginTop: "9px" } },
+        "Green is min(p, q) — the mass the draft gets right, which is accepted. " +
+        "Orange is (p − q)⁺ — the mass the draft is missing, which is exactly " +
+        "what the residual distribution puts back on a rejection. Grey is " +
+        "(q − p)⁺ — mass the draft invented, and the reason rejections happen at " +
+        "all. Green plus orange is p, cell by cell. That is the identity, drawn."));
+      distHost.appendChild(kv([
+        ["α = Σ min(p, q) for this context", pct(c.alpha, 2), "activation"],
+        ["with a one-block draft instead",
+          pct(S.toy.alpha_stronger_draft[ci], 2)],
+        ["measured over the whole simulation",
+          pct(S.toy.alpha_measured_overall, 2)]
+      ]));
+    }
+    renderDist();
+
+    host.appendChild(NN.callout("warn", "THESE ACCEPTANCE RATES ARE NOT REAL-WORLD NUMBERS",
+      "<span class='tclass' style='background:var(--surface-3);color:var(--ink-2)'>" +
+      "assumption</span> " + S.toy.note + " On the speedup curves in section 5, α " +
+      "is an <b>input</b> that you set with a slider, spanning the range typically " +
+      "reported for real draft/target pairs. Whether any particular pair of real " +
+      "models achieves any particular α is a " +
+      "<span class='tclass' style='background:var(--surface-3);color:var(--ink-2)'>" +
+      "literature</span> question and nothing on this page answers it."));
+  }
+
+  /* =====================================================================
+     4 · THE SIMULATION
+     ===================================================================== */
+  function buildEvidence() {
+    const host = NN.$("#evBody");
+    const E = S.proof.empirical;
+
+    host.appendChild(el("p", {}, [
+      "The identity above covers one proposal. The loop chains them, rolls back, " +
+      "and emits bonus tokens, and it is fair to want that checked end to end. " +
+      "So the generator enumerates the target's exact distribution over all ",
+      el("b", {}, String(E.exact_rule.n_outcomes)), " continuations of length ",
+      el("b", {}, String(E.L)), " — there is no sampling in that number, it is " +
+      "the product of the model's own probabilities — and then runs three things ",
+      el("b", {}, NN.count(E.draws) + " times"), " each."
+    ]));
+    host.appendChild(el("p", { class: "small muted" }, E.method));
+
+    const noise = E.direct_sampling.tv_distance;
+    host.appendChild(NN.tiles([
+      { k: "speculative, correct rule", v: fmt(E.exact_rule.tv_distance, 5),
+        s: "TV distance · " + fmt(E.exact_rule.tv_vs_noise_floor, 2) +
+           "× the noise floor", cls: "activation" },
+      { k: "plain sampling from the target", v: fmt(noise, 5),
+        s: "TV distance · the noise floor itself" },
+      { k: "speculative, wrong rule", v: fmt(E.naive_rule.tv_distance, 5),
+        s: "TV distance · " + fmt(E.naive_rule.tv_vs_noise_floor, 1) +
+           "× the noise floor", cls: "gradient" },
+      { k: "outcomes the correct rule produced that the target cannot",
+        v: String(E.exact_rule.impossible_outcomes), s: "out of " +
+           NN.count(E.draws) + " draws" }
+    ]));
+
+    host.appendChild(el("div", { class: "verdict " +
+      (S.proof.passed ? "ok" : "bad") }, [
+      el("div", { class: "big" }, S.proof.passed ? "indistinguishable" : "FAILED"),
+      el("div", { class: "det" },
+        "max |z| = " + fmt(E.exact_rule.max_abs_z, 2) + " across " +
+        E.exact_rule.cells_tested + " cells for the correct rule, against " +
+        fmt(E.naive_rule.max_abs_z, 1) + " for the wrong one. Speculative " +
+        "decoding sits no further from the target's distribution than ordinary " +
+        "sampling from it does.")
+    ]));
+
+    host.appendChild(el("h3", {}, "The most likely continuations, three ways"));
+    host.appendChild(table(
+      ["sequence", "exact (enumerated)", "speculative, correct rule",
+       "plain target sampling", "speculative, wrong rule", "wrong-rule error"],
+      E.top_outcomes.map(function (r) {
+        return [r.seq.map(function (t) { return TOK[t]; }).join(" "),
+          fmt(r.exact, 5), fmt(r.empirical, 5), fmt(r.direct, 5),
+          fmt(r.naive, 5),
+          el("span", { style: { color: "var(--critical)" } },
+            NN.fmtSigned(r.naive - r.exact, 5))];
+      })));
+    host.appendChild(el("p", { class: "small muted" },
+      "Columns three and four wander around column two by about the same amount, " +
+      "which is what sampling noise looks like. Column five does not: it is " +
+      "systematically off, in the same direction, across every row."));
+
+    host.appendChild(el("h3", {}, "The control matters"));
+    host.appendChild(el("p", {}, E.naive_description));
+    host.appendChild(el("p", {}, [
+      "It is worth being clear about why the control is here. A test that only " +
+      "ever says PASS is not evidence. Running a plausible-looking but incorrect " +
+      "acceptance rule through the identical machinery and watching it fail is " +
+      "what turns \"the numbers agree\" into \"the numbers would have disagreed " +
+      "if the rule were wrong\". The wrong rule's total-variation distance is ",
+      el("b", {}, fmt(E.naive_rule.tv_vs_noise_floor, 1) + "×"),
+      " the noise floor and its worst z-score is ",
+      el("b", {}, fmt(E.naive_rule.max_abs_z, 1)), "."
+    ]));
+
+    host.appendChild(NN.callout("key", "WHAT EXACTNESS BUYS YOU",
+      "This is not a quality-neutrality claim of the kind quantisation makes, " +
+      "where the model is genuinely changed and the argument is that the change " +
+      "is small. Speculative decoding does not change the model at all. The " +
+      "output distribution is the target's, to the last decimal place, so there " +
+      "is no evaluation to run and no regression to worry about — which is " +
+      "exactly why it can be turned on by default in a way that INT4 cannot."));
+  }
+
+  /* =====================================================================
+     5 · SPEEDUP
+     ===================================================================== */
+  function buildSpeed() {
+    const host = NN.$("#speedBody");
+    const G = S.expected;
+    let ai = G.grid.length - 2, k = 5;
+
+    host.appendChild(el("p", {}, [
+      "If each proposal is accepted independently with probability α, the number " +
+      "of drafted tokens that survive is a truncated geometric, and one more " +
+      "token always comes out — either the residual correction or, if everything " +
+      "survived, the bonus draw. So:"
+    ]));
+    host.appendChild(NN.formula({
+      rule: "E[tokens per step] = 1 + &alpha; + &alpha;<sup>2</sup> + &hellip; + " +
+            "&alpha;<sup>k</sup>",
+      sub: G.formula,
+      cls: "activation"
+    }));
+    host.appendChild(el("p", {}, [
+      "That is the numerator. The denominator is wall clock: ", el("b", {}, G.wallclock),
+      ". The draft's own cost is the term people forget, and it is what stops k " +
+      "from being free. Here it is derived, not assumed — both step times come " +
+      "out of the same bandwidth model, so the ratio is fixed by the parameter " +
+      "counts."
+    ]));
+
+    host.appendChild(NN.tiles([
+      { k: "target decode step", v: ms(S.timing.t_target_decode_s),
+        s: S.target.name + " · " + NN.count(S.target.params) + " params", cls: "weight" },
+      { k: "draft decode step", v: ms(S.timing.t_draft_decode_s),
+        s: S.draft.name + " · " + NN.count(S.draft.params) + " params", cls: "activation" },
+      { k: "draft cost ratio",
+        v: pct(S.timing.cost_ratio_draft_over_target, 1),
+        s: "of one target step — derived from bytes read" },
+      { k: "verification adds", v: "0%",
+        s: "t(k) = t(1) for every k on this chart", cls: "weight" }
+    ]));
+
+    const aVal = el("b", {}, ""), kVal = el("b", {}, "");
+    const aSlider = el("input", { type: "range", min: 0, max: G.grid.length - 1,
+      step: 1, value: ai });
+    const kSlider = el("input", { type: "range", min: S.ks[0],
+      max: S.ks[S.ks.length - 1], step: 1, value: k });
+    aSlider.addEventListener("input", function () { ai = +aSlider.value; render(); });
+    kSlider.addEventListener("input", function () { k = +kSlider.value; render(); });
+    host.appendChild(el("div", { class: "ctlbar" }, [
+      field("acceptance rate α  (assumed)", aVal, aSlider),
+      field("draft length k", kVal, kSlider)
+    ]));
+
+    const verdict = el("div", { class: "verdict ok" });
+    host.appendChild(verdict);
+
+    const chartHost = el("div", {});
+    host.appendChild(chartHost);
+
+    const tblHost = el("div", { style: { marginTop: "16px" } });
+    host.appendChild(tblHost);
+
+    function render() {
+      const row = G.grid[ai];
+      const opt = G.optimal[ai];
+      const pt = row.points[k - 1];
+      aVal.textContent = "α = " + fmt(row.alpha, 2);
+      kVal.textContent = "k = " + k + (k === opt.k_star ? "  (optimal)" : "");
+
+      verdict.className = "verdict " + (pt.speedup >= 1 ? "ok" : "bad");
+      verdict.innerHTML = "";
+      verdict.appendChild(el("div", { class: "big" }, fmt(pt.speedup, 2) + "×"));
+      verdict.appendChild(el("div", { class: "det" },
+        fmt(pt.tokens_per_step, 2) + " tokens per step, " + ms(pt.step_time_s) +
+        " per step, " + ms(pt.time_per_token_s) + " per token vs " +
+        ms(S.timing.t_target_decode_s) + " unaided"));
+      verdict.appendChild(el("div", { class: "det" },
+        "best at this α is k = " + opt.k_star + " for " +
+        fmt(opt.speedup, 2) + "×"));
+
+      chartHost.innerHTML = "";
+      const series = G.grid.map(function (g, i) {
+        return {
+          name: "α = " + fmt(g.alpha, 2),
+          color: i === ai ? "var(--weight)" : "var(--accent)",
+          dots: i === ai,
+          points: g.points.map(function (p) { return [p.k, p.speedup]; })
+        };
+      });
+      series.push({
+        name: "chosen k", color: "var(--gradient)", dots: true,
+        points: [[k, row.points[k - 1].speedup]]
+      });
+      series.push({
+        name: "optimum", color: "var(--optimizer)", dots: true,
+        points: G.optimal.map(function (o) { return [o.k_star, o.speedup]; })
+      });
+      chartHost.appendChild(NN.chart.line({
+        series: series, width: 900, height: 300,
+        xlabel: "k — draft length", ylabel: "speedup vs plain decode",
+        yMin: 0
+      }));
+      chartHost.appendChild(el("p", { class: "small muted" },
+        "Blue is the α you selected; grey are the others. Magenta marks each " +
+        "curve's maximum. There is a real interior maximum because the numerator " +
+        "saturates — every extra draft token is worth only αⁱ — while the " +
+        "denominator keeps growing linearly at " +
+        pct(S.timing.cost_ratio_draft_over_target, 1) + " of a target step per " +
+        "draft token. Past the peak you are paying full price for tokens that " +
+        "are probably going to be thrown away."));
+
+      tblHost.innerHTML = "";
+      tblHost.appendChild(el("h3", {}, "The optimum, per acceptance rate"));
+      tblHost.appendChild(table(
+        ["α (assumed)", "optimal k", "tokens per step", "step time",
+         "time per token", "speedup", "draft share of the step"],
+        G.optimal.map(function (o, i) {
+          const p = G.grid[i].points[o.k_star - 1];
+          return [fmt(o.alpha, 2), String(o.k_star), fmt(o.tokens_per_step, 2),
+            ms(p.step_time_s), ms(o.time_per_token_s),
+            fmt(o.speedup, 2) + "×", pct(p.draft_share, 0)];
+        }), ai));
+      tblHost.appendChild(el("p", { class: "small muted" },
+        "The optimal draft length climbs with α — from " +
+        G.optimal[0].k_star + " at α = " + fmt(G.optimal[0].alpha, 2) + " to " +
+        G.optimal[G.optimal.length - 1].k_star + " at α = " +
+        fmt(G.optimal[G.optimal.length - 1].alpha, 2) +
+        " — which is the practical lever: a better draft model does not just " +
+        "raise the acceptance rate, it lets you spend more proposals per " +
+        "verification and collect the benefit twice."));
+    }
+    render();
+
+    host.appendChild(NN.callout("mem", "AND IT COMPOSES WITH THE PREVIOUS PAGE, BADLY",
+      "Both speculative decoding and weight-only quantisation are attacks on the " +
+      "same bottleneck: the bytes a decode step has to read. Quantisation makes " +
+      "the read smaller; speculation amortises it over more tokens. They do not " +
+      "multiply. Quantise the target to INT4 and its step drops to " +
+      ms(Q.weight_only.rows[Q.weight_only.rows.length - 1].decode.time_s) +
+      ", which also shrinks the verification you were amortising, so the " +
+      "draft's cost — unchanged — becomes a larger share of the step and the " +
+      "optimal k falls. Every technique in Part IV is aimed at the same number, " +
+      "and the second one you apply is always worth less than the first."));
+  }
+
+  /* =====================================================================
+     6 · NOTES
+     ===================================================================== */
+  function buildNotes() {
+    const host = NN.$("#notesBody");
+
+    host.appendChild(el("h3", {}, "Checks in code/quantisation.py"));
+    host.appendChild(el("p", { class: "small muted" },
+      "The generator exits non-zero if any of these fails, so the page cannot " +
+      "be built from a payload that did not prove itself. Pages 28 and 29 read " +
+      "the same file; the speculative-decoding checks are the last five."));
+    const ul = el("ul", { class: "chklist" });
+    Q.checks.forEach(function (c) {
+      ul.appendChild(el("li", {}, [
+        el("div", { class: "st " + (c.passed ? "p" : "f") }, c.passed ? "PASS" : "FAIL"),
+        el("div", {}, [
+          el("div", { class: "nm2" }, c.name),
+          el("div", { class: "dt" }, c.detail)
+        ])
+      ]));
+    });
+    host.appendChild(ul);
+
+    host.appendChild(el("h3", {}, "Assumptions"));
+    const a = el("ul", { class: "notelist" });
+    S._assumptions.forEach(function (s) { a.appendChild(el("li", {}, s)); });
+    a.appendChild(el("li", {}, S.timing.derivation));
+    host.appendChild(a);
+
+    host.appendChild(el("h3", {}, "Literature"));
+    const l = el("ul", { class: "notelist" });
+    S._literature.forEach(function (s) { l.appendChild(el("li", {}, s)); });
+    host.appendChild(l);
+
+    host.appendChild(el("h3", {}, "Where the numbers come from"));
+    host.appendChild(el("div", { class: "scrollx" },
+      el("table", { class: "data" }, [
+        el("thead", {}, el("tr", {}, ["quantity", "source"].map(function (h) {
+          return el("th", {}, h);
+        }))),
+        el("tbody", {}, Object.keys(Q.meta.sources).map(function (k) {
+          return el("tr", {}, [
+            el("td", {}, k.replace(/_/g, " ")),
+            el("td", { style: { textAlign: "left", whiteSpace: "normal" } },
+              Q.meta.sources[k])
+          ]);
+        }))
+      ])));
+
+    host.appendChild(NN.callout("key", "THE SHAPE OF THE ARGUMENT",
+      "Two independent claims, proved by different means. The <b>cost</b> claim " +
+      "is arithmetic: verification of k tokens reads the same bytes as " +
+      "verification of one, so under the roofline model of page 24 it takes the " +
+      "same time, up to k ≈ " + fmt(S.verify.k_crossover, 0) + ". The " +
+      "<b>correctness</b> claim is an identity — min(p, q) + (p − q)⁺ = p — " +
+      "checked to " + sci(S.proof.analytic.max_abs_err, 2) + " and then " +
+      "confirmed by simulation against an enumerated ground truth with a " +
+      "deliberately wrong control to show the test can fail. The α values on the " +
+      "speedup curves are the one thing this page asks you to supply, and it " +
+      "says so wherever they appear."));
+  }
+
+  buildFree();
+  buildCycle();
+  buildRule();
+  buildEvidence();
+  buildSpeed();
+  buildNotes();
+
+  NN.page("specdec");
+})();
+</script>
+</body>
+</html>

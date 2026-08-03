@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NN Internals · 14 Tensor Parallel</title>
+<title>NN Internals · 19 Tensor Parallel</title>
 <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../assets/css/design.css">
 <style>
@@ -1195,7 +1195,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
     const host = NN.$("#conjBody");
 
     host.appendChild(el("p", { html:
-      "Page <a href='16-collectives.html'>11</a> made the point that collectives come in " +
+      "Page <a href='16-collectives.html'>16</a> made the point that collectives come in " +
       "inverse pairs — all-gather undoes reduce-scatter, scatter undoes gather. The same " +
       "duality shows up one level higher, in autodiff. Megatron names two operators, and they " +
       "are conjugates of each other: whatever one does in forward, the other does in backward." }));
@@ -1459,7 +1459,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       "<b>Sequence parallelism</b> is the fix: split those regions along the <em>sequence</em> " +
       "axis instead, and convert g's all-reduce into a reduce-scatter plus an all-gather — the " +
       "same total bytes, but the norm regions become sharded too. Page " +
-      "<a href='23-3d-parallelism.html'>17</a> composes it with everything else."));
+      "<a href='23-3d-parallelism.html'>23</a> composes it with everything else."));
   })();
 
   /* ==================================================================== */
@@ -1723,7 +1723,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
 
       outHost.appendChild(el("p", { class: "small muted", html:
         "<b>What this model assumes.</b> <b>" + COST._status + "</b> It is " +
-        "<code>PARALLEL.cost_model</code>, the same one pages 12 and 17 price with: " +
+        "<code>PARALLEL.cost_model</code>, the same one pages 17 and 23 price with: " +
         "<code>" + COST.time_bytes + "</code>, at " + Math.round(S.eff * 100) +
         "% of the nominal link rate. " + COST.achieved_note +
         " Latency (<code>cost_model.latency_us</code>: " + COST.latency_us.intra_node +
@@ -1810,7 +1810,7 @@ table.data td.wrap, table.data th.wrap { white-space: normal; }
       "turned up only as far as the fast domain reaches — typically TP = 8 inside one node — " +
       "and then handed off to <a href='21-pipeline-parallel.html'>pipeline parallelism</a> and " +
       "<a href='17-data-parallel.html'>data parallelism</a> for everything beyond it. " +
-      "Page <a href='23-3d-parallelism.html'>17</a> puts the three together on real topology." }));
+      "Page <a href='23-3d-parallelism.html'>23</a> puts the three together on real topology." }));
 
     host.appendChild(NN.legend(["weight", "gradient", "activation", "optimizer"]));
   })();

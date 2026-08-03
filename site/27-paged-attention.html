@@ -47,6 +47,14 @@
 .osmap td.b { font-family: var(--mono); font-size: .78rem; color: var(--ink); width: 38%; }
 .osmap td.c { color: var(--ink-2); font-size: .82rem; }
 
+.asmp { width: 100%; border-collapse: collapse; font-size: .85rem; margin: 10px 0 0; }
+.asmp td { padding: 6px 10px 6px 0; border-bottom: 1px solid var(--hairline-2); vertical-align: top; }
+.asmp td.k { font-family: var(--mono); font-size: .74rem; color: var(--ink-muted);
+             white-space: nowrap; width: 1%; }
+.asmp td.v { font-family: var(--mono); font-size: .76rem; color: var(--ink); width: 22%; }
+.asmp td.w { color: var(--ink-2); font-size: .84rem; line-height: 1.5; }
+@media (max-width: 900px) { .asmp td.k { white-space: normal; } }
+
 .fanwrap { display: grid; grid-template-columns: 1fr; gap: 4px; }
 .fanrow { display: flex; align-items: center; gap: 6px; font-family: var(--mono);
           font-size: .68rem; color: var(--ink-muted); }
@@ -204,14 +212,26 @@
     });
     host.appendChild(box);
 
-    host.appendChild(NN.callout("warn", "THIS DISTRIBUTION IS AN ASSUMPTION",
+    /* the allocator's assumptions, stated where they are used */
+    const atab = el("table", { class: "asmp" });
+    M.assumptions.filter(function (a) { return a["for"] === "allocator"; })
+                 .forEach(function (a) {
+      atab.appendChild(el("tr", {}, [
+        el("td", { class: "k" }, a.k),
+        el("td", { class: "v" }, a.v),
+        el("td", { class: "w" }, a.why)
+      ]));
+    });
+    const abox = el("div", {});
+    abox.appendChild(el("p", { class: "small", style: { margin: "0 0 4px" }, html:
       "Fragmentation is a function of the length distribution, so the distribution is stated " +
-      "rather than hidden: <b>" + M.assumptions.filter(function (a) {
-        return a.k.indexOf("length distribution") === 0; })[0].v + "</b>. " +
-      "It is a model of served traffic, not a measurement of it — most requests far shorter " +
-      "than the advertised context, with a tail that reaches it. Shorten the tail and paging " +
-      "wins by more; make every request " + NN.count(ST.max_seq) +
-      " tokens long and paging wins by nothing at all."));
+      "rather than hidden. It is a model of served traffic, not a measurement of it — most " +
+      "requests far shorter than the advertised context, with a tail that reaches it. Shorten " +
+      "the tail and paging wins by more; make every request " + NN.count(ST.max_seq) +
+      " tokens long and paging wins by nothing at all." }));
+    abox.appendChild(atab);
+    host.appendChild(NN.callout("warn", "THESE ARE ASSUMPTIONS, NOT MEASUREMENTS",
+      abox.innerHTML));
 
     host.appendChild(NN.tiles([
       { k: "mean length", v: NN.fmt(ST.mean_len, 0), s: "tokens" },
@@ -582,10 +602,12 @@
     host.appendChild(NN.callout("why", "CONCURRENCY IS THE THING PAGE 26 WAS ASKING FOR",
       "<a href=\"26-batching.html\">Page 26</a> showed that intensity climbs with batch size " +
       "because the weight read is fixed per step. Paging is what makes a large batch physically " +
-      "possible. On the same cost model, at " + NN.count(db.seq) + " tokens of context, batch " +
-      nearestC.batch + " runs at " + NN.fmt(nearestC.intensity, 1) + " FLOP/byte and batch " +
-      nearest.batch + " runs at " + NN.fmt(nearest.intensity, 1) + " — " +
-      pc(nearestC.flops_utilisation, 2) + " of peak FLOPs against " +
+      "possible. Take the two nearest batch sizes the sweep has to those concurrency figures, " +
+      "at " + NN.count(db.seq) + " tokens of context: batch " + nearestC.batch + " (near the " +
+      BD.concurrent_contiguous + " a contiguous allocator can hold) runs at " +
+      NN.fmt(nearestC.intensity, 1) + " FLOP/byte, and batch " + nearest.batch + " (near the " +
+      BD.concurrent_paged + " a paged one holds) runs at " + NN.fmt(nearest.intensity, 1) +
+      " — " + pc(nearestC.flops_utilisation, 2) + " of peak FLOPs against " +
       pc(nearest.flops_utilisation, 2) + ". The allocator is not a memory optimisation that " +
       "happens to be nice; it is the thing that lets the scheduler do its job."));
   })();

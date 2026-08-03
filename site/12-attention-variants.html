@@ -279,8 +279,8 @@
       M.seq + " tokens. They differ in one number: how much key/value state a " +
       "token leaves behind. On " + ref.name + " at " + NN.count(row.seq) +
       " tokens that is " + NN.bytes(row.mha_bytes) + " of KV cache under MHA and " +
-      NN.bytes(row.gqa_bytes) + " under the GQA it actually ships — a " +
-      f(ref.kv_reduction_vs_mha, 0) + "× reduction, for one sequence.";
+      NN.bytes(row.gqa_bytes) + " under the GQA it actually ships: " +
+      f(ref.kv_reduction_vs_mha, 0) + "× less, for one sequence.";
   })();
 
   /* ===================================================================== */
@@ -759,8 +759,8 @@
       "separately. MLA pays <b>" +
       f(A.ranks.rows[3].cache_elements / A.ranks.rows[3].rank, 2) + "</b> — it " +
       "stores the bottleneck itself, once, and decompresses into both. That is " +
-      "the structural reason it wins, and it is visible in a " + M.d_model +
-      "-dimensional toy."));
+      "the structural reason it wins, and it is visible at d_model = " +
+      M.d_model + "."));
 
     S.appendChild(NN.callout("key", "SHARING AND COMPRESSING ARE THE SAME MOVE",
       A.ranks.claim));
@@ -802,7 +802,8 @@
       { k: "cached per token", v: M.d_latent + " el", cls: "activation",
         s: "one latent, K and V both come from it" },
       { k: "MHA would cache", v: A.variants.MHA.cost.cache_elements_per_token_per_layer + " el",
-        cls: "activation", s: "2 × " + M.n_heads + " heads × " + M.d_head },
+        cls: "activation",
+        s: "2 (K and V) × " + M.n_heads + " heads × d_head " + M.d_head },
       { k: "compression", v: f(A.variants.MHA.cost.cache_elements_per_token_per_layer / M.d_latent, 2) + "×",
         s: "in this toy" },
       { k: "rank(W_dkv W_uk)", v: String(V.factorisation.rank_Wk_eq), cls: "weight",
@@ -940,6 +941,10 @@
           color: "var(--weight)", sub: NN.count(m.params) + " params"
         }]),
         unit: "GB",
+        /* Scale to the device so the bar lengths and the "% of one GPU"
+           labels agree. Auto-scaling to the largest bar would make a 16 GB
+           model look like it filled the GPU. */
+        max: Math.max(hbm, weights, vals[0].bytes) / 1e9 * 1.05,
         limit: { value: hbm / 1e9, label: gpu.name + " HBM (" + NN.gibytes(hbm) + ")" }
       }));
 
@@ -952,8 +957,17 @@
           s: f(mha / gqa, 1) + "× more" },
         { k: "cache ÷ weights", v: f(gqa / weights, 3) + "×",
           s: "weights " + NN.bytes(weights) },
-        { k: "sequences per GPU", v: f(Math.max(0, hbm - weights) / (gqa / batch), 1),
-          s: "after weights, on one " + gpu.name }
+        /* If the weights do not fit on one device there is no "space left
+           over" to answer with, and printing 0 would read like a bug rather
+           than like the sharding requirement it actually is. */
+        (hbm > weights
+          ? { k: "sequences per GPU",
+              v: f((hbm - weights) / (gqa / batch), 1),
+              s: "in the " + NN.gibytes(hbm - weights) + " left after weights, on one " + gpu.name }
+          : { k: "GPUs for the weights alone",
+              v: "≥ " + Math.ceil(weights / hbm),
+              s: NN.bytes(weights) + " does not fit in one " + gpu.name +
+                 " — see pages 15 and 19" })
       ]));
 
       noteHost.innerHTML = "";

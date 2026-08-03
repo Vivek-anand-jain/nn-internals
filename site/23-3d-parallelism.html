@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NN Internals · 17 3D Parallelism</title>
+<title>NN Internals · 23 3D Parallelism</title>
 <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../assets/css/design.css">
 <style>
@@ -101,7 +101,7 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
   <div class="pagehead">
     <div class="eyebrow">Part 23</div>
     <h1>3D Parallelism: Composing the Axes onto Real Hardware</h1>
-    <p class="lede">Pages 11–15 took one axis each, and page 22 cut a real transformer block along
+    <p class="lede">Pages 16–21 took one axis each, and page 22 cut a real transformer block along
       every one of them. None of them is a choice against the others:
       TP × PP × DP is a <em>factorisation</em> of the GPU count, and every GPU ends up with three
       coordinates. What decides whether the configuration is fast is not the factorisation but where
@@ -620,7 +620,7 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
     host.appendChild(el("h3", {}, "The recorded schedule"));
     host.appendChild(el("p", { html:
       "The table above collapses each strategy to one line. Here is what actually happens, step by step, " +
-      "in the simulated step — the same <code>schedule</code> arrays pages 12–15 animate." }));
+      "in the simulated step — the same <code>schedule</code> arrays pages 17–21 animate." }));
     const btns = el("div", { class: "presets" });
     const sched = el("div");
     let cur = "tp";
@@ -1047,8 +1047,8 @@ table.data tr.note .n { font-size: .78rem; color: var(--ink-2); white-space: nor
 
     const worst = Math.max.apply(null, all.map(function (r) { return r.t.total; }));
     topoOut.appendChild(NN.callout("why", "What the estimate is and is not",
-      "<b>" + COST._status + "</b> It is <code>PARALLEL.cost_model</code>, the same one pages 12 " +
-      "and 14 price with: <code>" + COST.time_bytes + "</code> at " +
+      "<b>" + COST._status + "</b> It is <code>PARALLEL.cost_model</code>, the same one pages 17 " +
+      "and 19 price with: <code>" + COST.time_bytes + "</code> at " +
       NN.fmt(LINK_EFF * 100, 0) + "% of line rate on the slowest link the group touches. " +
       "By its own account it ignores: <ul style=\"margin:6px 0 6px 18px\">" +
       COST.ignores.map(function (s) { return "<li>" + s + "</li>"; }).join("") + "</ul>" +

@@ -351,7 +351,7 @@ def roofline(models, gpus):
                                      else "compute"),
                     "prefill_bound": ("memory" if c["prefill"]["intensity"] < ridge
                                       else "compute"),
-                    "decode_flops_utilisation": round(
+                    "flops_utilisation": round(
                         min(1.0, c["decode"]["intensity"] / ridge), 5),
                 })
         out.append({"gpu": g["name"], "ridge_flops_per_byte": round(ridge, 2),
@@ -472,6 +472,7 @@ def build():
             "generated_by": "code/inference_toy.py",
             "d_model": D_MODEL, "n_heads": N_HEADS, "d_head": D_HEAD,
             "n_kv_heads": N_KV_HEADS, "d_ff": D_FF, "n_layers": N_LAYERS,
+            "eps": EPS,   # page 25 ports this model to JS and needs it
             "vocab": VOCAB, "prompt": PROMPT, "n_new": N_NEW,
             "token_strings": TOKEN_STR,
             "description": "Autoregressive generation with a KV cache, "

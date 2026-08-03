@@ -589,12 +589,21 @@ def build(root):
         wide = attention(X, W["Wq"], Wk_w, Wv_w, W["Wo"],
                          N_HEADS, N_HEADS, D_HEAD)
         err = maxdiff(res["Y"], wide["Y"])
+        g = N_HEADS // nkv
+        if g == 1:
+            claim = (label + " is the control: nothing is tied, so widening "
+                     "the projection is the identity and the two paths must "
+                     "agree trivially. If this row ever failed, the test "
+                     "itself would be wrong.")
+        else:
+            claim = (label + " equals MHA whose key/value projection is "
+                     + str(nkv) + " distinct block" + ("s" if nkv > 1 else "")
+                     + " of " + str(D_HEAD) + " columns, each repeated "
+                     + str(g) + "x to cover the " + str(N_HEADS)
+                     + " query heads. Same code path, same output.")
         equivalences.append({
             "variant": label, "max_abs_err": err, "passed": err < TOL,
-            "claim": label + " equals MHA whose key/value projection repeats "
-                     "each of its " + str(nkv) + " blocks " +
-                     str(N_HEADS // nkv) + "x across the " + str(N_HEADS) +
-                     " query heads. Same code path, same output.",
+            "claim": claim,
         })
 
         # cache: K and V, one copy per KV head

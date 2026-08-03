@@ -8,6 +8,7 @@ window.INFER = {
   "n_kv_heads": 2,
   "d_ff": 8,
   "n_layers": 2,
+  "eps": 1e-05,
   "vocab": 6,
   "prompt": [
    0,
@@ -918,7 +919,7 @@ window.INFER = {
      "decode_intensity": 1.0,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.00654
+     "flops_utilisation": 0.00654
     },
     {
      "model": "Llama 3 8B",
@@ -927,7 +928,7 @@ window.INFER = {
      "decode_intensity": 5.561,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.03634
+     "flops_utilisation": 0.03634
     },
     {
      "model": "Llama 3 8B",
@@ -936,7 +937,7 @@ window.INFER = {
      "decode_intensity": 10.874,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.07107
+     "flops_utilisation": 0.07107
     },
     {
      "model": "Llama 3 8B",
@@ -945,7 +946,7 @@ window.INFER = {
      "decode_intensity": 14.288,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.09337
+     "flops_utilisation": 0.09337
     },
     {
      "model": "Llama 3 70B",
@@ -954,7 +955,7 @@ window.INFER = {
      "decode_intensity": 1.0,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.00654
+     "flops_utilisation": 0.00654
     },
     {
      "model": "Llama 3 70B",
@@ -963,7 +964,7 @@ window.INFER = {
      "decode_intensity": 7.076,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.04624
+     "flops_utilisation": 0.04624
     },
     {
      "model": "Llama 3 70B",
@@ -972,7 +973,7 @@ window.INFER = {
      "decode_intensity": 20.274,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.1325
+     "flops_utilisation": 0.1325
     },
     {
      "model": "Llama 3 70B",
@@ -981,7 +982,7 @@ window.INFER = {
      "decode_intensity": 37.989,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.24827
+     "flops_utilisation": 0.24827
     },
     {
      "model": "GPT-3 175B",
@@ -990,7 +991,7 @@ window.INFER = {
      "decode_intensity": 1.0,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.00654
+     "flops_utilisation": 0.00654
     },
     {
      "model": "GPT-3 175B",
@@ -999,7 +1000,7 @@ window.INFER = {
      "decode_intensity": 6.734,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.04401
+     "flops_utilisation": 0.04401
     },
     {
      "model": "GPT-3 175B",
@@ -1008,7 +1009,7 @@ window.INFER = {
      "decode_intensity": 17.458,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.1141
+     "flops_utilisation": 0.1141
     },
     {
      "model": "GPT-3 175B",
@@ -1017,7 +1018,7 @@ window.INFER = {
      "decode_intensity": 29.01,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.18959
+     "flops_utilisation": 0.18959
     }
    ]
   },
@@ -1034,7 +1035,7 @@ window.INFER = {
      "decode_intensity": 1.0,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.00677
+     "flops_utilisation": 0.00677
     },
     {
      "model": "Llama 3 8B",
@@ -1043,7 +1044,7 @@ window.INFER = {
      "decode_intensity": 5.561,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.03763
+     "flops_utilisation": 0.03763
     },
     {
      "model": "Llama 3 8B",
@@ -1052,7 +1053,7 @@ window.INFER = {
      "decode_intensity": 10.874,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.07359
+     "flops_utilisation": 0.07359
     },
     {
      "model": "Llama 3 8B",
@@ -1061,7 +1062,7 @@ window.INFER = {
      "decode_intensity": 14.288,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.09669
+     "flops_utilisation": 0.09669
     },
     {
      "model": "Llama 3 70B",
@@ -1070,7 +1071,7 @@ window.INFER = {
      "decode_intensity": 1.0,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.00677
+     "flops_utilisation": 0.00677
     },
     {
      "model": "Llama 3 70B",
@@ -1079,7 +1080,7 @@ window.INFER = {
      "decode_intensity": 7.076,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.04789
+     "flops_utilisation": 0.04789
     },
     {
      "model": "Llama 3 70B",
@@ -1088,7 +1089,7 @@ window.INFER = {
      "decode_intensity": 20.274,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.13721
+     "flops_utilisation": 0.13721
     },
     {
      "model": "Llama 3 70B",
@@ -1097,7 +1098,7 @@ window.INFER = {
      "decode_intensity": 37.989,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.2571
+     "flops_utilisation": 0.2571
     },
     {
      "model": "GPT-3 175B",
@@ -1106,7 +1107,7 @@ window.INFER = {
      "decode_intensity": 1.0,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.00677
+     "flops_utilisation": 0.00677
     },
     {
      "model": "GPT-3 175B",
@@ -1115,7 +1116,7 @@ window.INFER = {
      "decode_intensity": 6.734,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.04557
+     "flops_utilisation": 0.04557
     },
     {
      "model": "GPT-3 175B",
@@ -1124,7 +1125,7 @@ window.INFER = {
      "decode_intensity": 17.458,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.11815
+     "flops_utilisation": 0.11815
     },
     {
      "model": "GPT-3 175B",
@@ -1133,7 +1134,7 @@ window.INFER = {
      "decode_intensity": 29.01,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.19633
+     "flops_utilisation": 0.19633
     }
    ]
   },
@@ -1150,7 +1151,7 @@ window.INFER = {
      "decode_intensity": 1.0,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.0097
+     "flops_utilisation": 0.0097
     },
     {
      "model": "Llama 3 8B",
@@ -1159,7 +1160,7 @@ window.INFER = {
      "decode_intensity": 5.561,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.05392
+     "flops_utilisation": 0.05392
     },
     {
      "model": "Llama 3 8B",
@@ -1168,7 +1169,7 @@ window.INFER = {
      "decode_intensity": 10.874,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.10545
+     "flops_utilisation": 0.10545
     },
     {
      "model": "Llama 3 8B",
@@ -1177,7 +1178,7 @@ window.INFER = {
      "decode_intensity": 14.288,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.13855
+     "flops_utilisation": 0.13855
     },
     {
      "model": "Llama 3 70B",
@@ -1186,7 +1187,7 @@ window.INFER = {
      "decode_intensity": 1.0,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.0097
+     "flops_utilisation": 0.0097
     },
     {
      "model": "Llama 3 70B",
@@ -1195,7 +1196,7 @@ window.INFER = {
      "decode_intensity": 7.076,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.06862
+     "flops_utilisation": 0.06862
     },
     {
      "model": "Llama 3 70B",
@@ -1204,7 +1205,7 @@ window.INFER = {
      "decode_intensity": 20.274,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.1966
+     "flops_utilisation": 0.1966
     },
     {
      "model": "Llama 3 70B",
@@ -1213,7 +1214,7 @@ window.INFER = {
      "decode_intensity": 37.989,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.36838
+     "flops_utilisation": 0.36838
     },
     {
      "model": "GPT-3 175B",
@@ -1222,7 +1223,7 @@ window.INFER = {
      "decode_intensity": 1.0,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.0097
+     "flops_utilisation": 0.0097
     },
     {
      "model": "GPT-3 175B",
@@ -1231,7 +1232,7 @@ window.INFER = {
      "decode_intensity": 6.734,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.0653
+     "flops_utilisation": 0.0653
     },
     {
      "model": "GPT-3 175B",
@@ -1240,7 +1241,7 @@ window.INFER = {
      "decode_intensity": 17.458,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.16929
+     "flops_utilisation": 0.16929
     },
     {
      "model": "GPT-3 175B",
@@ -1249,7 +1250,7 @@ window.INFER = {
      "decode_intensity": 29.01,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.28131
+     "flops_utilisation": 0.28131
     }
    ]
   },
@@ -1266,7 +1267,7 @@ window.INFER = {
      "decode_intensity": 1.0,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.00356
+     "flops_utilisation": 0.00356
     },
     {
      "model": "Llama 3 8B",
@@ -1275,7 +1276,7 @@ window.INFER = {
      "decode_intensity": 5.561,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.01977
+     "flops_utilisation": 0.01977
     },
     {
      "model": "Llama 3 8B",
@@ -1284,7 +1285,7 @@ window.INFER = {
      "decode_intensity": 10.874,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.03866
+     "flops_utilisation": 0.03866
     },
     {
      "model": "Llama 3 8B",
@@ -1293,7 +1294,7 @@ window.INFER = {
      "decode_intensity": 14.288,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.0508
+     "flops_utilisation": 0.0508
     },
     {
      "model": "Llama 3 70B",
@@ -1302,7 +1303,7 @@ window.INFER = {
      "decode_intensity": 1.0,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.00356
+     "flops_utilisation": 0.00356
     },
     {
      "model": "Llama 3 70B",
@@ -1311,7 +1312,7 @@ window.INFER = {
      "decode_intensity": 7.076,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.02516
+     "flops_utilisation": 0.02516
     },
     {
      "model": "Llama 3 70B",
@@ -1320,7 +1321,7 @@ window.INFER = {
      "decode_intensity": 20.274,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.07209
+     "flops_utilisation": 0.07209
     },
     {
      "model": "Llama 3 70B",
@@ -1329,7 +1330,7 @@ window.INFER = {
      "decode_intensity": 37.989,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.13507
+     "flops_utilisation": 0.13507
     },
     {
      "model": "GPT-3 175B",
@@ -1338,7 +1339,7 @@ window.INFER = {
      "decode_intensity": 1.0,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.00356
+     "flops_utilisation": 0.00356
     },
     {
      "model": "GPT-3 175B",
@@ -1347,7 +1348,7 @@ window.INFER = {
      "decode_intensity": 6.734,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.02394
+     "flops_utilisation": 0.02394
     },
     {
      "model": "GPT-3 175B",
@@ -1356,7 +1357,7 @@ window.INFER = {
      "decode_intensity": 17.458,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.06207
+     "flops_utilisation": 0.06207
     },
     {
      "model": "GPT-3 175B",
@@ -1365,7 +1366,7 @@ window.INFER = {
      "decode_intensity": 29.01,
      "decode_bound": "memory",
      "prefill_bound": "compute",
-     "decode_flops_utilisation": 0.10315
+     "flops_utilisation": 0.10315
     }
    ]
   }

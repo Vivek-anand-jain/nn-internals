@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NN Internals · 11 Collective Operations</title>
+<title>NN Internals · 16 Collective Operations</title>
 <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../assets/css/design.css">
 <style>
@@ -154,7 +154,7 @@ table.duality td .opn { font-family: var(--mono); font-weight: 700; }
     <h1>Collective Operations</h1>
     <p class="lede">Eight ways a set of GPUs can rearrange a buffer between them. Every parallelism
       strategy on the six pages that follow — DDP, ZeRO, FSDP, tensor parallel, pipeline parallel, and
-      the transformer block of pages 07–08 cut along all of them — is nothing but a choice of which of
+      the transformer block of pages 09–10 cut along all of them — is nothing but a choice of which of
       these to run, on what tensor, at what point in the step. This page is the vocabulary. Watch each
       one move.</p>
     <noscript><p class="callout warn">Every diagram on this page is built and animated in the
@@ -1022,7 +1022,7 @@ table.duality td .opn { font-family: var(--mono); font-weight: 700; }
       "There is no third mechanism. Data crosses between GPUs either as a point-to-point " +
       "send/recv or as one of a small closed set of collectives — and the set is closed because " +
       "these are the patterns a network can implement at full bandwidth without a scheduler. " +
-      "Every parallelism strategy in pages 12–17 is therefore just an answer to two " +
+      "Every parallelism strategy in pages 17–23 is therefore just an answer to two " +
       "questions: <em>which tensor is sharded</em>, and <em>which collective repairs the sharding, " +
       "when</em>. DDP is one <code>all_reduce</code> per step. ZeRO-2 is a " +
       "<code>reduce_scatter</code> plus an <code>all_gather</code>. Tensor parallel is two " +

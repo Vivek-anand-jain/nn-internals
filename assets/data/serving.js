@@ -30,43 +30,57 @@ window.SERVING = {
   "assumptions": [
    {
     "k": "request mix",
+    "for": "scheduler",
     "v": "16 requests, prompts 48\u20132048 tokens, outputs 4\u201360 tokens",
     "why": "A hand-built mix, not a fitted trace. Long prompts are paired with short outputs and short prompts with long outputs, which is the shape that makes a static batch wait."
    },
    {
     "k": "arrival process",
+    "for": "scheduler",
     "v": "one request every 30.0 ms, deterministic",
-    "why": "Not Poisson. A fixed spacing keeps the two schedulers comparable -- they see byte-identical input."
+    "why": "Not Poisson. A fixed spacing keeps the two schedulers comparable \u2014 they see byte-identical input."
    },
    {
     "k": "concurrency",
+    "for": "scheduler",
     "v": "6 sequence slots",
     "why": "Small enough to draw slot by slot. A real server runs hundreds; the shape of the argument does not change."
    },
    {
     "k": "prefill efficiency",
+    "for": "scheduler",
     "v": "MFU 0.4",
     "why": "Fraction of peak dense bf16 FLOP/s a real prefill kernel reaches. Decode never gets near it and is modelled from bandwidth instead."
    },
    {
     "k": "iteration time",
+    "for": "scheduler",
     "v": "max(bytes \u00f7 HBM bandwidth, FLOPs \u00f7 (peak \u00d7 MFU))",
     "why": "A roofline, not a measurement. Decode iterations land on the bandwidth side, prefill iterations on the compute side."
    },
    {
-    "k": "length distribution (allocator)",
+    "k": "length distribution",
+    "for": "allocator",
     "v": "lognormal, median 256 tokens, \u03c3 = 0.9, clipped to [32, 2048]",
     "why": "Chosen to look like served traffic: most requests far shorter than the advertised context. Fragmentation is a function of THIS choice, so the shape is stated rather than hidden."
    },
    {
     "k": "block size",
+    "for": "allocator",
     "v": "16 tokens per KV block",
     "why": "vLLM's default. Larger blocks mean fewer block-table entries and more waste in the final partial block."
    },
    {
     "k": "advertised context",
+    "for": "allocator",
     "v": "2048 tokens",
     "why": "What a contiguous allocator has to reserve per request, because it cannot know the true length in advance."
+   },
+   {
+    "k": "held-out workspace",
+    "for": "allocator",
+    "v": "2 GB of HBM",
+    "why": "Activations, CUDA graphs and kernel workspace, kept out of the KV budget. A real server tunes this; the concurrency numbers move with it."
    }
   ],
   "_source_note": "Model and GPU specifications are quoted public figures, external to this simulation, and match the ones in code/inference_toy.py. Everything else on this page is simulated here."

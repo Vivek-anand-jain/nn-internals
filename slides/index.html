@@ -51,11 +51,11 @@ body { background: var(--page); }
 /* ------------------------------------------------------ slide typography */
 .stage .kicker {
   font-family: var(--mono); font-size: 15px; letter-spacing: .18em;
-  text-transform: uppercase; color: var(--ink-muted); margin-bottom: 14px;
+  text-transform: uppercase; color: var(--ink-muted); margin-bottom: 10px;
 }
 .stage .kicker b { color: var(--accent); font-weight: 600; }
 .stage .stitle {
-  font-size: 46px; line-height: 1.1; margin: 0 0 18px;
+  font-size: 46px; line-height: 1.1; margin: 0 0 14px;
   letter-spacing: -.025em; font-weight: 680;
 }
 .stage .stitle.sm { font-size: 36px; }
@@ -68,28 +68,50 @@ body { background: var(--page); }
 }
 .stage .midnum { font-family: var(--mono); font-size: 40px; font-weight: 700; letter-spacing: -.02em; }
 .stage .phaselabel {
-  font-family: var(--mono); font-size: 21px; font-weight: 700;
-  min-height: 52px; display: flex; align-items: center;
+  font-family: var(--mono); font-size: 19px; font-weight: 700;
+  line-height: 1.35; min-height: 42px; display: flex; align-items: center;
 }
 .stage .hugetitle {
   font-size: 78px; line-height: 1.03; letter-spacing: -.035em;
   font-weight: 700; margin: 0 0 22px;
 }
 .stage .subtitle { font-size: 25px; color: var(--ink-2); line-height: 1.45; max-width: 30ch; }
-.stage .cell { font-size: 15px; min-width: 72px; padding: 9px 11px; }
-.stage .tensor-label { font-size: 14px; }
+/* ------------------------------------------------------------- density
+   The stage is a fixed 686px-tall box and the auto-fit shrinks anything
+   taller than that, so vertical whitespace is the most expensive thing on
+   a slide: 12px of padding on a matrix cell costs 36px on a three-row
+   matrix and can be the difference between reading at 90% and at 55%.
+   Every rule below tightens spacing ONLY — no text is smaller than it was
+   except the phase label, and nothing is removed. The site pages keep
+   design.css's roomier defaults; this is deck-local. */
+.stage .cell {
+  font-size: 15px; min-width: 66px; padding: 5px 9px; line-height: 1.3;
+}
+.stage .tensor { margin: 0 12px 9px 0; }
+.stage .tensor-label { font-size: 14px; line-height: 1.35; margin-bottom: 4px; }
 .stage .tensor-shape { font-size: 13px; }
-.stage .formula { font-size: 19px; padding: 16px 20px; }
-.stage .formula .sub { font-size: 16px; }
-.stage .callout { font-size: 18px; padding: 16px 20px; }
-.stage .callout .t { font-size: 13px; }
+.stage .tensor-body { padding: 5px; }
+.stage .formula { font-size: 19px; padding: 12px 17px; margin: 9px 0; }
+.stage .formula .sub { font-size: 16px; margin-top: 4px; }
+.stage .callout { font-size: 18px; padding: 13px 18px; margin: 11px 0; line-height: 1.45; }
+.stage .callout .t { font-size: 13px; margin-bottom: 4px; }
+.stage .tiles { margin: 11px 0; gap: 10px; }
+.stage .tile { padding: 10px 13px; }
 .stage .tile .v { font-size: 30px; }
-.stage .tile .k { font-size: 12px; }
-.stage .tile .s { font-size: 13px; }
+.stage .tile .k { font-size: 12px; margin-bottom: 3px; }
+.stage .tile .s { font-size: 13px; margin-top: 2px; }
 .stage .tclass { font-size: 14px; padding: 3px 11px 3px 9px; }
-.stage table.data { font-size: 16px; }
+.stage table.data { font-size: 16px; margin: 9px 0; }
 .stage table.data th { font-size: 12px; }
+.stage table.data th, .stage table.data td { padding: 4px 10px; }
 .stage .small { font-size: 15px; }
+.stage .legend { margin: 9px 0; gap: 8px; }
+.stage .gpugrid { margin: 10px 0; gap: 9px; }
+.stage .gpu-body { padding: 7px 9px; }
+.stage .memstrip { margin: 10px 0; }
+.stage .commcard { margin: 10px 0; }
+.stage p { margin: 0 0 .7em; }
+.stage p:last-child { margin-bottom: 0; }
 .stage .ckey {
   font-family: var(--mono); font-size: 14px; color: var(--ink-2);
   display: inline-flex; align-items: center; gap: 8px;
@@ -98,24 +120,29 @@ body { background: var(--page); }
 .stage code { font-size: .95em; }
 
 /* ------------------------------------------------------------- layouts */
-.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 34px; align-items: center; }
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 26px; align-items: center; }
 .cols.wide-l { grid-template-columns: 1.35fr 1fr; }
 .cols.wide-r { grid-template-columns: 1fr 1.35fr; }
-.cols3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; align-items: stretch; }
-.cols4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; align-items: stretch; }
-.stack { display: flex; flex-direction: column; gap: 14px; }
-.rowflex { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+.cols3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; align-items: stretch; }
+.cols4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; align-items: stretch; }
+.stack { display: flex; flex-direction: column; gap: 11px; }
+.rowflex { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
 .rowflex.top { align-items: flex-start; }
+/* a row that must stay on ONE line: the children shrink instead of wrapping,
+   which is what keeps a two-matrix comparison from becoming two stacked
+   rows and halving the auto-fit scale. */
+.rowflex.nowrap { flex-wrap: nowrap; }
+.rowflex.nowrap > * { min-width: 0; }
 .gap8 { height: 8px; } .gap16 { height: 16px; } .gap24 { height: 24px; }
 
 .panel {
   background: var(--surface-1); border: 1px solid var(--hairline);
-  border-radius: 12px; padding: 20px 22px;
+  border-radius: 12px; padding: 15px 18px;
 }
-.panel.tight { padding: 14px 16px; }
+.panel.tight { padding: 11px 13px; }
 .panel .ph {
   font-family: var(--mono); font-size: 12px; letter-spacing: .12em;
-  text-transform: uppercase; color: var(--ink-muted); margin-bottom: 10px;
+  text-transform: uppercase; color: var(--ink-muted); margin-bottom: 8px;
 }
 .panel.w { border-left: 3px solid var(--weight); }
 .panel.g { border-left: 3px solid var(--gradient); }
@@ -480,7 +507,7 @@ body { background: var(--page); }
 }
 .stage .heat .hlab.rw { justify-content: flex-end; padding-right: 7px; }
 .stage .heat .hcell {
-  height: 40px; border-radius: 5px; font-size: 14px; color: var(--ink);
+  height: 34px; border-radius: 5px; font-size: 14px; color: var(--ink);
   display: flex; align-items: center; justify-content: center;
   border: 1px solid var(--hairline-2);
   transition: background .35s ease, border-color .3s ease, color .3s ease;
@@ -12274,8 +12301,8 @@ const SPCERR = (function () {
   let e = 0;
   SPSCL.table.forEach(function (r) {
     e = Math.max(e,
-      Math.abs(SPA + SPB / r.tp - r.bytes_per_token_per_layer_tp_only),
-      Math.abs(SPC / r.tp - r.bytes_per_token_per_layer_tp_sp));
+      Math.abs(SPA + SPB / r.tp - r.coeff_tp_only),
+      Math.abs(SPC / r.tp - r.coeff_tp_sp));
   });
   if (e > 1e-3) {
     console.warn("nn-internals slides: SEQPAR.at_scale.coefficients do not " +
@@ -13003,11 +13030,11 @@ S({
     " + " + f(SPB, 0) + ", so at t = 1 the two expressions are the same " +
     "expression — as they must be, because on one GPU nothing is sharded " +
     "either way. And they do agree: " +
-    f(SP_T1.bytes_per_token_per_layer_tp_only, 0) + " equals " +
-    f(SP_T1.bytes_per_token_per_layer_tp_sp, 0) +
+    f(SP_T1.coeff_tp_only, 0) + " equals " +
+    f(SP_T1.coeff_tp_sp, 0) +
     ". Then watch them separate. At t = " + SP_T8.tp + " it is " +
-    f(SP_T8.bytes_per_token_per_layer_tp_only, 2) + " against " +
-    f(SP_T8.bytes_per_token_per_layer_tp_sp, 2) + ", a " +
+    f(SP_T8.coeff_tp_only, 2) + " against " +
+    f(SP_T8.coeff_tp_sp, 2) + ", a " +
     f(SP_T8.saving_pct, 1) + "% saving. The " + f(SPA, 0) +
     " is exactly the replicated part — the LayerNorms, the dropout masks and " +
     "the residual — and it does not have a t in it, so the TP-only curve " +
@@ -13017,9 +13044,9 @@ S({
     f(SPCERR, 1) + ".",
   build: function () {
     const tpPts = SPSCL.table.map(function (r) {
-      return [Math.log2(r.tp), r.bytes_per_token_per_layer_tp_only]; });
+      return [Math.log2(r.tp), r.coeff_tp_only]; });
     const spPts = SPSCL.table.map(function (r) {
-      return [Math.log2(r.tp), r.bytes_per_token_per_layer_tp_sp]; });
+      return [Math.log2(r.tp), r.coeff_tp_sp]; });
     const flPts = SPSCL.table.map(function (r) {
       return [Math.log2(r.tp), SPA]; });
     return [
@@ -13059,14 +13086,14 @@ S({
             el("span", { html: "<b>the sanity check</b> — at t = " +
               SP_T1.tp + " nothing is sharded either way, so the two " +
               "expressions must agree: " +
-              f(SP_T1.bytes_per_token_per_layer_tp_only, 0) + " = " +
-              f(SP_T1.bytes_per_token_per_layer_tp_sp, 0) })
+              f(SP_T1.coeff_tp_only, 0) + " = " +
+              f(SP_T1.coeff_tp_sp, 0) })
           ]), "f-right"),
           frag(NN.formula({ rule: "TP only", sub: SPSCL.formula_tp_only,
-            result: f(SP_T8.bytes_per_token_per_layer_tp_only, 2) +
+            result: f(SP_T8.coeff_tp_only, 2) +
                     " at t = " + SP_T8.tp, cls: "activation" }), "f-right"),
           frag(NN.formula({ rule: "TP + SP", sub: SPSCL.formula_tp_sp,
-            result: f(SP_T8.bytes_per_token_per_layer_tp_sp, 2) +
+            result: f(SP_T8.coeff_tp_sp, 2) +
                     " at t = " + SP_T8.tp, cls: "activation" }), "f-right"),
           frag(NN.callout("key", "A = " + f(SPA, 0) +
             " has no t in it, and that is the whole story",
@@ -13092,20 +13119,20 @@ S({
 function spSeqBytes(bytesPerTokenPerLayer) {
   return bytesPerTokenPerLayer * CFG.seq * CFG.layers * CFG.d;
 }
-const SP_T1_CROSS = Math.abs(spSeqBytes(SP_T1.bytes_per_token_per_layer_tp_only) -
+const SP_T1_CROSS = Math.abs(spSeqBytes(SP_T1.coeff_tp_only) -
                              CFG.actFlashSeq) / CFG.actFlashSeq;
 if (SP_T1_CROSS > 0.01) {
   console.warn("nn-internals slides: Korthikanti at t=1 disagrees with the deck's " +
                "own activation accounting by " + (SP_T1_CROSS * 100) + "%");
 }
-const SP_DIFF_T8 = spSeqBytes(SP_T8.bytes_per_token_per_layer_tp_only -
-                              SP_T8.bytes_per_token_per_layer_tp_sp);
+const SP_DIFF_T8 = spSeqBytes(SP_T8.coeff_tp_only -
+                              SP_T8.coeff_tp_sp);
 
 S({
   chapter: "Sequence parallel · at scale",
   plain: "At t = " + SP_T8.tp + ": " +
-         f(SP_T8.bytes_per_token_per_layer_tp_only, 2) + " against " +
-         f(SP_T8.bytes_per_token_per_layer_tp_sp, 2) + " bytes/token/layer",
+         f(SP_T8.coeff_tp_only, 2) + " against " +
+         f(SP_T8.coeff_tp_sp, 2) + " bytes/token/layer",
   notes: "The same numbers as a table, and then what they mean for a real run. " +
     "Read the saving column: it starts at zero at t = 1, because there is " +
     "nothing to save on one GPU, and climbs past two thirds by t = " +
@@ -13115,15 +13142,15 @@ S({
     "figure for one sequence is the coefficient times " + CFG.seq +
     " tokens times " + CFG.layers + " layers times d = " + CFG.d + ". At t = " +
     SP_T8.tp + " that is " +
-    BY(spSeqBytes(SP_T8.bytes_per_token_per_layer_tp_only)) +
+    BY(spSeqBytes(SP_T8.coeff_tp_only)) +
     " under tensor parallelism alone against " +
-    BY(spSeqBytes(SP_T8.bytes_per_token_per_layer_tp_sp)) +
+    BY(spSeqBytes(SP_T8.coeff_tp_sp)) +
     " with sequence parallelism, per rank — a saving of " +
     BY(SP_DIFF_T8) + ", which is " +
     f(SP_DIFF_T8 / CFG.gradB * 100, 0) + "% of the entire bf16 gradient " +
     "buffer the cost run priced at " + BY(CFG.gradB) + ". The cross-check " +
     "worth reading out is the t = 1 row: " +
-    BY(spSeqBytes(SP_T1.bytes_per_token_per_layer_tp_only)) +
+    BY(spSeqBytes(SP_T1.coeff_tp_only)) +
     " for one sequence on one GPU, which is the same " + BY(CFG.actPerSeq) +
     " the cost run quoted for " + MODEL.name +
     " with FlashAttention on — two independent accountings landing on the same " +
@@ -13138,14 +13165,14 @@ S({
         el("td", { class: "n", html: hot
           ? "<b class='v-activation'>" + r.tp + "</b>" : String(r.tp) }),
         el("td", { class: "n", html: "<span style='color:var(--critical)'>" +
-          f(r.bytes_per_token_per_layer_tp_only, 3) + "</span>" }),
+          f(r.coeff_tp_only, 3) + "</span>" }),
         el("td", { class: "n v-activation" },
-           f(r.bytes_per_token_per_layer_tp_sp, 3)),
+           f(r.coeff_tp_sp, 3)),
         el("td", { class: "n" }, f(r.saving_pct, 1) + "%"),
         el("td", { class: "n" },
-           BY(spSeqBytes(r.bytes_per_token_per_layer_tp_only))),
+           BY(spSeqBytes(r.coeff_tp_only))),
         el("td", { class: "n v-activation" },
-           BY(spSeqBytes(r.bytes_per_token_per_layer_tp_sp)))
+           BY(spSeqBytes(r.coeff_tp_sp)))
       ]);
     });
     return [
@@ -13171,17 +13198,17 @@ S({
           frag(d("vbox", [
             el("span", { class: "mark" }, "✓"),
             el("span", { html: "<b>cross-check at t = " + SP_T1.tp + "</b> — " +
-              BY(spSeqBytes(SP_T1.bytes_per_token_per_layer_tp_only)) +
+              BY(spSeqBytes(SP_T1.coeff_tp_only)) +
               " for one sequence, against the <b>" + BY(CFG.actPerSeq) +
               "</b> the cost run derived for " + MODEL.name +
               " from its own tensor census. Two accountings, same number." })
           ]), "f-right"),
           frag(NN.tiles([
             { k: "at t = " + SP_T8.tp + ", TP only",
-              v: BY(spSeqBytes(SP_T8.bytes_per_token_per_layer_tp_only)),
+              v: BY(spSeqBytes(SP_T8.coeff_tp_only)),
               s: "per rank, one sequence" },
             { k: "at t = " + SP_T8.tp + ", TP + SP",
-              v: BY(spSeqBytes(SP_T8.bytes_per_token_per_layer_tp_sp)),
+              v: BY(spSeqBytes(SP_T8.coeff_tp_sp)),
               s: f(SP_T8.saving_pct, 1) + "% less", cls: "activation" },
             { k: "difference", v: BY(SP_DIFF_T8),
               s: f(SP_DIFF_T8 / CFG.gradB * 100, 0) + "% of the " +

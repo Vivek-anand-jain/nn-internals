@@ -742,7 +742,7 @@
       "brute-force dot product vs the closed form: max |Δ| = <b>" +
       sci(Z.closed_form_max_abs_err) + "</b>; spread within a fixed offset = <b>" +
       sci(Z.raw_max_spread) + "</b>",
-      "the identity holds exactly"));
+      "— the identity holds exactly"));
 
     S.appendChild(h3("…and attention destroys it"));
     S.appendChild(p(
@@ -790,11 +790,15 @@
       small("same axis, same units, worst = " + f(Z.projected_max_spread, 4))
     ]));
     S.appendChild(g);
+    S.appendChild(small(
+      "The largest offset has only one (m, n) pair available inside " +
+      Z.n_shown + " positions, so its spread is zero by definition on both " +
+      "sides — read the offsets with several pairs."));
 
     S.appendChild(verdict(false,
       "the offset structure does not survive the projection: spread goes from <b>" +
       sci(Z.raw_max_spread) + "</b> to <b>" + f(Z.projected_max_spread, 4) + "</b>",
-      "same offsets, same encodings, one matrix multiply in between"));
+      "— same offsets, same encodings, one matrix multiply in between"));
 
     S.appendChild(NN.callout("why", "THIS IS EXACTLY THE GAP RoPE CLOSES",
       "Sinusoidal has the relative property before the projection. Attention " +
@@ -1430,7 +1434,7 @@
       "both NTK identities verified: pair 0 unchanged to <b>" +
       sci(X.ntk_fastest_unchanged_err) + "</b>, slowest pair equal to θ/s to <b>" +
       sci(X.ntk_slowest_scaled_err) + "</b>",
-      "derived here; the choice of exponent d/(d−2) is the quoted part"));
+      "— derived here; the choice of exponent d/(d−2) is the quoted part"));
 
     /* PI vs NTK across the ladder */
     S.appendChild(NN.chart.line({

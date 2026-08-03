@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NN Internals · 16 Partitioning a Block</title>
+<title>NN Internals · 22 Partitioning a Block</title>
 <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../assets/css/design.css">
 <style>
@@ -189,7 +189,7 @@ details.more > div:last-child { padding-bottom: 12px; }
   <div class="pagehead">
     <div class="eyebrow">Part 22</div>
     <h1>Partitioning a Block: Every Matrix, Cut Four Different Ways</h1>
-    <p class="lede">Pages 11–15 argued about parallelism with boxes and arrows, on a 193-parameter MLP.
+    <p class="lede">Pages 16–21 argued about parallelism with boxes and arrows, on a 193-parameter MLP.
       This page does it with the actual numbers, on the block you walked forward on page 09 and
       differentiated on page 10. Two real transformer blocks, twenty weight tensors, 288 parameters —
       and for every strategy, for every matrix, for every cell, exactly which GPU holds it. Point at any
@@ -874,7 +874,7 @@ details.more > div:last-child { padding-bottom: 12px; }
         "The model has " + TOTAL + " distinct parameters. The group is storing " + (TOTAL * W) +
         " parameter slots, " + (TOTAL * W) + " gradient slots and " + (TOTAL * W * 2) + " optimizer " +
         "slots to train them. Redundancy factor: exactly the world size, " + W + times + ". Nothing about " +
-        "that ratio improves as the model grows — it is the reason pages 13–15 exist." })
+        "that ratio improves as the model grows — it is the reason pages 18–21 exist." })
     ]));
 
     host.appendChild(el("div", {}, P.strategies.ddp.schedule.map(function (c) {

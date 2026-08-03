@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NN Internals · 08 Transformer Backward</title>
+<title>NN Internals · 10 Transformer Backward</title>
 <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../assets/css/design.css">
 <style>
@@ -2042,7 +2042,7 @@ mark.hl { background: var(--gradient-w); color: var(--gradient); padding: 0 3px;
       "to keep.</p>"));
 
     host.appendChild(NN.callout("why", "THE DEAD RELU, ONE LAST TIME",
-      "The " + T.meta.architecture + " model from pages 01–06 has a unit whose gradient row in " +
+      "The " + T.meta.architecture + " model from pages 01–07 has a unit whose gradient row in " +
       "<code>dL/dW1</code> is exactly <code>[0, 0]</code>, because ReLU's derivative at a negative " +
       "pre-activation is zero and zero times anything is zero. Nothing on this page changes that " +
       "logic; it only adds structure around it. GELU, unlike ReLU, has no exactly-zero derivative " +

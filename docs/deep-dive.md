@@ -21,7 +21,7 @@ appears below, it is either a literal field in one of those files or is
 stated to be arithmetic performed on their fields; anything quoted from the
 literature is marked as such where it appears.
 
-The document follows the site's three parts.
+The document follows the first three of the site's five parts.
 
 | Part | Sections | Pages |
 |---|---|---|
@@ -30,7 +30,7 @@ The document follows the site's three parts.
 | III — many GPUs | 12-19 | `site/16-collectives.html`, `site/17-data-parallel.html`, `site/18-zero-fsdp.html`, `site/19-tensor-parallel.html`, `site/20-sequence-parallel.html`, `site/21-pipeline-parallel.html`, `site/22-transformer-partitioned.html`, `site/23-3d-parallelism.html` |
 
 That page list is `NN.PAGES` in `assets/js/ui.js`, which is authoritative for
-chapter numbering. The chapters have been renumbered twice as pages were
+chapter numbering. The chapters have been renumbered three times as pages were
 inserted; if you find a stale reference anywhere, `NN.PAGES` wins.
 
 A note on precision. The traces store IEEE-754 doubles as Python computed
@@ -5291,7 +5291,7 @@ the counts of backward steps and partitioning entries. It raises
 any exceeds `1e-6`, so a `tf2.json` that exists is one whose LayerNorm
 backward, softmax Jacobian and attention chain have been confirmed against
 central differences. Change `D_MODEL`, `N_HEADS`, `SEQ`, `D_FF`, `N_LAYERS` or
-`WORLD` at the top and sections 9 and 10 — and pages 07, 08 and 18 — move
+`WORLD` at the top and sections 9 and 10 — and pages 09, 10 and 22 — move
 together.
 
 `flash_attention.py` prints the tiling geometry, three independent

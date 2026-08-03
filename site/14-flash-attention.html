@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NN Internals · 10 FlashAttention</title>
+<title>NN Internals · 14 FlashAttention</title>
 <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../assets/css/design.css">
 <style>
@@ -296,8 +296,8 @@
 (function () {
   "use strict";
 
-  const T  = NN.T;              /* the 13-parameter MLP trace (pages 01-06)  */
-  const F2 = window.TF2;        /* the two-block transformer (pages 07, 08)  */
+  const T  = NN.T;              /* the 13-parameter MLP trace (pages 01-07)  */
+  const F2 = window.TF2;        /* the two-block transformer (pages 09, 10)  */
   const F  = window.FLASH;      /* code/flash_attention.py                   */
 
   if (!F) {
@@ -2089,7 +2089,7 @@
     const out = NN.$("#next");
     out.appendChild(h2("8 · Where this goes"));
 
-    out.appendChild(NN.callout("why", "Back to 09 — what a transformer costs",
+    out.appendChild(NN.callout("why", "Back to 13 — what a transformer costs",
       "Page 13's activation budget has a checkbox marked " +
       "<em>FlashAttention</em> that deletes the " + code("a·s²·b") +
       " term. This page is what that checkbox does: not an estimate, not a " +
@@ -2097,17 +2097,17 @@
       " numbers kept instead of " + num(F.standard.stored_elements, 0) +
       " at " + code("seq " + SEQ) + ", and an output that matches to " +
       sci(F.equivalence.output_max_abs_err) + ". Go back and tick it knowing " +
-      "what it means. <a href='13-transformer-cost.html'>09 · What a " +
+      "what it means. <a href='13-transformer-cost.html'>13 · What a " +
       "Transformer Costs →</a>"));
 
-    out.appendChild(NN.callout("mem", "Forward to 11 — scaling to 70B",
+    out.appendChild(NN.callout("mem", "Forward to 15 — scaling to 70B",
       "With the quadratic term removed, activation memory is linear in " +
       "sequence length and the remaining problem is the one page 15 opens " +
       "with: a " + T.reference_configs.default_model + " model's parameters, " +
       "gradients and optimizer states do not fit on any single device, no " +
       "matter how the activations behave. FlashAttention is the last thing " +
       "you can do on one GPU. Everything after it needs more than one. " +
-      "<a href='15-scaling.html'>11 · Scaling to 70B →</a>"));
+      "<a href='15-scaling.html'>15 · Scaling to 70B →</a>"));
 
     out.appendChild(NN.callout("key", "The three sentences worth keeping",
       "<ol style='margin:8px 0 0 18px;padding:0'>" +

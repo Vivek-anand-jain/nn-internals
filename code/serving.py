@@ -103,40 +103,46 @@ OUTPUTS = [24, 8, 60, 6, 32, 20, 5, 16, 12, 48, 4, 28,
            10, 7, 56, 14]
 
 ASSUMPTIONS = [
-    {"k": "request mix",
+    {"k": "request mix", "for": "scheduler",
      "v": str(len(PROMPTS)) + " requests, prompts " + str(min(PROMPTS)) +
-          "–" + str(max(PROMPTS)) + " tokens, outputs " + str(min(OUTPUTS)) +
-          "–" + str(max(OUTPUTS)) + " tokens",
+          "\u2013" + str(max(PROMPTS)) + " tokens, outputs " + str(min(OUTPUTS)) +
+          "\u2013" + str(max(OUTPUTS)) + " tokens",
      "why": "A hand-built mix, not a fitted trace. Long prompts are paired "
             "with short outputs and short prompts with long outputs, which "
             "is the shape that makes a static batch wait."},
-    {"k": "arrival process",
+    {"k": "arrival process", "for": "scheduler",
      "v": "one request every " + str(INTERARRIVAL_MS) + " ms, deterministic",
      "why": "Not Poisson. A fixed spacing keeps the two schedulers "
-            "comparable -- they see byte-identical input."},
-    {"k": "concurrency", "v": str(SLOTS) + " sequence slots",
+            "comparable \u2014 they see byte-identical input."},
+    {"k": "concurrency", "for": "scheduler", "v": str(SLOTS) + " sequence slots",
      "why": "Small enough to draw slot by slot. A real server runs "
             "hundreds; the shape of the argument does not change."},
-    {"k": "prefill efficiency", "v": "MFU " + str(MFU),
+    {"k": "prefill efficiency", "for": "scheduler", "v": "MFU " + str(MFU),
      "why": "Fraction of peak dense bf16 FLOP/s a real prefill kernel "
             "reaches. Decode never gets near it and is modelled from "
             "bandwidth instead."},
-    {"k": "iteration time",
-     "v": "max(bytes ÷ HBM bandwidth, FLOPs ÷ (peak × MFU))",
+    {"k": "iteration time", "for": "scheduler",
+     "v": "max(bytes \u00f7 HBM bandwidth, FLOPs \u00f7 (peak \u00d7 MFU))",
      "why": "A roofline, not a measurement. Decode iterations land on the "
             "bandwidth side, prefill iterations on the compute side."},
-    {"k": "length distribution (allocator)",
-     "v": "lognormal, median 256 tokens, σ = 0.9, clipped to [32, " +
+    {"k": "length distribution", "for": "allocator",
+     "v": "lognormal, median 256 tokens, \u03c3 = 0.9, clipped to [32, " +
           str(MAX_SEQ) + "]",
      "why": "Chosen to look like served traffic: most requests far shorter "
             "than the advertised context. Fragmentation is a function of "
             "THIS choice, so the shape is stated rather than hidden."},
-    {"k": "block size", "v": str(BLOCK) + " tokens per KV block",
+    {"k": "block size", "for": "allocator",
+     "v": str(BLOCK) + " tokens per KV block",
      "why": "vLLM's default. Larger blocks mean fewer block-table entries "
             "and more waste in the final partial block."},
-    {"k": "advertised context", "v": str(MAX_SEQ) + " tokens",
+    {"k": "advertised context", "for": "allocator", "v": str(MAX_SEQ) + " tokens",
      "why": "What a contiguous allocator has to reserve per request, "
             "because it cannot know the true length in advance."},
+    {"k": "held-out workspace", "for": "allocator",
+     "v": str(int(WORKSPACE_BYTES / 1e9)) + " GB of HBM",
+     "why": "Activations, CUDA graphs and kernel workspace, kept out of the "
+            "KV budget. A real server tunes this; the concurrency numbers "
+            "move with it."},
 ]
 
 

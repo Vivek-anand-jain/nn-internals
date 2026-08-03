@@ -1,0 +1,1381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NN Internals · 06 Training Dynamics</title>
+<link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../assets/css/design.css">
+<style>
+/* page-local layout only; every colour is a design.css custom property */
+
+.panel { background: var(--surface-2); border: 1px solid var(--hairline);
+         border-radius: 8px; padding: 13px 16px; margin: 14px 0; }
+.panel h4 { margin: 0 0 9px; font-family: var(--mono); font-size: .7rem;
+            letter-spacing: .12em; text-transform: uppercase;
+            color: var(--ink-muted); font-weight: 700; }
+
+.playrow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+           padding: 11px 14px; background: var(--surface-2);
+           border: 1px solid var(--hairline); border-radius: 8px; margin: 14px 0; }
+.playrow input[type="range"] { flex: 1; min-width: 160px; height: 26px; }
+.playrow .stepno { font-family: var(--mono); font-size: .82rem; color: var(--ink-2);
+                   min-width: 116px; font-variant-numeric: tabular-nums; }
+
+.fld { margin: 0 0 11px; }
+.fld > label { display: flex; justify-content: space-between; align-items: baseline;
+               gap: 8px; font-family: var(--mono); font-size: .74rem;
+               color: var(--ink-2); margin-bottom: 3px; }
+.fld .rv { color: var(--ink); font-weight: 700; font-variant-numeric: tabular-nums; }
+.fld input[type="range"] { width: 100%; accent-color: var(--optimizer); }
+.ctlgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+           gap: 16px; }
+
+.pillrow { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; margin: 6px 0 12px; }
+.pill { background: var(--surface-3); border: 1px solid var(--hairline); color: var(--ink-2);
+        border-radius: 999px; padding: 4px 13px; font-family: var(--mono);
+        font-size: .74rem; cursor: pointer; }
+.pill:hover { border-color: var(--accent); }
+.pill.on { border-color: var(--optimizer); color: var(--ink); background: var(--optimizer-w); }
+
+select.psel { background: var(--surface-3); color: var(--ink); border: 1px solid var(--hairline);
+              border-radius: 6px; padding: 4px 8px; font-family: var(--mono); font-size: .78rem; }
+
+.switch { display: inline-flex; align-items: center; gap: 8px; font-size: .85rem;
+          font-family: var(--mono); color: var(--ink-2); cursor: pointer; }
+.switch input { accent-color: var(--gradient); }
+
+/* two runs, side by side */
+.vs { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 900px) { .vs { grid-template-columns: 1fr; } }
+.runcard { background: var(--surface-2); border: 1px solid var(--hairline);
+           border-radius: 8px; padding: 12px 15px; border-top: 3px solid var(--accent); }
+.runcard.bad { border-top-color: var(--critical); }
+.runcard.good { border-top-color: var(--optimizer); }
+.runcard .rt { font-family: var(--mono); font-size: .78rem; font-weight: 700;
+               letter-spacing: .04em; margin-bottom: 8px; }
+.runcard.bad .rt { color: var(--critical); }
+.runcard.good .rt { color: var(--optimizer); }
+.kv { display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+      font-family: var(--mono); font-size: .74rem; padding: 2px 0; }
+.kv .k { color: var(--ink-muted); white-space: nowrap; }
+.kv .v { color: var(--ink); font-variant-numeric: tabular-nums; text-align: right; }
+.kv .v.dead { color: var(--critical); }
+
+/* twelve hidden-unit activations, alive or dead */
+.units { display: flex; gap: 4px; margin: 8px 0 2px; }
+.units i { width: 13px; height: 13px; border-radius: 3px; background: var(--surface-3);
+           border: 1px solid var(--hairline); transition: background .25s, border-color .25s; }
+.units i.on { background: var(--activation); border-color: var(--activation); }
+
+.arith { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: .8rem;
+         font-variant-numeric: tabular-nums; margin: 4px 0 0; }
+.arith td, .arith th { padding: 4px 9px; border-bottom: 1px solid var(--hairline-2);
+                       white-space: nowrap; text-align: right; }
+.arith th { color: var(--ink-muted); font-weight: 600; font-size: .72rem;
+            text-transform: uppercase; letter-spacing: .05em; }
+.arith td:first-child, .arith th:first-child { text-align: left; }
+.arith tr.hi td { background: var(--surface-3); }
+.arith td.ok { color: var(--good); }
+.arith td.bad { color: var(--critical); }
+
+.proofline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 18px;
+             border-left: 4px solid var(--good); background: var(--surface-2);
+             border-radius: 0 8px 8px 0; padding: 13px 18px; margin: 14px 0; }
+.proofline .big { font-size: 1.4rem; font-weight: 800; color: var(--good); line-height: 1.15; }
+.proofline .det { font-family: var(--mono); font-size: .82rem; color: var(--ink-2); }
+
+.ringwrap { display: grid; grid-template-columns: 250px 1fr; gap: 18px; align-items: center; }
+@media (max-width: 860px) { .ringwrap { grid-template-columns: 1fr; } }
+
+.stack { display: grid; gap: 10px; }
+.legendnote { font-size: .8rem; color: var(--ink-muted); margin: 4px 0 12px; }
+.chartcap { font-family: var(--mono); font-size: .7rem; color: var(--ink-muted);
+            letter-spacing: .08em; text-transform: uppercase; margin: 10px 0 2px; }
+</style>
+</head>
+<body>
+
+<main class="wrap">
+  <div class="pagehead">
+    <div class="eyebrow">Part 06</div>
+    <h1>Training Dynamics: The Run, Not The Step</h1>
+    <p class="lede">Everything so far has been one iteration, taken apart. A real run is
+      a hundred thousand of them, and nothing that goes wrong in training goes wrong
+      inside a step — it goes wrong across them. This page trains the same
+      13-parameter model, over and over, and measures the five things that only exist
+      over a run: the learning-rate schedule, the initialisation, the clip, the spike,
+      and the decay.</p>
+    <noscript><p class="callout warn">This page derives every number in the browser from
+      <code>assets/data/trace.js</code> and <code>assets/data/dynamics.js</code>. With
+      JavaScript disabled you will see an empty shell.</p></noscript>
+  </div>
+
+  <section class="block" id="shape">
+    <h2>1 · The shape of a run</h2>
+    <div id="shapeBody"></div>
+  </section>
+
+  <section class="block" id="warmup">
+    <h2>2 · Why warmup exists</h2>
+    <div id="warmBody"></div>
+  </section>
+
+  <section class="block" id="designer">
+    <h2>3 · Design a schedule, then run it</h2>
+    <div id="desBody"></div>
+  </section>
+
+  <section class="block" id="init">
+    <h2>4 · Initialisation: holding the variance still</h2>
+    <div id="initBody"></div>
+  </section>
+
+  <section class="block" id="clip">
+    <h2>5 · Gradient clipping is a collective</h2>
+    <div id="clipBody"></div>
+  </section>
+
+  <section class="block" id="spike">
+    <h2>6 · Loss spikes, and what moves first</h2>
+    <div id="spikeBody"></div>
+  </section>
+
+  <section class="block" id="decay">
+    <h2>7 · Weight decay is not L2</h2>
+    <div id="decayBody"></div>
+  </section>
+
+  <div id="pagenav"></div>
+</main>
+
+<footer class="site"><div class="wrap"><div id="sitefoot"></div></div></footer>
+
+<script src="../assets/data/trace.js"></script>
+<script src="../assets/data/dynamics.js"></script>
+<script src="../assets/js/ui.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const T   = NN.T;
+  const D   = window.DYN;
+  const el  = NN.el;
+  const fmt = NN.fmt;
+
+  if (!D) {
+    console.error("dynamics.js did not load. Run `python3 code/dynamics.py`.");
+    return;
+  }
+
+  /* Colour on this page follows the site's four-class grammar. Where a hue
+     labels a SCHEDULE or a RUN rather than a tensor, it is always paired with
+     a text label, exactly as page 05 does for optimisers. --critical is the
+     status colour and is used only for the run that fails. No fifth hue. */
+  const C_LR    = "var(--optimizer)";     /* schedules live in the optimizer  */
+  const C_LOSS  = "var(--accent)";        /* the loss is not a tensor class   */
+  const C_GRAD  = "var(--gradient)";      /* gradients, norms, clipping       */
+  const C_ACT   = "var(--activation)";    /* activation variance, residuals   */
+  const C_W     = "var(--weight)";        /* parameters                       */
+  const C_BAD   = "var(--critical)";      /* the failure being demonstrated   */
+
+  const BATCH   = D.meta.batch;
+  const NAMES   = T.param_names;
+  const NP      = NAMES.length;
+
+  /* =====================================================================
+     THE MODEL, RE-IMPLEMENTED HERE
+     ---------------------------------------------------------------------
+     The schedule designer in section 3 has to train the network for
+     parameter values that did not exist when code/dynamics.py ran, so the
+     model has to exist in the browser too. Everything it needs comes out of
+     NN.T: the initial weights, the input, the target, Adam's constants. The
+     re-implementation is then CHECKED, twice: once against trace.json's
+     forward pass and gradients, and once against twelve complete runs that
+     dynamics.py performed in Python. Both results are printed in section 3.
+     ===================================================================== */
+
+  const B1 = D.meta.betas[0], B2 = D.meta.betas[1], EPS = D.meta.eps;
+
+  function theta0() {
+    const o = [];
+    T.init.W1.forEach(function (r) { o.push(r[0], r[1]); });
+    T.init.b1.forEach(function (v) { o.push(v); });
+    T.init.W2[0].forEach(function (v) { o.push(v); });
+    o.push(T.init.b2[0]);
+    return o;
+  }
+
+  function unflatten(th) {
+    return {
+      W1: [[th[0], th[1]], [th[2], th[3]], [th[4], th[5]]],
+      b1: [th[6], th[7], th[8]],
+      W2: [th[9], th[10], th[11]],
+      b2: th[12]
+    };
+  }
+
+  /* forward + backward, exactly as code/ground_truth.py writes them out */
+  function stepGrad(th, x, y) {
+    const p = unflatten(th);
+    const z1 = [0, 1, 2].map(function (i) {
+      return p.W1[i][0] * x[0] + p.W1[i][1] * x[1] + p.b1[i];
+    });
+    const a1 = z1.map(function (v) { return v > 0 ? v : 0; });
+    const mask = z1.map(function (v) { return v > 0 ? 1 : 0; });
+    const yhat = p.W2[0] * a1[0] + p.W2[1] * a1[1] + p.W2[2] * a1[2] + p.b2;
+    const err = yhat - y;
+    const loss = err * err;
+
+    const dz2 = 2 * err;
+    const dW2 = a1.map(function (v) { return dz2 * v; });
+    const db2 = dz2;
+    const da1 = p.W2.map(function (w) { return w * dz2; });
+    const dz1 = da1.map(function (v, i) { return v * mask[i]; });
+    const g = [
+      dz1[0] * x[0], dz1[0] * x[1],
+      dz1[1] * x[0], dz1[1] * x[1],
+      dz1[2] * x[0], dz1[2] * x[1],
+      dz1[0], dz1[1], dz1[2],
+      dW2[0], dW2[1], dW2[2], db2
+    ];
+    return { loss: loss, yhat: yhat, grad: g, live: mask[0] + mask[1] + mask[2] };
+  }
+
+  function batchGrad(th, batch) {
+    const g = new Array(NP).fill(0);
+    let L = 0, live = 0;
+    batch.forEach(function (s) {
+      const r = stepGrad(th, s.x, s.y);
+      L += r.loss; live += r.live;
+      for (let i = 0; i < NP; i++) g[i] += r.grad[i];
+    });
+    const n = batch.length;
+    return { loss: L / n, grad: g.map(function (v) { return v / n; }), live: live };
+  }
+
+  /* the four schedules, identical in form to dynamics.py's lr_at() */
+  function lrAt(t, kind, n, warmup, peak, minLr, decayFrac) {
+    if (warmup > 0 && t < warmup) return peak * (t + 1) / warmup;
+    if (kind === "constant") return peak;
+    const span = Math.max(1, n - warmup - 1);
+    const p = (t - warmup) / span;
+    if (kind === "cosine") return minLr + (peak - minLr) * 0.5 * (1 + Math.cos(Math.PI * p));
+    if (kind === "wsd") {
+      const stable = 1 - decayFrac;
+      if (p <= stable) return peak;
+      return peak + (minLr - peak) * (p - stable) / decayFrac;
+    }
+    return peak + (minLr - peak) * p;   /* linear */
+  }
+
+  function runAdam(o) {
+    const n = o.n_steps, th = theta0().slice();
+    const m = new Array(NP).fill(0), v = new Array(NP).fill(0);
+    const loss = [], lr = [], live = [], gn = [];
+    for (let t = 0; t < n; t++) {
+      const r = batchGrad(th, BATCH);
+      if (!isFinite(r.loss) || r.loss > 1e12) break;
+      const rate = lrAt(t, o.kind, n, o.warmup, o.peak, D.schedules.min_lr,
+                        D.schedules.decay_frac);
+      loss.push(r.loss); lr.push(rate); live.push(r.live);
+      gn.push(Math.sqrt(r.grad.reduce(function (a, g) { return a + g * g; }, 0)));
+      for (let i = 0; i < NP; i++) {
+        m[i] = B1 * m[i] + (1 - B1) * r.grad[i];
+        v[i] = B2 * v[i] + (1 - B2) * r.grad[i] * r.grad[i];
+        const mh = m[i] / (1 - Math.pow(B1, t + 1));
+        const vh = v[i] / (1 - Math.pow(B2, t + 1));
+        th[i] -= rate * mh / (Math.sqrt(vh) + EPS);
+      }
+    }
+    const fin = batchGrad(th, BATCH);
+    return { loss: loss, lr: lr, live: live, grad_norm: gn,
+             final_loss: fin.loss, final_live: fin.live, theta: th };
+  }
+
+  /* ---- the two self-checks ------------------------------------------- */
+  const selfCheck = (function () {
+    const th = theta0();
+    const r = stepGrad(th, T.forward.x, T.forward.y);
+    const lossErr = Math.abs(r.loss - T.forward.loss);
+    let gradErr = 0;
+    for (let i = 0; i < NP; i++) {
+      gradErr = Math.max(gradErr, Math.abs(r.grad[i] - T.gradcheck.analytic[i]));
+    }
+    let runErr = 0;
+    D.designer_samples.forEach(function (s) {
+      const mine = runAdam({ kind: s.schedule, warmup: s.warmup, peak: s.peak_lr,
+                             n_steps: s.n_steps });
+      runErr = Math.max(runErr, Math.abs(mine.final_loss - s.final_loss));
+    });
+    return { loss: r.loss, lossErr: lossErr, gradErr: gradErr, runErr: runErr,
+             n: D.designer_samples.length };
+  })();
+
+  /* --------------------------------------------------------------- utils */
+  function pts(arr, x0) { return arr.map(function (v, i) { return [(x0 || 0) + i, v]; }); }
+  function mount(host, node) { host.innerHTML = ""; host.appendChild(node); return host; }
+  function table(head, rows, cls) {
+    const t = el("table", { class: cls || "arith" });
+    t.appendChild(el("thead", {}, el("tr", {}, head.map(function (h) {
+      return el("th", { html: h });
+    }))));
+    t.appendChild(el("tbody", {}, rows.map(function (r) {
+      const attrs = r.hi ? { class: "hi" } : {};
+      return el("tr", attrs, (r.cells || r).map(function (c) {
+        return typeof c === "object" && c !== null && !c.nodeType
+          ? el("td", { class: c.cls || null, html: c.html !== undefined ? c.html : String(c.v) })
+          : el("td", { html: String(c) });
+      }));
+    })));
+    return el("div", { class: "scrollx" }, t);
+  }
+  function labelFor(key) {
+    const c = D.schedules.curves.filter(function (x) { return x.key === key; })[0];
+    return c ? c.name : key;
+  }
+
+  /* =====================================================================
+     1 · THE SHAPE OF A RUN
+     ===================================================================== */
+  (function () {
+    const host = NN.$("#shapeBody");
+    const S = D.schedules;
+
+    host.appendChild(el("p", { html:
+      "Pages 01 to 05 spend themselves on a single iteration: the multiplies, the " +
+      "chain rule, the update. That iteration is now a black box that reliably " +
+      "makes the loss a bit smaller. Run it " + NN.count(S.n_steps) + " times and " +
+      "the questions change completely. How large should the step be, and should " +
+      "that change over time? Where do the weights start? What happens when one " +
+      "batch is garbage? None of these can be asked of a single step." }));
+
+    host.appendChild(el("p", { html:
+      "The model is the same one: <b>" + D.meta.architecture + "</b>, " + NP +
+      " parameters, the same hand-picked initial weights. The only change is the " +
+      "data. " + D.meta.why_a_batch }));
+
+    host.appendChild(NN.tiles([
+      { k: "model", v: NP + " params", s: D.meta.architecture },
+      { k: "batch", v: BATCH.length + " samples", s: "sample 0 is trace.js's house" },
+      { k: "run length", v: S.n_steps + " steps", s: "every schedule below spans this" },
+      { k: "peak LR", v: fmt(S.peak_lr, 3), s: "warmup " + S.warmup_steps + " steps" }
+    ]));
+
+    /* ---- the four schedules ------------------------------------------ */
+    host.appendChild(el("h3", {}, "Four schedules, one warmup"));
+    host.appendChild(el("p", { html:
+      "Every one of these begins with the same linear warmup and differs only in " +
+      "what it does afterwards. The warmup segment is exactly linear — all second " +
+      "differences are zero, checked in the generator — and all four curves are " +
+      "identical until step " + S.warmup_steps + "." }));
+
+    const SCOL = { constant: C_BAD, linear: C_ACT, cosine: C_LR, wsd: C_W };
+    const schedChart = el("div");
+    host.appendChild(schedChart);
+    mount(schedChart, NN.chart.line({
+      series: S.curves.map(function (c) {
+        return { name: c.name, color: SCOL[c.key], points: pts(c.points), dots: false };
+      }),
+      width: 700, height: 250, xlabel: "step", ylabel: "learning rate"
+    }));
+    host.appendChild(el("div", { class: "legend" }, S.curves.map(function (c) {
+      return el("span", { class: "tclass",
+        style: { color: SCOL[c.key], background: "var(--surface-3)" } }, c.name);
+    })));
+    host.appendChild(el("div", { class: "legendnote", html:
+      "Colour here labels a <b>schedule</b>, not a tensor class — the site's four " +
+      "hues are reused with text labels, as page 05 does for optimisers. Nothing on " +
+      "this page introduces a fifth tensor hue." }));
+
+    host.appendChild(table(
+      ["schedule", "mean LR", "final LR", "peak reached at", "what it is for"],
+      S.curves.map(function (c) {
+        return [c.name, fmt(c.mean_lr, 4), fmt(c.final_lr, 4),
+                "step " + c.peak_at_step, { html: '<span class="muted">' + c.desc + "</span>" }];
+      })));
+
+    /* ---- two facts that fall out of the numbers ---------------------- */
+    const meanBy = {};
+    S.curves.forEach(function (c) { meanBy[c.key] = c.mean_lr; });
+    host.appendChild(el("div", { class: "proofline" }, [
+      el("div", { class: "big" }, fmt(meanBy.cosine, 6)),
+      el("div", { class: "det", html:
+        "is the mean learning rate of the cosine schedule — and of the linear one. " +
+        "They are equal to " + fmt(Math.abs(meanBy.cosine - meanBy.linear), 1) +
+        ". A half cosine and a straight line integrate to the same thing, so cosine " +
+        "is not more learning rate; it is the same total, spent earlier. Anything " +
+        "that genuinely raises the average is WSD (" + fmt(meanBy.wsd, 4) + ") or a " +
+        "constant (" + fmt(meanBy.constant, 4) + ")." })
+    ]));
+
+    host.appendChild(el("h3", {}, "Cosine has to know where the finish line is"));
+    host.appendChild(el("p", { html:
+      "A cosine schedule is a function of t/N. Change the total step count and every " +
+      "step's learning rate changes — including the steps you have already run. Below " +
+      "is the same cosine schedule computed for a " + S.n_steps + "-step run and for a " +
+      D.schedules.horizon_dependence.long_steps + "-step run, both truncated to the " +
+      "first " + S.n_steps + " steps. They differ by up to " +
+      fmt(D.schedules.horizon_dependence.cosine_max_gap, 4) + ", which is " +
+      fmt(100 * D.schedules.horizon_dependence.cosine_max_gap / S.peak_lr, 0) +
+      "% of the peak." }));
+
+    const hd = D.schedules.horizon_dependence;
+    const hdChart = el("div");
+    host.appendChild(hdChart);
+    mount(hdChart, NN.chart.line({
+      series: [
+        { name: "cosine planned for " + hd.short_steps + " steps", color: C_LR,
+          points: pts(hd.cosine_short), dots: false },
+        { name: "cosine planned for " + hd.long_steps + " steps", color: C_LR,
+          dash: "5 4", points: pts(hd.cosine_long_truncated), dots: false },
+        { name: "WSD planned for " + hd.long_steps + " steps", color: C_W,
+          dash: "5 4", points: pts(hd.wsd_long_truncated), dots: false }
+      ],
+      width: 700, height: 230, xlabel: "step", ylabel: "learning rate"
+    }));
+
+    host.appendChild(NN.callout("key", "WHY WSD EXISTS",
+      "The stable phase of a warmup-stable-decay schedule is a constant, so it does " +
+      "not depend on the total step count at all: the first " +
+      Math.round(hd.short_steps * 0.6) + " steps of a " + hd.long_steps +
+      "-step WSD run are identical to the first " + Math.round(hd.short_steps * 0.6) +
+      " steps of a " + hd.short_steps + "-step one (measured gap " +
+      fmt(hd.wsd_max_gap, 1) + " inside the stable phase). That is what buys the " +
+      "practical property: one long trunk, checkpointed anywhere, with a short decay " +
+      "branched off it whenever a model is wanted. Under cosine, deciding to train " +
+      "longer means the schedule you already ran was the wrong one."));
+  })();
+
+  /* =====================================================================
+     2 · WHY WARMUP EXISTS
+     ===================================================================== */
+  (function () {
+    const host = NN.$("#warmBody");
+    const W = D.warmup;
+    const A = W.runs.none, B = W.runs.warm;
+    const N = A.loss.length;
+
+    host.appendChild(el("p", { html:
+      "Two runs. Same " + NP + " initial weights, same " + BATCH.length +
+      " houses, same optimizer (" + W.optimizer + ", β₁ " + W.betas[0] + ", β₂ " +
+      W.betas[1] + "), same " + W.schedule + " decay, same " + W.n_steps +
+      " steps, same peak learning rate of " + fmt(W.peak_lr, 3) + ". The only " +
+      "difference is that one of them reaches that peak on step 1 and the other " +
+      "takes " + W.warmup_steps + " steps to get there. Press play." }));
+
+    /* ---- the player -------------------------------------------------- */
+    const play = el("button", { class: "btn primary" }, "▶ Play both runs");
+    const reset = el("button", { class: "btn" }, "Reset");
+    const scrub = el("input", { type: "range", min: 0, max: N - 1, value: N - 1 });
+    const stepno = el("div", { class: "stepno" });
+    host.appendChild(el("div", { class: "playrow" }, [play, reset, scrub, stepno]));
+
+    const cardA = el("div", { class: "runcard bad" });
+    const cardB = el("div", { class: "runcard good" });
+    host.appendChild(el("div", { class: "vs" }, [cardA, cardB]));
+
+    function card(host2, run, label) {
+      host2.innerHTML = "";
+      host2.appendChild(el("div", { class: "rt" }, label));
+      const rows = {};
+      ["learning rate", "loss", "live hidden units"].forEach(function (k) {
+        const v = el("div", { class: "v" });
+        rows[k] = v;
+        host2.appendChild(el("div", { class: "kv" }, [el("div", { class: "k" }, k), v]));
+      });
+      const units = el("div", { class: "units" });
+      for (let i = 0; i < W.max_live_units; i++) units.appendChild(el("i"));
+      host2.appendChild(units);
+      host2.appendChild(el("div", { class: "kv" }, [
+        el("div", { class: "k" }, "of " + W.max_live_units + " unit-activations"),
+        el("div", { class: "v muted" }, BATCH.length + " houses × 3 hidden units")
+      ]));
+      return { rows: rows, units: units };
+    }
+    const uiA = card(cardA, A, A.label);
+    const uiB = card(cardB, B, B.label);
+
+    const lossChart = el("div");
+    const lrChart = el("div");
+    host.appendChild(el("div", { class: "chartcap" }, "loss on the four houses (log scale)"));
+    host.appendChild(lossChart);
+    host.appendChild(el("div", { class: "chartcap" }, "learning rate"));
+    host.appendChild(lrChart);
+
+    const lossMax = Math.max.apply(null, A.loss.concat(B.loss));
+    const lossMin = Math.min.apply(null, A.loss.concat(B.loss));
+
+    function draw(k) {
+      const upto = function (a) { return pts(a.slice(0, k + 1)); };
+      mount(lossChart, NN.chart.line({
+        series: [
+          { name: "no warmup", color: C_BAD, points: upto(A.loss), dots: false },
+          { name: "warmup", color: C_LR, points: upto(B.loss), dots: false }
+        ],
+        width: 700, height: 250, xlabel: "step", ylabel: "loss", logY: true,
+        xMin: 0, xMax: N - 1, yMin: lossMin, yMax: lossMax
+      }));
+      mount(lrChart, NN.chart.line({
+        series: [
+          { name: "no warmup", color: C_BAD, points: upto(A.lr), dots: false },
+          { name: "warmup", color: C_LR, points: upto(B.lr), dots: false }
+        ],
+        width: 700, height: 170, xlabel: "step", ylabel: "learning rate",
+        xMin: 0, xMax: N - 1, yMin: 0, yMax: W.peak_lr
+      }));
+
+      [[uiA, A], [uiB, B]].forEach(function (p) {
+        const ui = p[0], run = p[1];
+        ui.rows["learning rate"].textContent = fmt(run.lr[k], 4);
+        ui.rows["loss"].textContent = fmt(run.loss[k], 5);
+        const live = run.live_units[k];
+        ui.rows["live hidden units"].textContent = live + " / " + W.max_live_units;
+        ui.rows["live hidden units"].classList.toggle("dead", live === 0);
+        NN.$$("i", ui.units).forEach(function (d, i) { d.classList.toggle("on", i < live); });
+      });
+      stepno.textContent = "step " + k + " / " + (N - 1);
+      scrub.value = k;
+    }
+
+    let timer = null;
+    function stop() { clearInterval(timer); timer = null; play.textContent = "▶ Play both runs"; }
+    play.addEventListener("click", function () {
+      if (timer) { stop(); return; }
+      if (+scrub.value >= N - 1) draw(0);
+      play.textContent = "⏸ Pause";
+      timer = setInterval(function () {
+        const k = +scrub.value + 1;
+        if (k >= N) { stop(); return; }
+        draw(k);
+      }, 130);
+    });
+    reset.addEventListener("click", function () { stop(); draw(0); });
+    scrub.addEventListener("input", function () { stop(); draw(+scrub.value); });
+    draw(N - 1);
+
+    /* ---- the verdict ------------------------------------------------- */
+    const V = W.verdict;
+    host.appendChild(NN.tiles([
+      { k: "final loss, no warmup", v: fmt(V.final_none, 5), cls: null,
+        s: A.final_live_units + " / " + W.max_live_units + " units alive" },
+      { k: "final loss, warmup", v: fmt(V.final_warm, 5),
+        s: B.final_live_units + " / " + W.max_live_units + " units alive" },
+      { k: "ratio", v: fmt(V.ratio, 1) + "×", s: "same peak LR, same everything else" },
+      { k: "loss blow-up", v: fmt(V.loss_blowup_none, 1) + "×",
+        s: "peak loss ÷ starting loss, no warmup" }
+    ]));
+
+    /* ---- proof 1: Adam's first step is exactly lr --------------------- */
+    host.appendChild(el("h3", {}, "What the first step actually does"));
+    host.appendChild(el("p", { html:
+      "The reason is not that the gradient is large. It is that Adam divides the " +
+      "gradient by its own magnitude. At t = 1 the bias correction makes " +
+      "m̂ = g and v̂ = g², so the update is:" }));
+
+    host.appendChild(NN.formula({
+      rule: "Δθ = lr · m̂ / (√v̂ + ε) = lr · g / (|g| + ε)",
+      sub: "lr · sign(g), for every parameter with a gradient",
+      result: "± " + fmt(W.first_step.lr, 3),
+      cls: "optimizer"
+    }));
+
+    host.appendChild(el("p", { html: W.first_step.why }));
+
+    host.appendChild(table(
+      ["parameter", "gradient g", "|Δθ| on step 1", "= lr?"],
+      NAMES.map(function (n, i) {
+        const g = W.first_step.grad[i], u = Math.abs(W.first_step.update[i]);
+        const isDead = Math.abs(g) < 1e-14;
+        return { hi: isDead, cells: [
+          n, fmt(g, 5), fmt(u, 6),
+          isDead ? { cls: "ok", html: "no gradient → moves 0" }
+                 : { cls: "bad", html: "yes — " + fmt(W.first_step.lr, 3) }
+        ] };
+      })));
+
+    host.appendChild(NN.callout("why", "THE DEAD UNIT IS THE ONLY SAFE PARAMETER",
+      W.first_step.dead_unit_note + " Its slots are the highlighted rows above: " +
+      W.first_step.not_moved_at_all.join(", ") + "."));
+
+    /* ---- proof 2: the collapsed network is a constant ----------------- */
+    host.appendChild(el("h3", {}, "What “diverged” means here"));
+    host.appendChild(el("p", { html:
+      "The run without warmup does not run off to infinity — it runs out of model. " +
+      "Its loss peaks at " + fmt(V.peak_none, 3) + " on the way, and by step " +
+      A.steps_to_all_dead + " every one of the " + W.max_live_units +
+      " hidden-unit activations is negative and clamped to zero. " + W.collapse.why }));
+
+    const cp = W.collapse;
+    host.appendChild(table(
+      ["house", "target y", "ŷ, no warmup", "ŷ, warmup"],
+      BATCH.map(function (s, i) {
+        return [s.label, fmt(s.y, 3),
+                { cls: "bad", html: fmt(cp.yhat_none[i], 5) },
+                { cls: "ok", html: fmt(cp.yhat_warm[i], 5) }];
+      }).concat([{ cells: [
+        { html: "<b>spread</b>" }, "",
+        { cls: "bad", html: "<b>" + fmt(cp.prediction_spread_none, 6) + "</b>" },
+        { cls: "ok", html: "<b>" + fmt(cp.prediction_spread_warm, 4) + "</b>" }
+      ] }])));
+
+    host.appendChild(el("div", { class: "proofline" }, [
+      el("div", { class: "big" }, fmt(cp.constant_predictor_loss, 6)),
+      el("div", { class: "det", html:
+        "is the variance of y — the loss of the best possible CONSTANT prediction, " +
+        "which is what a network with no live hidden unit is. The collapsed run " +
+        "finished at " + fmt(V.final_none, 6) + ", " + fmt(cp.none_gap_pct, 2) +
+        "% above that floor and still falling towards it. The warmup run finished " +
+        "at " + fmt(V.final_warm, 6) + ", which is " +
+        fmt(cp.constant_predictor_loss / V.final_warm, 0) + "× below the floor — " +
+        "only possible with hidden units that still do something." })
+    ]));
+
+    host.appendChild(NN.callout("key", "AT SCALE",
+      "The same argument runs in a real transformer, with two differences. There is " +
+      "no floor: a 70B model whose first optimizer step is a random jump of size lr " +
+      "in every one of 70 billion coordinates does not settle into a constant " +
+      "predictor, it produces NaNs. And the jump is worse, because the variance of " +
+      "v̂ after one step is largest exactly when the batch is one sample of a very " +
+      "large distribution. Every large-model recipe therefore warms up over hundreds " +
+      "to thousands of steps — <b>that particular number is convention, not " +
+      "something this page derives</b>. What is derived here is the shape of the " +
+      "failure it prevents."));
+  })();
+
+  /* =====================================================================
+     3 · THE DESIGNER
+     ===================================================================== */
+  (function () {
+    const host = NN.$("#desBody");
+    const S = D.schedules;
+
+    host.appendChild(el("p", { html:
+      "Now move the schedule yourself. The curve on the left is computed from the " +
+      "sliders; the run on the right is the same " + NP + "-parameter model, trained " +
+      "in your browser under exactly that curve, " + S.n_steps + " steps of Adam." }));
+
+    const state = { kind: "cosine", warmup: S.warmup_steps, peak: S.peak_lr,
+                    decay: S.decay_frac };
+
+    const pills = el("div", { class: "pillrow" });
+    S.curves.forEach(function (c) {
+      const p = el("pill" === "x" ? "span" : "button",
+        { class: "pill" + (c.key === state.kind ? " on" : "") }, c.name);
+      p.addEventListener("click", function () {
+        state.kind = c.key;
+        NN.$$(".pill", pills).forEach(function (q) { q.classList.remove("on"); });
+        p.classList.add("on");
+        redraw();
+      });
+      pills.appendChild(p);
+    });
+
+    function slider(key, label, min, max, step, fmtv) {
+      const rv = el("span", { class: "rv" }, fmtv(state[key]));
+      const inp = el("input", { type: "range", min: min, max: max, step: step,
+                                value: state[key] });
+      inp.addEventListener("input", function () {
+        state[key] = +inp.value;
+        rv.textContent = fmtv(state[key]);
+        redraw();
+      });
+      return el("div", { class: "fld" }, [
+        el("label", {}, [el("span", {}, label), rv]), inp
+      ]);
+    }
+
+    const ctl = el("div", { class: "ctlgrid" }, [
+      slider("warmup", "warmup steps", 0, 30, 1, function (v) { return v + " steps"; }),
+      slider("peak", "peak learning rate", 0.02, 1.2, 0.01, function (v) { return fmt(v, 3); }),
+      slider("decay", "WSD decay fraction", 0.05, 0.6, 0.05,
+             function (v) { return Math.round(v * 100) + "% of the run"; })
+    ]);
+
+    host.appendChild(pills);
+    host.appendChild(el("div", { class: "panel" }, ctl));
+
+    const outTiles = el("div");
+    const lrC = el("div"), lossC = el("div");
+    host.appendChild(outTiles);
+    host.appendChild(el("div", { class: "chartcap" }, "the schedule you built"));
+    host.appendChild(lrC);
+    host.appendChild(el("div", { class: "chartcap" }, "the run it produces (log scale)"));
+    host.appendChild(lossC);
+
+    /* reference curves that never move, so the comparison stays honest */
+    const refWarm = D.warmup.runs.warm.loss, refNone = D.warmup.runs.none.loss;
+    const refMin = Math.min.apply(null, refWarm.concat(refNone));
+
+    function redraw() {
+      const r = runAdam({ kind: state.kind, warmup: state.warmup, peak: state.peak,
+                          n_steps: S.n_steps });
+      mount(lrC, NN.chart.line({
+        series: [{ name: labelFor(state.kind), color: C_LR, points: pts(r.lr), dots: false }],
+        width: 700, height: 180, xlabel: "step", ylabel: "learning rate",
+        xMin: 0, xMax: S.n_steps - 1, yMin: 0, yMax: 1.2
+      }));
+      const floor = D.warmup.collapse.constant_predictor_loss;
+      mount(lossC, NN.chart.line({
+        series: [
+          { name: "your run", color: C_LOSS, points: pts(r.loss), dots: false },
+          { name: "collapse floor = var(y)", color: C_BAD, dash: "4 4",
+            points: [[0, floor], [S.n_steps - 1, floor]], dots: false }
+        ],
+        width: 700, height: 230, xlabel: "step", ylabel: "loss", logY: true,
+        xMin: 0, xMax: S.n_steps - 1,
+        yMin: Math.min(refMin, Math.min.apply(null, r.loss)),
+        yMax: Math.max.apply(null, r.loss.concat([floor]))
+      }));
+      const meanLr = r.lr.reduce(function (a, b) { return a + b; }, 0) / r.lr.length;
+      mount(outTiles, NN.tiles([
+        { k: "final loss", v: fmt(r.final_loss, 6),
+          s: r.final_loss < floor ? "below the collapse floor" : "at or above the floor" },
+        { k: "live hidden units", v: r.final_live + " / " + D.warmup.max_live_units,
+          s: r.final_live === 0 ? "collapsed to a constant" : "still a network" },
+        { k: "peak loss", v: fmt(Math.max.apply(null, r.loss), 4), s: "worst step of the run" },
+        { k: "mean LR", v: fmt(meanLr, 4), s: "area under the curve ÷ steps" }
+      ]));
+    }
+    redraw();
+
+    /* ---- the cross-language check ------------------------------------ */
+    host.appendChild(el("h3", {}, "Is the browser's model the same model?"));
+    host.appendChild(el("p", { html:
+      "It has to be, or the section above is a cartoon. The re-implementation in " +
+      "this page reads its weights, its input and Adam's constants from " +
+      "<code>NN.T</code>, and is checked against both the traced step and twelve " +
+      "complete runs that <code>code/dynamics.py</code> performed in Python." }));
+
+    host.appendChild(table(
+      ["check", "reference", "in this browser", "max |Δ|"],
+      [
+        ["forward loss on the traced house", fmt(T.forward.loss, 6),
+         fmt(selfCheck.loss, 6), { cls: selfCheck.lossErr === 0 ? "ok" : "bad",
+                                   html: fmt(selfCheck.lossErr, 1) }],
+        ["all " + NP + " gradients", "trace.js gradcheck.analytic", "computed here",
+         { cls: selfCheck.gradErr < 1e-12 ? "ok" : "bad", html: fmt(selfCheck.gradErr, 1) }],
+        [selfCheck.n + " complete runs, final loss", "dynamics.js designer_samples",
+         "re-run here", { cls: selfCheck.runErr < 1e-9 ? "ok" : "bad",
+                          html: fmt(selfCheck.runErr, 1) }]
+      ]));
+  })();
+
+  /* =====================================================================
+     4 · INITIALISATION
+     ===================================================================== */
+  (function () {
+    const host = NN.$("#initBody");
+    const I = D.init, R = D.residual, F = D.tf2_residual;
+
+    host.appendChild(el("p", { html:
+      "Warmup protects the first few steps. Initialisation decides whether there is " +
+      "anything to protect. The whole question is one number: does a signal keep its " +
+      "size as it passes through a layer? For a linear layer with fan-in n and " +
+      "weights of variance Var(W):" }));
+
+    host.appendChild(NN.formula({
+      rule: "Var(z_out) = n · Var(W) · Var(z_in)",
+      sub: "ReLU deletes the negative half of a symmetric distribution, halving it again",
+      result: "Var(W) = 2/n holds it still",
+      cls: "activation"
+    }));
+
+    host.appendChild(el("p", { html: I.argument }));
+
+    /* ---- the 2x2 ------------------------------------------------------ */
+    host.appendChild(el("h3", {}, "The factor of two, measured"));
+    host.appendChild(table(
+      ["initialisation", "activation", "predicted ratio/layer", "measured", "error",
+       "over " + I.depth + " layers"],
+      I.matrix.map(function (m) {
+        return { hi: m.stable, cells: [
+          m.scheme_name, m.activation, fmt(m.predicted_ratio, 3),
+          fmt(m.measured_ratio, 3),
+          fmt(100 * m.rel_error, 1) + "%",
+          { cls: m.stable ? "ok" : "bad", html: fmt(m.over_10_layers, 4) + "×" }
+        ] };
+      })));
+    host.appendChild(el("div", { class: "legendnote", html:
+      "Each row is the mean of " + I.n_stacks + " independent " + I.width +
+      "-wide stacks of " + I.depth + " layers, " + I.n_samples + " samples each, " +
+      "measuring the second moment of the pre-activations. Highlighted rows are the " +
+      "pairings that hold still. Kaiming is right for ReLU and wrong for a linear " +
+      "stack; Xavier is right for a linear stack and wrong for ReLU. It is the same " +
+      "factor of two both times." }));
+
+    /* ---- vanish / explode chart -------------------------------------- */
+    const vc = el("div");
+    host.appendChild(el("div", { class: "chartcap" },
+      "pre-activation variance through " + I.depth + " ReLU layers (log scale)"));
+    host.appendChild(vc);
+    const ICOL = { kaiming: C_ACT, xavier: C_LR, too_small: C_W, too_large: C_BAD };
+    mount(vc, NN.chart.line({
+      series: I.schemes.map(function (s) {
+        return { name: s.name + "  " + s.std_formula, color: ICOL[s.key],
+                 points: pts(s.measured_relu), dots: false };
+      }),
+      width: 700, height: 260, xlabel: "layer", ylabel: "E[z²]", logY: true
+    }));
+    host.appendChild(el("div", { class: "legend" }, I.schemes.map(function (s) {
+      return el("span", { class: "tclass",
+        style: { color: ICOL[s.key], background: "var(--surface-3)" } },
+        s.name + " · " + s.std_formula);
+    })));
+    host.appendChild(table(
+      ["scheme", "std", "ratio per layer", "after " + I.depth + " layers", "why"],
+      I.schemes.map(function (s) {
+        return [s.name, fmt(s.std, 4), fmt(s.predicted_ratio_relu, 3),
+                { cls: Math.abs(Math.log(s.final_over_initial_relu)) < 0.7 ? "ok" : "bad",
+                  html: fmt(s.final_over_initial_relu, 4) + "×" },
+                { html: '<span class="muted">' + s.why + "</span>" }];
+      })));
+
+    /* ---- residual scaling -------------------------------------------- */
+    host.appendChild(el("h3", {}, "The residual stream grows as √L"));
+    host.appendChild(el("p", { html:
+      "A residual block adds its branch to the stream: x ← x + f(x). The branch " +
+      "begins with a LayerNorm, so what it contributes does not scale with how large " +
+      "the stream has already become — it delivers roughly the same variance every " +
+      "time. Independent variances add, so after L blocks the stream's variance is " +
+      "Var₀ + L·σ², and its <i>standard deviation</i> grows as √L." }));
+
+    host.appendChild(NN.formula({
+      rule: "Var(x_L) = Var(x_0) + L·σ²",
+      sub: "scale every branch by 1/√(2L) and the sum telescopes: Var(x_0) + σ²/2",
+      result: "depth-independent",
+      cls: "activation"
+    }));
+    host.appendChild(el("p", { html: R.why_2L }));
+
+    const depth = el("input", { type: "range", min: 1, max: R.curve.length, step: 1,
+                                value: 32 });
+    const depthLbl = el("span", { class: "rv" }, "");
+    host.appendChild(el("div", { class: "panel" }, [
+      el("div", { class: "fld" }, [
+        el("label", {}, [el("span", {}, "depth L (residual blocks)"), depthLbl]), depth
+      ]),
+      el("div", { id: "resTiles" })
+    ]));
+    const resChart = el("div");
+    host.appendChild(resChart);
+
+    function drawRes() {
+      const L = +depth.value;
+      const c = R.curve.slice(0, L);
+      const row = R.curve[L - 1];
+      depthLbl.textContent = L + " blocks · " + (2 * L) + " additions";
+      mount(resChart, NN.chart.line({
+        series: [
+          { name: "no branch scaling", color: C_BAD,
+            points: c.map(function (p) { return [p.L, p.unscaled]; }), dots: false },
+          { name: "branches × 1/√(2L)", color: C_ACT,
+            points: c.map(function (p) { return [p.L, p.scaled]; }), dots: false },
+          { name: "measured (simulated stacks)", color: C_ACT, dash: "3 3",
+            points: R.measured.filter(function (m) { return m.L <= L; })
+                     .map(function (m) { return [m.L, m.unscaled]; }) }
+        ],
+        width: 700, height: 250, xlabel: "block", ylabel: "stream variance",
+        xMin: 1, xMax: Math.max(2, L)
+      }));
+      mount(NN.$("#resTiles"), NN.tiles([
+        { k: "stream variance, unscaled", v: fmt(row.unscaled, 2),
+          s: "Var₀ " + fmt(R.var_in, 2) + " + L·σ², σ² = " + fmt(R.sigma2_per_block, 3) },
+        { k: "stream std growth", v: fmt(row.std_ratio, 2) + "×",
+          s: "√L = " + fmt(Math.sqrt(L), 2) },
+        { k: "with 1/√(2L) scaling", v: fmt(row.scaled, 2), s: "same at every depth" },
+        { k: "branch scale factor", v: fmt(row.scale_factor, 4),
+          s: "1/√(2·" + L + ")" }
+      ]));
+    }
+    depth.addEventListener("input", drawRes);
+    drawRes();
+
+    host.appendChild(table(
+      ["L", "measured, unscaled", "predicted Var₀+L·σ²", "measured, scaled",
+       "predicted Var₀+σ²/2"],
+      R.measured.map(function (m) {
+        return [m.L, fmt(m.unscaled, 3), fmt(m.unscaled_predicted, 3),
+                { cls: "ok", html: fmt(m.scaled, 3) }, fmt(m.scaled_predicted, 3)];
+      })));
+    host.appendChild(el("div", { class: "legendnote", html:
+      "Simulated stacks: width " + R.width + ", " + R.n_samples + " samples, mean of " +
+      R.n_stacks + " independent draws. Each branch is W₂·ReLU(W₁·LayerNorm(x)) with " +
+      "both matrices Kaiming-initialised." }));
+
+    /* ---- what real depths imply -------------------------------------- */
+    const models = T.reference_configs.models;
+    host.appendChild(el("h3", {}, "What that means at real depths"));
+    host.appendChild(table(
+      ["model", "blocks L", "residual additions 2L", "√(2L) std growth",
+       "branch scale 1/√(2L)"],
+      models.map(function (m) {
+        const L = m.n_layers, twoL = 2 * L;
+        return [m.name, L, twoL, fmt(Math.sqrt(twoL), 2) + "×", fmt(1 / Math.sqrt(twoL), 4)];
+      })));
+    host.appendChild(el("div", { class: "legendnote", html:
+      "Layer counts from <code>NN.T.reference_configs</code> — " +
+      T.reference_configs._source + ". The growth and scale columns are computed " +
+      "from them here." }));
+
+    /* ---- tf2 measurement --------------------------------------------- */
+    host.appendChild(el("h3", {}, "Measured, in this site's own transformer"));
+    host.appendChild(el("p", { html:
+      "Pages 09 and 10 animate a real " + F.n_layers + "-block transformer with " +
+      "d_model " + F.d_model + " and " + F.seq + " tokens. Its residual stream is " +
+      "visible at " + F.points.length + " points, so its " + F.n_additions +
+      " additions can be decomposed exactly: E[(x+d)²] = E[x²] + 2E[xd] + E[d²]. " +
+      "The middle term is the assumption the √L argument makes — that the branch is " +
+      "uncorrelated with the stream. Here it is measured instead." }));
+
+    host.appendChild(table(
+      ["addition", "E[x²] before", "2·E[xd] cross", "E[d²] branch", "E[(x+d)²] after",
+       "reconstruction error"],
+      F.additions.map(function (a) {
+        return [a.label, fmt(a.before, 4), fmt(2 * a.cross, 4), fmt(a.branch, 4),
+                fmt(a.after, 4), { cls: "ok", html: fmt(a.residual_error, 1) }];
+      })));
+    host.appendChild(el("div", { class: "legendnote", html: F.reading + " " + F.caveat }));
+
+    host.appendChild(NN.callout("why", "WHY THIS IS A DEPTH PROBLEM",
+      "Each branch here contributes about " +
+      fmt(100 * F.mean_branch_over_stream, 1) + "% of the stream's second moment, so " +
+      "over " + F.n_additions + " additions the stream barely moves — it ends at " +
+      fmt(F.growth, 2) + "× where it started. Multiply that by the " +
+      (2 * models[models.length - 1].n_layers) + " additions of " +
+      models[models.length - 1].name + " and the same per-block increment is what " +
+      "makes the last block's LayerNorm see a stream " +
+      fmt(Math.sqrt(2 * models[models.length - 1].n_layers), 1) +
+      "× wider than the first block's. That is what the 1/√(2L) initialisation, and " +
+      "the LayerNorm in front of every branch, are both there to control."));
+  })();
+
+  /* =====================================================================
+     5 · CLIPPING IS A COLLECTIVE
+     ===================================================================== */
+  (function () {
+    const host = NN.$("#clipBody");
+    const C = D.clipping;
+
+    host.appendChild(el("p", { html:
+      "Global-norm clipping is one line: if the gradient's norm exceeds a threshold, " +
+      "scale the whole gradient down so the norm is exactly that threshold." }));
+
+    host.appendChild(NN.formula({
+      rule: "g ← g · min(1, c / ‖g‖₂)",
+      sub: "‖g‖₂ over EVERY parameter, c = " + fmt(C.max_norm, 2),
+      result: "the direction is preserved, the length is capped",
+      cls: "gradient"
+    }));
+
+    host.appendChild(el("p", { html:
+      "The word doing the work is <b>every</b>. The norm is a property of the whole " +
+      "parameter vector, and under any sharding — ZeRO, FSDP, tensor parallel — no " +
+      "rank holds the whole vector. The gradient below is a real one: " + C.where +
+      ", with norm " + fmt(C.global_norm, 3) + " against a threshold of " +
+      fmt(C.max_norm, 2) + "." }));
+
+    /* ---- the shards --------------------------------------------------- */
+    const stepper = el("div");
+    const grid = NN.gpu.grid({
+      count: C.world,
+      label: function (g) { return "RANK " + g; },
+      render: function (g) {
+        const s = C.shards[g];
+        const rows = [el("div", { class: "gpu-line" },
+          "slots " + s.lo + "–" + (s.hi - 1) +
+          (s.padding_slots ? " (+" + s.padding_slots + " pad)" : ""))];
+        s.names.forEach(function (n, i) {
+          rows.push(el("div", { class: "kv" }, [
+            el("div", { class: "k" }, n),
+            el("div", { class: "v" }, fmt(s.grad[i], 4))
+          ]));
+        });
+        ["Σg²", "‖g_shard‖", "local coef"].forEach(function (k) {
+          rows.push(el("div", { class: "kv", "data-k": k },
+            [el("div", { class: "k" }, k), el("div", { class: "v" }, "—")]));
+        });
+        return rows;
+      }
+    });
+    host.appendChild(grid);
+
+    const ring = NN.gpu.ring({ count: C.world, size: 240 });
+    const commSide = el("div");
+    host.appendChild(el("div", { class: "ringwrap" }, [ring, commSide]));
+    host.appendChild(stepper);
+
+    const STEPS = [
+      { t: "each rank sums the squares of its own shard",
+        d: "No communication. Every rank can do this alone, and every rank gets a " +
+           "different number — this is the only part of clipping that is local." },
+      { t: "all-reduce ONE fp32 scalar",
+        d: "The square of the global norm is the sum of the shard sums of squares. " +
+           "A sum across ranks is exactly what a reduction does, so four bytes per " +
+           "rank buys the whole quantity." },
+      { t: "every rank takes the square root and forms the same coefficient",
+        d: "After the all-reduce all ranks hold the identical global norm, so they " +
+           "compute the identical coefficient. Consensus, not coordination." },
+      { t: "each rank scales its own shard",
+        d: "Local again — but only because step 2 happened. This is the barrier " +
+           "between the backward pass and the optimizer step." }
+    ];
+
+    function showStep(k) {
+      grid.cards.forEach(function (card, g) {
+        const s = C.shards[g];
+        const kvs = NN.$$(".kv[data-k]", card);
+        kvs[0].querySelector(".v").textContent = k >= 0 ? fmt(s.local_norm_sq, 5) : "—";
+        kvs[1].querySelector(".v").textContent = k >= 2 ? fmt(C.global_norm, 5) : "—";
+        kvs[2].querySelector(".v").textContent = k >= 2 ? fmt(C.global_coef, 5) : "—";
+        kvs[1].querySelector(".k").textContent = k >= 2 ? "‖g‖ GLOBAL" : "‖g_shard‖";
+      });
+      ring.step(k === 1 ? 1 : null, C_GRAD);
+      ring.setLabels(k >= 2
+        ? C.shards.map(function () { return fmt(C.global_norm, 2); })
+        : C.shards.map(function (s) { return fmt(s.local_norm_sq, 2); }));
+      mount(commSide, el("div", {}, [
+        el("div", { class: "chartcap" }, "step " + (k + 1) + " of " + STEPS.length),
+        el("div", { style: { fontWeight: 700, marginBottom: "6px" } }, STEPS[k].t),
+        el("div", { class: "small muted" }, STEPS[k].d),
+        k === 1 ? el("div", { class: "proofline", style: { marginTop: "12px" } }, [
+          el("div", { class: "big" }, fmt(C.identity.abs_error, 1)),
+          el("div", { class: "det", html:
+            "is the error between √(Σ shard norms²) = " +
+            fmt(C.identity.global_norm_from_sum, 6) + " and the true global norm " +
+            fmt(C.identity.global_norm_direct, 6) + "." })
+        ]) : null
+      ]));
+    }
+    new NN.Stepper({ mount: stepper, count: STEPS.length,
+                     labels: STEPS.map(function (s) { return s.t; }),
+                     onStep: showStep, autoplayMs: 2200 });
+
+    /* ---- what happens if you skip the all-reduce ---------------------- */
+    host.appendChild(el("h3", {}, "What each rank would decide on its own"));
+    host.appendChild(el("p", { html:
+      "Suppose a rank clipped on the norm it can see. Every rank computes a " +
+      "different coefficient, so every shard is scaled by a different factor, and " +
+      "the result is not a clipped gradient at all." }));
+
+    host.appendChild(table(
+      ["rank", "parameters", "local ‖g‖", "local coefficient", "correct coefficient",
+       "relative error"],
+      C.shards.map(function (s, i) {
+        const w = C.local_clipping.per_rank[i];
+        return [s.rank, s.names.join(", "), fmt(s.local_norm, 4),
+                { cls: "bad", html: fmt(w.local_coef, 5) },
+                { cls: "ok", html: fmt(w.global_coef, 5) },
+                fmt(100 * w.coef_rel_error, 1) + "%"];
+      })));
+
+    host.appendChild(el("div", { class: "proofline" }, [
+      el("div", { class: "big" }, fmt(C.local_clipping.angle_degrees, 2) + "°"),
+      el("div", { class: "det", html:
+        "is the angle between the locally-clipped gradient and the correctly clipped " +
+        "one (cosine similarity " + fmt(C.local_clipping.cosine_similarity, 6) +
+        "). Clipping too hard would still descend. This does not — it is a different " +
+        "direction, and no amount of tuning the threshold fixes it." })
+    ]));
+
+    /* ---- the cost ----------------------------------------------------- */
+    host.appendChild(el("h3", {}, "What the all-reduce costs"));
+    const cm = C.comm;
+    host.appendChild(NN.tiles([
+      { k: "payload", v: cm.payload_elements + " scalar", s: "one fp32 sum of squares" },
+      { k: "sent per GPU", v: NN.bytes(cm.bytes_sent_per_gpu),
+        s: "ring factor " + cm.ring_formula + " = " + fmt(cm.ring_factor, 2) +
+           " at world " + C.world },
+      { k: "transfer time", v: fmt(cm.transfer_us, 1) + " µs",
+        s: cm.link + " at " + Math.round(100 * cm.achieved_fraction) + "% of nominal" },
+      { k: "latency", v: cm.latency_us + " µs",
+        s: fmt(cm.latency_over_transfer, 1) + "× the transfer time" }
+    ]));
+    host.appendChild(el("p", { html: cm.why }));
+    host.appendChild(el("div", { class: "legendnote", html:
+      "<b>" + cm._status + "</b> The link and latency figures come from " +
+      "<code>parallel.js</code>, which page 16 uses for every collective on this " +
+      "site. For comparison, all-reducing the whole gradient instead of its norm " +
+      "would move " + NN.bytes(cm.bytes_if_full_gradient) + " per GPU for this " +
+      NP + "-parameter model — still nothing, and still one latency." }));
+
+    host.appendChild(NN.callout("warn", "IT IS A BARRIER, NOT A TRANSFER",
+      "Four bytes is not a bandwidth problem and never becomes one, however large " +
+      "the model gets: the payload is one scalar whether the model has 13 parameters " +
+      "or 405 billion. What does not go away is the ordering. Backward must be " +
+      "finished — on every rank — before the norm is known, and the norm must be " +
+      "known before any rank may scale its own shard, so the optimizer step cannot " +
+      "start anywhere until it has completed everywhere. That is why frameworks fuse " +
+      "this reduction with every other global scalar the step needs: the loss-scale " +
+      "check, the NaN check, the token count. One barrier, several numbers."));
+  })();
+
+  /* =====================================================================
+     6 · LOSS SPIKES
+     ===================================================================== */
+  (function () {
+    const host = NN.$("#spikeBody");
+    const S = D.spike;
+    const N = S.no_clip.clean_loss.length;
+
+    const bad = S.bad_batch.filter(function (s) { return s.note && /MISLABEL/.test(s.note); })[0];
+    host.appendChild(el("p", { html:
+      "A spike is not a mystery. This run is " + S.warm_start_steps + " steps of " +
+      "ordinary training in — loss around " + fmt(S.baseline_loss, 4) + " — when a " +
+      "batch arrives with one record mistyped: " + bad.label + " sold for " +
+      fmt(BATCH[2].y, 2) + ", recorded as " + fmt(bad.y, 2) + ". One number, one " +
+      "batch, and it is a plausible data error rather than an act of God." }));
+
+    const useClip = el("input", { type: "checkbox" });
+    const scrub = el("input", { type: "range", min: 0, max: N - 1, value: S.bad_step });
+    const stepno = el("div", { class: "stepno" });
+    host.appendChild(el("div", { class: "playrow" }, [
+      el("label", { class: "switch" }, [useClip,
+        el("span", {}, "clip at ‖g‖ = " + fmt(S.max_norm, 2))]),
+      scrub, stepno
+    ]));
+
+    const tiles = el("div");
+    const c1 = el("div"), c2 = el("div"), c3 = el("div");
+    host.appendChild(tiles);
+    host.appendChild(el("div", { class: "chartcap" }, "loss on clean data"));
+    host.appendChild(c1);
+    host.appendChild(el("div", { class: "chartcap" }, "gradient norm ‖g‖ (log scale)"));
+    host.appendChild(c2);
+    host.appendChild(el("div", { class: "chartcap" },
+      "clip ratio min(1, c/‖g‖) — 1 means the clip did nothing"));
+    host.appendChild(c3);
+
+    const lossMax = Math.max.apply(null, S.no_clip.clean_loss);
+    const lossMin = Math.min.apply(null, S.no_clip.clean_loss.concat(S.clipped.clean_loss));
+    const gMax = Math.max.apply(null, S.no_clip.grad_norm);
+    const gMin = Math.min.apply(null, S.no_clip.grad_norm.concat(S.clipped.grad_norm));
+
+    function marker(y0, y1) {
+      return { name: "bad batch", color: C_BAD, dash: "3 3", dots: false,
+               points: [[S.bad_step, y0], [S.bad_step, y1]] };
+    }
+
+    function draw() {
+      const r = useClip.checked ? S.clipped : S.no_clip;
+      const k = +scrub.value;
+      stepno.textContent = "step " + k + " / " + (N - 1);
+
+      mount(c1, NN.chart.line({
+        series: [
+          { name: "loss (clean batch)", color: C_LOSS, points: pts(r.clean_loss), dots: false },
+          marker(lossMin, lossMax)
+        ],
+        width: 700, height: 210, xlabel: "step", ylabel: "loss",
+        xMin: 0, xMax: N - 1, yMin: 0, yMax: lossMax
+      }));
+      mount(c2, NN.chart.line({
+        series: [
+          { name: "‖g‖", color: C_GRAD, points: pts(r.grad_norm), dots: false },
+          { name: "clip threshold", color: C_BAD, dash: "5 4", dots: false,
+            points: [[0, S.max_norm], [N - 1, S.max_norm]] },
+          marker(gMin, gMax)
+        ],
+        width: 700, height: 210, xlabel: "step", ylabel: "‖g‖", logY: true,
+        xMin: 0, xMax: N - 1
+      }));
+      mount(c3, NN.chart.line({
+        series: [
+          { name: "clip ratio", color: C_GRAD, points: pts(r.clip_ratio), dots: false },
+          marker(0, 1)
+        ],
+        width: 700, height: 170, xlabel: "step", ylabel: "ratio",
+        xMin: 0, xMax: N - 1, yMin: 0, yMax: 1.05
+      }));
+
+      mount(tiles, NN.tiles([
+        { k: "step " + k + " ‖g‖", v: fmt(r.grad_norm[k], 3),
+          s: r.clip_ratio[k] < 1 ? "clipped to " + fmt(100 * r.clip_ratio[k], 1) + "%"
+                                 : "under the threshold" },
+        { k: "step " + k + " loss", v: fmt(r.clean_loss[k], 5),
+          s: "baseline " + fmt(S.baseline_loss, 4) },
+        { k: "peak loss this run", v: fmt(Math.max.apply(null, r.clean_loss), 4),
+          s: useClip.checked ? "with clipping" : "no clipping" },
+        { k: "final loss", v: fmt(r.final_loss, 5),
+          s: "after " + N + " steps" }
+      ]));
+    }
+    useClip.addEventListener("change", draw);
+    scrub.addEventListener("input", draw);
+    draw();
+
+    /* ---- the ordering ------------------------------------------------- */
+    const O = S.ordering;
+    host.appendChild(el("div", { class: "proofline" }, [
+      el("div", { class: "big" }, O.lead_steps + (O.lead_steps === 1 ? " step" : " steps")),
+      el("div", { class: "det", html:
+        "of warning. The gradient norm peaks at step " + O.grad_norm_peaks_at +
+        " — " + fmt(O.peak_over_median, 1) + "× its own median — and the loss does " +
+        "not peak until step " + O.loss_peaks_at + ". " + O.why })
+    ]));
+
+    /* ---- what clipping is actually protecting ------------------------- */
+    host.appendChild(el("h3", {}, "The damage that lasts is in v"));
+    const R = S.recovery;
+    host.appendChild(el("p", { html: R.why }));
+
+    host.appendChild(table(
+      ["parameter", "v before the bad batch", "v after", "inflation",
+       "its own steps shrink to", "v after, with clipping"],
+      R.contamination.slice(0, 6).map(function (c, i) {
+        return { hi: i === 0, cells: [
+          c.name, fmt(c.v_before, 5), { cls: "bad", html: fmt(c.v_after, 5) },
+          fmt(c.inflation, 2) + "×",
+          fmt(100 * c.step_suppression, 1) + "%",
+          { cls: "ok", html: fmt(c.v_after_clipped, 5) }
+        ] };
+      })));
+
+    host.appendChild(NN.tiles([
+      { k: "β₂", v: String(R.beta2), s: "the second moment's decay per step" },
+      { k: "v forgets in", v: NN.count(Math.round(R.forget_steps)) + " steps",
+        s: "ln(0.1)/ln(β₂): time for the excess to fall to a tenth" },
+      { k: "excess loss, no clip", v: fmt(R.excess_loss_no_clip, 3),
+        s: "summed above baseline after the spike" },
+      { k: "excess loss, clipped", v: fmt(R.excess_loss_clipped, 3),
+        s: "back under 2× baseline in " + R.steps_back_to_2x_clipped +
+           " step vs " + R.steps_back_to_2x_no_clip }
+    ]));
+
+    /* ---- practice ----------------------------------------------------- */
+    const P = S.practice;
+    host.appendChild(el("h3", {}, "What people actually do"));
+    host.appendChild(table(
+      ["response", "what it is", "what it costs"],
+      P.items.map(function (it) {
+        return [it.name, { html: '<span class="muted">' + it.what + "</span>" }, it.cost];
+      })));
+    host.appendChild(NN.callout("warn", "PRACTICE, NOT DERIVED", P._status +
+      " Everything above this heading on this page is computed by " +
+      "<code>code/dynamics.py</code> and checked; the table immediately above is " +
+      "not. It is what the field does, written down so the boundary between the two " +
+      "is visible."));
+  })();
+
+  /* =====================================================================
+     7 · WEIGHT DECAY IS NOT L2
+     ===================================================================== */
+  (function () {
+    const host = NN.$("#decayBody");
+    const W = D.decay;
+
+    host.appendChild(el("p", { html:
+      "L2 regularisation adds λθ to the gradient. With plain SGD that is exactly the " +
+      "same thing as shrinking the weight by lr·λ·θ, which is why the two names are " +
+      "used interchangeably. With Adam they are not the same thing at all, because " +
+      "everything that goes into the gradient gets divided by √v̂." }));
+
+    host.appendChild(el("div", { class: "vs" }, [
+      el("div", {}, NN.formula({
+        rule: "Adam + L2:&nbsp; Δθ = lr · (ĝ + λθ) / (√v̂ + ε)",
+        sub: "the decay term is divided by √v̂ too",
+        result: "shrink depends on the gradient history",
+        cls: "gradient"
+      })),
+      el("div", {}, NN.formula({
+        rule: "AdamW:&nbsp; Δθ = lr · ĝ / (√v̂ + ε) &nbsp;+&nbsp; lr·λ·θ",
+        sub: "the decay is applied to the weight, outside the adaptive scaling",
+        result: "the same proportional shrink for every parameter",
+        cls: "optimizer"
+      }))
+    ]));
+
+    host.appendChild(el("p", { html:
+      "Both rules are run below on the same " + NP + " parameters, from the same " +
+      "start, with λ = " + fmt(W.weight_decay, 3) + " and lr = " + fmt(W.lr, 3) +
+      ", for " + W.n_steps + " steps. A third run with no decay at all is the " +
+      "reference, so the decay's own contribution can be isolated: it is the " +
+      "difference between each run and that one." }));
+
+    /* ---- per-parameter trajectory ------------------------------------- */
+    const sel = el("select", { class: "psel" }, NAMES.map(function (n, i) {
+      return el("option", { value: i }, n);
+    }));
+    sel.value = String(NAMES.indexOf(W.dead_unit.params[0]));
+    host.appendChild(el("div", { class: "playrow" }, [
+      el("span", { class: "small muted" }, "parameter"), sel,
+      el("span", { class: "small muted", id: "decNote" }, "")
+    ]));
+
+    const trajC = el("div");
+    host.appendChild(trajC);
+
+    function drawTraj() {
+      const i = +sel.value;
+      const grab = function (key) {
+        return W.runs[key].theta.map(function (th, t) { return [t, th[i]]; });
+      };
+      mount(trajC, NN.chart.line({
+        series: [
+          { name: "Adam, no decay", color: C_LOSS, points: grab("none") },
+          { name: "Adam + L2", color: C_GRAD, points: grab("l2") },
+          { name: "AdamW", color: C_LR, points: grab("adamw") }
+        ],
+        width: 700, height: 250, xlabel: "step", ylabel: NAMES[i]
+      }));
+      const p = W.per_param[i];
+      NN.$("#decNote").innerHTML = p.dead
+        ? "gradient is exactly 0 — this is the dead ReLU unit"
+        : "gradient at step 1: " + fmt(p.grad, 5);
+    }
+    sel.addEventListener("change", drawTraj);
+    drawTraj();
+
+    host.appendChild(el("div", { class: "legend" }, [
+      el("span", { class: "tclass", style: { color: C_LOSS, background: "var(--surface-3)" } },
+        "Adam, no decay"),
+      el("span", { class: "tclass", style: { color: C_GRAD, background: "var(--surface-3)" } },
+        "Adam + L2 — enters through the gradient"),
+      el("span", { class: "tclass", style: { color: C_LR, background: "var(--surface-3)" } },
+        "AdamW — enters in the optimizer")
+    ]));
+
+    /* ---- the per-parameter table --------------------------------------- */
+    host.appendChild(el("h3", {}, "The decay each parameter actually receives"));
+    host.appendChild(table(
+      ["parameter", "θ₀", "gradient", "L2's decay displacement",
+       "AdamW's decay displacement", "ratio"],
+      W.per_param.map(function (p) {
+        return { hi: p.dead, cells: [
+          p.name, fmt(p.theta, 4), fmt(p.grad, 5),
+          { cls: "bad", html: fmt(Math.abs(p.l2_decay_displacement), 5) },
+          { cls: "ok", html: fmt(Math.abs(p.adamw_decay_displacement), 6) },
+          p.ratio === null ? "—" : fmt(p.ratio, 1) + "×"
+        ] };
+      })));
+    host.appendChild(el("div", { class: "legendnote", html:
+      "AdamW's column is lr·λ·θ by construction — a fixed fraction of the weight. " +
+      "L2's column is whatever 1/(√v̂ + ε) makes of the same term, and it varies by " +
+      fmt(W.spread_across_live_params, 1) + "× across the parameters that have " +
+      "gradients. After " + W.n_steps + " steps the two trajectories are up to " +
+      fmt(W.trajectory_gap, 4) + " apart." }));
+
+    const DU = W.dead_unit;
+    host.appendChild(el("div", { class: "proofline" }, [
+      el("div", { class: "big" }, fmt(DU.ratio, 0) + "×"),
+      el("div", { class: "det", html:
+        "L2 moves the dead unit's weights by " + fmt(Math.abs(DU.l2_displacement), 4) +
+        " per step — which is exactly the learning rate — while AdamW moves them by " +
+        fmt(Math.abs(DU.adamw_displacement), 6) + ". " + DU.why })
+    ]));
+
+    host.appendChild(NN.callout("key", "WHY THIS MATTERS AT SCALE", W.claim +
+      " In a transformer the parameters with the smallest gradients are the ones L2 " +
+      "would hit hardest: rarely-used embedding rows, the tail of the vocabulary, an " +
+      "expert that the router has stopped选ing. Under Adam+L2 those are decayed at " +
+      "close to a full learning rate per step regardless of λ, which is a very " +
+      "efficient way to delete the parts of a model that see the least data. Every " +
+      "large-model recipe uses decoupled decay, and the LayerNorm gains and biases " +
+      "are usually excluded from it entirely."));
+  })();
+
+  NN.page("dynamics");
+})();
+</script>
+</body>
+</html>
