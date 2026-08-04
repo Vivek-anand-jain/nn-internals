@@ -368,7 +368,10 @@
                                      : viz.cls(h.cls || "activation").c;
       const path = sv("path", {
         d: d, fill: "none", stroke: col, "stroke-width": sw, opacity: 0.22,
-        "stroke-dasharray": h.kind === "local" ? "4 4" : null
+        /* Phase is not class. A hop that accumulates and a hop that copies may
+           carry the SAME kind of tensor, so they must differ by stroke, not by
+           hue — otherwise the reader reads a phase change as a type change. */
+        "stroke-dasharray": h.dash || (h.kind === "local" ? "4 4" : null)
       });
       if (h.weight !== undefined) {
         path.appendChild(sv("title", {}));
@@ -590,27 +593,62 @@
   /*                                                                        */
   /*  Column- and row-parallel splits, and ZeRO's shape-blind flat shards    */
   /*  whose boundaries deliberately ignore matrix edges.                    */
+  /*                                                                        */
+  /*  OWNERSHIP IS NOT A TENSOR CLASS. The first version of this tinted the  */
+  /*  four shards with the four class hues, so a weight matrix split across  */
+  /*  four GPUs rendered its last two shards in activation-green and         */
+  /*  gradient-orange. A reader who had learned the palette read those rows  */
+  /*  as a different KIND of tensor. The matrix has one class; ownership is  */
+  /*  a second, independent fact, and it rides a different channel: a hard   */
+  /*  divider at every boundary, alternating tint depth within the class     */
+  /*  hue, and a label per shard.                                           */
   /* ====================================================================== */
   viz.cut = function (o) {
     const m = o.matrix, nr = m.length, nc = m[0].length;
     const parts = o.parts || 2;
+    const base = viz.cls(o.cls || "weight").c;
     const wrap = NN.el("div", { class: "vcut" });
     if (o.title) wrap.appendChild(NN.el("div", { class: "vcut-t" }, o.title));
     const grid = NN.el("div", {
       class: "vcut-g",
       style: { gridTemplateColumns: "repeat(" + nc + ", auto)" }
     });
+    /* A distinct step per owner within the one class hue — a parity flip only
+       separates neighbours, and with four shards it makes GPU 0 and GPU 2
+       identical. Spread across the usable range and cycle if parts exceed it,
+       which is why the divider rule and the shard label both stay mandatory. */
+    const OWN_STEPS = [0.22, 0.38, 0.54, 0.70, 0.30, 0.46, 0.62, 0.78];
+    const ownOpacity = function (p) { return OWN_STEPS[p % OWN_STEPS.length]; };
+
+    const ownerOf = function (i, j) {
+      return o.mode === "column" ? Math.floor(j / (nc / parts))
+           : o.mode === "row" ? Math.floor(i / (nr / parts))
+           : Math.floor((i * nc + j) / ((nr * nc) / parts));
+    };
     const owners = [];
     for (let i = 0; i < nr; i++) {
       owners.push([]);
       for (let j = 0; j < nc; j++) {
-        const own = o.mode === "column" ? Math.floor(j / (nc / parts))
-                  : o.mode === "row" ? Math.floor(i / (nr / parts))
-                  : Math.floor((i * nc + j) / ((nr * nc) / parts));
+        const own = ownerOf(i, j);
+        /* A hard rule at the boundary is what actually communicates the cut;
+           the tint only helps the eye group. Mark the first row/column of
+           each shard so CSS can draw the divider on the correct edge. */
+        const startsRow = (i === 0) || ownerOf(i - 1, j) !== own;
+        const startsCol = (j === 0) || ownerOf(i, j - 1) !== own;
         const c = NN.el("div", {
-          class: "vcut-c", "data-own": String(own),
+          class: "vcut-c" +
+            (o.mode === "row" && startsRow && i > 0 ? " edge-t" : "") +
+            (o.mode === "column" && startsCol && j > 0 ? " edge-l" : "") +
+            (o.mode !== "row" && o.mode !== "column" && (startsRow || startsCol)
+              && (i > 0 || j > 0) ? " edge-l" : ""),
+          "data-own": String(own),
           title: (o.ownerLabel ? o.ownerLabel(own) : "GPU " + own)
         }, NN.fmt(m[i][j], o.digits === undefined ? 3 : o.digits));
+        /* The tint rides a ::before layer, not the cell's own opacity —
+           fading the element fades the digits with it, and an unreadable
+           number is a worse failure than an unclear owner. */
+        c.style.setProperty("--own-bg", base);
+        c.style.setProperty("--own-op", ownOpacity(own));
         grid.appendChild(c);
         owners[i].push(c);
       }
@@ -618,8 +656,11 @@
     wrap.appendChild(grid);
     const key = NN.el("div", { class: "vcut-key" });
     for (let p = 0; p < parts; p++) {
-      key.appendChild(NN.el("span", { class: "vcut-kk", "data-own": String(p) },
-        o.ownerLabel ? o.ownerLabel(p) : ("GPU " + p)));
+      const sw = NN.el("span", { class: "vcut-kk" },
+        o.ownerLabel ? o.ownerLabel(p) : ("GPU " + p));
+      sw.style.setProperty("--own-hue", base);
+      sw.style.setProperty("--own-op", ownOpacity(p));
+      key.appendChild(sw);
     }
     wrap.appendChild(key);
     wrap.show = function (on) {

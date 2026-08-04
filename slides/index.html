@@ -17442,6 +17442,137 @@ S({
   }
 });
 
+/* ------------------------------------------ TP: the cut, actually happening
+   The deck used to open tensor parallelism with the matrix ALREADY split
+   across four GPU cards. The reader never saw the undivided thing, so the
+   cut was a premise rather than an event. This slide is the event. */
+S({
+  chapter: "Tensor parallel · the cut",
+  plain: "One matrix, and the line that divides it",
+  notes: "Do not rush this. Every previous strategy left the weight matrices " +
+    "whole — DDP replicated them, ZeRO stored slices of them but gathered " +
+    "them back before use. This is the first time a matrix is cut and then " +
+    "USED cut. Start with W" + TP.blocks[0].col_layer + " entire, all " +
+    (PMOD.Ws[TP.blocks[0].col_layer].length *
+     PMOD.Ws[TP.blocks[0].col_layer][0].length) + " numbers of it, sitting on " +
+    "one GPU the way it has for the whole deck so far. Then drop the line. " +
+    "Megatron calls this the COLUMN-parallel cut because it splits the output " +
+    "units; in the stored (out x in) layout those units are rows, which is " +
+    "the single most common source of confusion when people first read the " +
+    "code. Say it out loud: output units, whichever axis they happen to live " +
+    "on. Each GPU ends up owning " + TP.blocks[0].units_per_gpu + " whole " +
+    "output units and the corresponding " + TP.blocks[0].units_per_gpu +
+    " biases. Step through the four and watch that no GPU holds a partial " +
+    "unit — the boundary never lands inside a row.",
+  build: function (ctx) {
+    const L = TP.blocks[0].col_layer;
+    const W = PMOD.Ws[L];
+    const per = TP.blocks[0].units_per_gpu;
+    ctx.cut = NN.viz.cut({
+      matrix: W, mode: "row", parts: WORLD, digits: 2,
+      ownerLabel: function (g) { return "GPU " + g; },
+      title: "W" + L + " · " + W.length + " × " + W[0].length +
+             " · one matrix, one GPU, every number visible"
+    });
+    ctx.cap = h("say", "");
+    ctx.nunits = W.length;
+    ctx.per = per;
+    return [
+      kicker("Distributed · tensor parallel · <b>watch the line drop</b>"),
+      title("Before anyone cuts it, it is one matrix on one card", true),
+      ctx.cut,
+      ctx.cap,
+      /* One fragment for the line dropping, then one per owner, so the
+         stepper walks all four shards instead of stopping on the first. */
+      frag(h("small muted", "one line · " + WORLD + " owners · no overlap"), "f-fade"),
+      d("rowflex", Array.from({ length: WORLD }, function (_, g) {
+        return frag(h("pill", "GPU " + g + " · units " +
+          (g * per) + "–" + (g * per + per - 1)), "f-pop");
+      })),
+      frag(NN.callout("key", "Output units, not “columns”",
+        "Megatron calls this the column-parallel cut because it splits the " +
+        "matrix's <b>output units</b>. In the stored " + W.length + " × " +
+        W[0].length + " layout those units are <b>rows</b>. The name follows " +
+        "the maths, the code follows the memory, and the two disagree — which " +
+        "is why so much tensor-parallel code is written transposed."), "f-fade"),
+      frag(NN.callout("why", "The boundary never lands inside a unit",
+        "Each GPU gets " + per + " whole output units and the " + per +
+        " biases that go with them. A unit is the smallest thing that can be " +
+        "computed independently, so cutting one in half would force a " +
+        "collective in the middle of a single dot product. Watch the line as " +
+        "you step: it only ever falls between rows."), "f-fade")
+    ];
+  },
+  render: function (n, ctx) {
+    const isolating = n >= 2 && n <= WORLD + 1;
+    ctx.cut.step(n <= WORLD + 1 ? n : 1);
+    const per = ctx.per;
+    ctx.cap.innerHTML =
+      n === 0 ? "One tensor. Nobody has split anything yet."
+      : n === 1 ? "The line drops. Nothing has moved and nothing has been sent — " +
+                  "this is a decision about <b>who stores what</b>."
+      : isolating
+        ? ("GPU " + (n - 2) + " holds output units <b>" + ((n - 2) * per) +
+           "–" + ((n - 2) * per + per - 1) + "</b> and nothing else. " +
+           "It cannot compute the other " + (ctx.nunits - per) + ".")
+        : "Four cards, " + per + " output units each, no overlap and no gaps.";
+  }
+});
+
+/* --------------------------------------------- TP: the input has to arrive */
+S({
+  chapter: "Tensor parallel · the broadcast",
+  plain: "Every GPU needs the whole input",
+  notes: "The cut was free — it was a decision about storage. This is the " +
+    "first thing that actually costs. Because GPU g owns whole output units, " +
+    "and because an output unit is a dot product against the ENTIRE input " +
+    "row, every GPU needs every element of x. Not a slice of it: all of it. " +
+    "In practice this broadcast is usually free, because x is already " +
+    "replicated — the batch was replicated by the surrounding data " +
+    "parallelism, or the previous layer's all-reduce left the same tensor on " +
+    "every card. That is worth being explicit about, because it is the reason " +
+    "the pairing on the next slides works: tensor parallelism arranges for " +
+    "the input to already be where it is needed, and pays only at the far end.",
+  build: function (ctx) {
+    ctx.flow = NN.viz.flow({
+      width: 700, height: 220,
+      nodes: [{ label: "x", sub: PM.batch + " × " + DIMS[0] }]
+        .concat(Array.from({ length: WORLD }, function (_, g) {
+          return { label: "GPU " + g, sub: TP.blocks[0].units_per_gpu + " units" };
+        })),
+      hops: Array.from({ length: WORLD }, function (_, g) {
+        return { from: 0, to: g + 1, lane: g % 2,
+                 label: "x (all " + (PM.batch * DIMS[0]) + " elems)",
+                 cls: "activation" };
+      })
+    });
+    return [
+      kicker("Distributed · tensor parallel · <b>the input is not cut</b>"),
+      title("A whole output unit needs a whole input row", true),
+      ctx.flow,
+      frag(d("cols", [
+        NN.formula({ rule: "GPU g computes", sub: "x · W[its own units]ᵀ + b[…]",
+          result: "needs every column of x", cls: "activation" }),
+        NN.formula({ rule: "so x is", sub: "broadcast, not scattered",
+          result: "identical on all " + WORLD + " cards", cls: "activation" })
+      ]), "f-fade"),
+      frag(NN.callout("key", "Usually already paid for",
+        "This broadcast rarely appears in a profile, because x is normally " +
+        "<i>already</i> replicated — the surrounding data parallelism " +
+        "replicated the batch, or the previous block's all-reduce left the " +
+        "same tensor on every card. Tensor parallelism is arranged so the " +
+        "input is where it needs to be, and the bill arrives at the far end " +
+        "instead."), "f-fade")
+    ];
+  },
+  render: function (n, ctx) {
+    if (n === 0) ctx.flow.step(null);
+    else if (n <= WORLD) ctx.flow.step(n - 1);
+    else ctx.flow.showAll(true);
+  }
+});
+
+
 S({
   chapter: "Tensor parallel · column", plain: "Column-parallel: split the output units",
   notes: "The first of two ways to cut a matrix. Split by output unit: GPU g " +
@@ -17623,6 +17754,111 @@ S({
     ];
   }
 });
+
+/* ------------------------------------------- TP: the all-reduce, as motion
+   The proof slide that follows shows four partials, a sigma, and the answer.
+   That is the arithmetic. This is the transport: the bytes leaving the cards
+   they were computed on. Without it the collective is a symbol on a slide. */
+S({
+  chapter: "Tensor parallel · the all-reduce",
+  plain: "The all-reduce, firing — chunks leaving the cards that made them",
+  notes: "The previous slide left four tensors that are the right shape and " +
+    "entirely wrong. Nothing on any single card can fix that, because the " +
+    "missing information is on the other three. So the bytes move. Walk the " +
+    "ring one hop at a time. In the first " + (WORLD - 1) + " hops — the " +
+    "reduce-scatter half — each card forwards a chunk and adds what it " +
+    "receives, so after " + (WORLD - 1) + " hops every card holds exactly one " +
+    "chunk that is FINISHED and " + (WORLD - 1) + " that are not. Freeze " +
+    "there; it is the single most useful frame in the section. Then the " +
+    "all-gather half runs the same ring again, carrying finished chunks " +
+    "instead of accumulating ones, and every card ends with the whole " +
+    "answer. That is why all_reduce is exactly reduce_scatter followed by " +
+    "all_gather, and why it costs 2(N−1)/N × S rather than N × S. The " +
+    "payload here is " + TP.blocks[0].allreduce_elements + " elements, and " +
+    "it sits on the critical path of every block, in forward and in backward.",
+  build: function (ctx) {
+    /* Follow ONE chunk all the way round rather than animating all N at once.
+       Every other chunk is doing exactly this, offset by one card, and the
+       reader who can follow one can follow four. 2(N−1) hops, 2(N−1)
+       fragments — the stepper walks the whole journey and rests at the end. */
+    const per = TP.blocks[0].allreduce_elements / WORLD;
+    const hops = [];
+    for (let k = 0; k < WORLD - 1; k++) {
+      hops.push({ from: (WORLD + k) % WORLD, to: (k + 1) % WORLD, lane: 0,
+                  phase: "rs", label: "c0 += partial",
+                  cls: "activation", weight: per });
+    }
+    for (let k = 0; k < WORLD - 1; k++) {
+      /* Same hue — the payload is partial activations in BOTH halves. What
+         changes is what happens on arrival: the first half adds, the second
+         only copies. Dashes carry that, not colour. */
+      hops.push({ from: (WORLD - 1 + k) % WORLD, to: (WORLD + k) % WORLD, lane: 1,
+                  phase: "ag", label: "c0 final", dash: "7 4",
+                  cls: "activation", weight: per });
+    }
+    ctx.hops = hops;
+    ctx.flow = NN.viz.flow({
+      width: 700, height: 240, speed: 420,
+      nodes: Array.from({ length: WORLD }, function (_, g) {
+        return { label: "GPU " + g, sub: "partial" };
+      }),
+      hops: hops, unit: "elements"
+    });
+    ctx.cap = h("say", "");
+    return [
+      kicker("Distributed · tensor parallel · <b>the bytes actually move</b>"),
+      title("<span class='mono'>all_reduce</span> = " +
+            "<span class='mono'>reduce_scatter</span> then " +
+            "<span class='mono'>all_gather</span>", true),
+      ctx.flow,
+      ctx.cap,
+      d("rowflex", hops.map(function (hp, i) {
+        const round = (i % (WORLD - 1)) + 1;
+        return frag(h("pill", (hp.phase === "rs" ? "reduce-scatter " : "all-gather ") +
+                              round + "/" + (WORLD - 1)), "f-pop");
+      })),
+      frag(NN.tiles([
+        { k: "payload", v: TP.blocks[0].allreduce_elements + " elems",
+          s: "partial activations, on the critical path", cls: "activation" },
+        { k: "hops", v: String(2 * (WORLD - 1)),
+          s: "2(N−1) on a ring of " + WORLD, cls: "activation" },
+        { k: "bytes each card sends", v: "2(N−1)/N × S",
+          s: "not N × S — nobody sends the whole thing", cls: "activation" }
+      ])),
+      frag(NN.callout("key", "Why the halfway frame matters",
+        "After the reduce-scatter half, every card owns <b>one finished " +
+        "chunk</b> and three unfinished ones. No card has the answer, but " +
+        "between them they have all of it exactly once. The all-gather half " +
+        "then does no arithmetic at all — it only copies. That split is why " +
+        "the cost is 2(N−1)/N × S and not N × S, and it is the same " +
+        "decomposition ZeRO uses to shard gradients for free."), "f-fade")
+    ];
+  },
+  render: function (n, ctx) {
+    const H = ctx.hops.length, half = H / 2;
+    if (n === 0) {
+      ctx.flow.step(null);
+      ctx.cap.innerHTML = "Four partials on four cards. Every number is wrong, " +
+        "and nothing local can fix it — the missing information is on the others.";
+      return;
+    }
+    if (n > H) {                       /* rest on the finished journey */
+      ctx.flow.showAll(true);
+      ctx.cap.innerHTML = "<b>c0 is home.</b> " + (WORLD - 1) + " hops to finish it, " +
+        (WORLD - 1) + " to hand it out — and the other " + (WORLD - 1) +
+        " chunks made the same trip at the same time, one card behind.";
+      return;
+    }
+    const i = n - 1;
+    ctx.flow.step(i);
+    ctx.cap.innerHTML = i < half
+      ? ("<b>reduce-scatter</b> · hop " + (i + 1) + " of " + half +
+         " — the card forwards c0 and the receiver <b>adds</b> its own partial into it")
+      : ("<b>all-gather</b> · hop " + (i - half + 1) + " of " + half +
+         " — same ring, but c0 is <b>finished</b> now; this half only copies");
+  }
+});
+
 
 S({
   chapter: "Tensor parallel · the proof", plain: "All-reduce, add the bias once, and it is exactly right",
