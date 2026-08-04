@@ -25757,594 +25757,913 @@ if (IPA) {
 
 SEP("infpar");
 
-/* ------------------------------------------------------ I1. the inversion */
+/* ======================================================================== */
+/*  SECTION 7 · INFERENCE PARALLELISM                                       */
+/*                                                                          */
+/*  The subject is the MECHANISM, drawn on the toys: the same column cut     */
+/*  Part III made, the KV cache cut along the same line, and the one         */
+/*  all-reduce firing twice — once with a whole prompt behind it, once with  */
+/*  a single token. Two priced facts survive, at the end, as consequence.    */
+/*                                                                          */
+/*  Everything here is NN.viz on real tensors: TF2's W_q/W_k/W_v/W_o and its */
+/*  attention probabilities, INFER's KV cache dump, PARALLEL's ring.         */
+/* ======================================================================== */
+
+/* ---------------- the two payloads one block's all-reduce carries ------- */
+const IPRE_TOK   = IM.seq;                    /* a full-context prefill     */
+const IPRE_ELEMS = IPRE_TOK * IM.d_model;
+const IPRE_B     = IPRE_ELEMS * BF16B;
+const IDEC_B     = IDEC_ELEMS * BF16B;
+const ITP2       = 2;                 /* two GPUs — one per head group      */
+
+/** One all-reduce of `elems` bf16 elements across N ranks, in Part III's
+    alpha-beta model. iAllReduce() above is exactly this with `elems` pinned
+    to a decode step; the assertion below is the one tick that says so. */
+function iARof(N, elems) {
+  const bytes = elems * BF16B;
+  const sent  = iRing(N) * bytes;
+  const link  = iLinkOf(N);
+  const lat   = N > 1 ? iAlpha(N) * 2 * (N - 1) : 0;
+  const bw    = N > 1 ? sent / (link.per_dir_GBps * 1e9 * IEFF) : 0;
+  return { elems: elems, bytes: bytes, sent: sent, link: link,
+           hops: N > 1 ? 2 * (N - 1) : 0, lat: lat, bwTime: bw,
+           total: lat + bw, latShare: (lat + bw) > 0 ? lat / (lat + bw) : 0 };
+}
+(function () {
+  const a = iARof(IPER_NODE, IDEC_ELEMS), b = ISTEP[IPER_NODE].ar;
+  if (Math.abs(a.total - b.total) > 1e-15) {
+    console.warn("nn-internals slides: iARof disagrees with iAllReduce — the " +
+                 "inference-parallelism section and part III have drifted");
+  }
+})();
+const IPRE2 = iARof(ITP2, IPRE_ELEMS);
+const IDEC2 = iARof(ITP2, IDEC_ELEMS);
+
+/* per-GPU capacity arithmetic, for the KV-versus-weights slide */
+const IWPG    = W_BYTES / IPER_NODE;                  /* weights per GPU    */
+const IKVPG   = KVNAT.bytes_per_sequence / IPER_NODE; /* KV per seq per GPU */
+const ISEQFIT = Math.max(1, Math.floor((GPUD.hbm_bytes - IWPG) / IKVPG));
+const ISEQEQ  = KVNAT.sequences_to_equal_weights;
+const IKVRATIO = ISEQFIT * IKVPG / IWPG;
+
+/* The ring, as the sequence of hops one chunk actually makes: N−1 to reduce
+   it and N−1 to carry the reduced value back round. 2(N−1) — the number that
+   grows while the cargo does not. */
+function iRingHops(N, weight, unitLabel) {
+  const out = [], n = 2 * (N - 1);
+  for (let k = 0; k < n; k++) {
+    const rs = k < N - 1;
+    out.push({ from: k % N, to: (k + 1) % N, lane: rs ? 0 : 1,
+               cls: rs ? "gradient" : "weight", weight: weight,
+               label: (unitLabel ? unitLabel + " · " : "") +
+                      (rs ? "reduce-scatter " : "all-gather ") +
+                      ((k % (N - 1)) + 1) + "/" + (N - 1) });
+  }
+  return out;
+}
+function iGpuNodes(N, subOf) {
+  const out = [];
+  for (let g = 0; g < N; g++) {
+    out.push({ label: "GPU " + g, sub: subOf ? subOf(g) : null });
+  }
+  return out;
+}
+function iHeadSub(g) {
+  return "heads " + (g * IM.n_heads / ITP2) + "–" +
+         ((g + 1) * IM.n_heads / ITP2 - 1);
+}
+
+if (F2) {
+
+/* the head/column correspondence, checked rather than asserted */
+const IWQ = partOf("L0.Wq"), IWK = partOf("L0.Wk"),
+      IWV = partOf("L0.Wv"), IWO = partOf("L0.Wo");
+const IHEADFIT = (function () {
+  if (!IWQ || !FL[0]) return 0;
+  let ok = 0;
+  IWQ.tp.slices.forEach(function (s, g) {
+    const hc = FL[0].heads[g] ? FL[0].heads[g].cols : null;
+    if (hc && s.cols && hc[0] === s.cols[0] && hc[1] === s.cols[1]) ok++;
+  });
+  if (ok !== NH) {
+    console.warn("nn-internals slides: TF2 head columns do not line up with " +
+                 "the W_q column slices, which the inference-parallelism " +
+                 "section claims they do");
+  }
+  return ok;
+})();
+function igpuLab(g) { return "GPU " + g; }
+
+/* ------------------------------------------- P1. it is the same cut ----- */
 S({
-  chapter: "Inference parallelism · the inversion",
-  plain: "The same all-reduce, now on the critical path of every single token",
-  notes: "Same three axes as part three — tensor, pipeline, data — and the " +
-    "ranking inverts. In training, tensor parallelism's all-reduce moves a " +
-    "large payload and sits inside a step that lasts hundreds of " +
-    "milliseconds over a batch of thousands of sequences, so it amortises " +
-    "and overlaps. In decode the step is a few milliseconds long, the batch " +
-    "is small, and the all-reduce is on the critical path of every token " +
-    "with nothing to hide behind. And its payload has collapsed, because " +
-    "decode processes one position per sequence. A collective whose payload " +
-    "is tiny is not a bandwidth problem — it is a LATENCY problem, and " +
-    "latency does not amortise. That single sentence turns most of page " +
-    "nineteen's conclusions upside down, and the next four slides do the " +
-    "arithmetic.",
-  build: function () {
-    const rows = [
-      ["what the collective moves", "batch × sequence × d_model",
-       "batch × <b>1</b> × d_model", "smaller by exactly the sequence length"],
-      ["what dominates its cost", "bandwidth — the payload is large",
-       "<b>latency</b> — the payload is tiny", "the terms swap"],
-      ["what it hides behind", "a long compute step over a big batch",
-       "<b>nothing</b> — the step is milliseconds", "no overlap available"],
-      ["how often it happens", "twice per block, once per training step",
-       "twice per block, <b>once per token</b>", "thousands of times more often"],
-      ["the failure mode", "the wire is saturated",
-       "<b>the wire is idle and everyone is waiting</b>", "opposite diagnosis"]
-    ].map(function (r) {
-      return el("tr", {}, [
-        el("td", { style: { textAlign: "left" } }, r[0]),
-        el("td", { style: { textAlign: "left" }, class: "muted" , html: r[1] }),
-        el("td", { style: { textAlign: "left" }, html: r[2] }),
-        el("td", { style: { textAlign: "left" }, class: "muted" }, r[3])
-      ]);
+  chapter: "Inference parallelism · the cut",
+  plain: "Serving splits the same matrices along the same line: head 0 on " +
+         "GPU 0, head " + (NH - 1) + " on GPU " + (TW - 1),
+  notes: "Open by refusing to introduce anything. Inference parallelism is " +
+    "not a new decomposition. This is TF2's real W_q — " + DM + " by " + DM +
+    ", the actual sixteen numbers — and the partition that drops into it is " +
+    "part three's column cut, unchanged. Columns " +
+    IWQ.tp.slices[0].cols[0] + " to " + (IWQ.tp.slices[0].cols[1] - 1) +
+    " are head zero and go to GPU zero; the rest are head one and go to GPU " +
+    "one. The generator's own reason is on the slide: split by output " +
+    "feature means whole heads per GPU. Nothing about generation changed " +
+    "that. What changes is what flows through it, and that is the rest of " +
+    "the section. Make people notice they have seen this exact picture " +
+    "already — recognition is the point of the slide.",
+  build: function (ctx) {
+    ctx.cut = NN.viz.cut({
+      matrix: PRM["L0.Wq"], parts: TW, mode: "column", digits: 3,
+      ownerLabel: igpuLab,
+      title: "W_q · layer 0 · " + DM + " × " + DM + " · TF2.params.L0.Wq"
     });
+    const tpref = slideNumberByPlain("split the weight matrix itself");
     return [
-      kicker("Inference parallelism · <b>part III, recomputed for one token</b>"),
-      title("Same collective. Same wire. Opposite bottleneck.", true),
-      frag(d("panel w", [ph("tensor parallelism, priced two ways"),
-        el("table", { class: "data nowrap" }, [
-          el("thead", {}, el("tr", {}, [
-            el("th", { style: { textAlign: "left" } }, ""),
-            el("th", { style: { textAlign: "left" } }, "training step"),
-            el("th", { style: { textAlign: "left" } }, "decode step"),
-            el("th", { style: { textAlign: "left" } }, "")])),
-          el("tbody", {}, rows)
-        ])]), "f-fade"),
-      frag(NN.callout("key", "Latency does not amortise, and that is the whole page",
-        "A bandwidth cost is paid per byte, so a bigger step spreads it. A " +
-        "latency cost is paid per COLLECTIVE, so a shorter step concentrates " +
-        "it. Decode does " + (2 * IM.n_layers) + " all-reduces per token on " +
-        IM.name + " and each one pays its fixed cost in full. Buying a " +
-        "faster wire does almost nothing about that; reducing the hop count " +
-        "does everything."), "f-fade")
+      kicker("Inference parallelism · <b>nothing new is being cut</b>"),
+      title("The same column cut, on the same matrix", true),
+      d("cols wide-l", [
+        d("stack", [
+          ctx.cut,
+          frag(h("small muted", "TF2.partitioning calls this <b>" +
+            IWQ.tp.mode + "</b> — “" + IWQ.tp.why + "”. Each GPU keeps " +
+            IWQ.tp.per_gpu_shape.join(" × ") + " = " +
+            IWQ.tp.per_gpu_elements + " of the " + IWQ.elements +
+            " numbers."), "f-fade")
+        ]),
+        d("stack", [
+          frag(d("panel a", [ph("what the cut line means"),
+            h("say", "Columns of W_q are output features. A head is " + DH +
+              " consecutive output features. So a column cut at " +
+              IWQ.tp.slices[1].cols[0] + " is a <em>head</em> cut: GPU 0 gets " +
+              "head 0 whole, GPU 1 gets head " + (NH - 1) + " whole.")]),
+            "f-right"),
+          frag(NN.tiles([
+            { k: "heads whose columns match their GPU's slice",
+              v: IHEADFIT + " of " + NH,
+              s: "checked against TF2.forward.layers[0].heads[·].cols",
+              cls: "activation" }
+          ]), "f-pop"),
+          frag(NN.callout("key", "You have seen this picture already",
+            "This is the cut from " + (tpref ? "slide " + tpref : "part III") +
+            ", drawn on a transformer instead of an MLP. Inference does not " +
+            "get its own decomposition. It gets the training decomposition " +
+            "with something much smaller flowing through it."), "f-fade")
+        ])
+      ])
     ];
+  },
+  render: function (n, ctx) {
+    ctx.cut.step(n <= 0 ? 0 : (n === 1 ? 1 : (n === 2 ? 2 : (n === 3 ? 3 : 1))));
   }
 });
 
-/* --------------------------------------------------------- I2. the payload */
+/* -------------------- P2. three by column, one by row → one collective -- */
 S({
-  chapter: "Inference parallelism · the payload",
-  plain: BY(IDEC_ELEMS * BF16B) + " against training's " +
-         BY(ITRAIN_ELEMS * BF16B) + " — a ratio of exactly batch × sequence",
-  notes: "Put a number on the collapse. Part three priced its all-reduce at " +
-    "batch " + ITRAIN.batch + ", sequence " + NN.count(ITRAIN.seq) +
-    ", hidden " + NN.count(ITRAIN.d) + " — " + NN.count(ITRAIN_ELEMS) +
-    " elements, " + BY(ITRAIN_ELEMS * BF16B) + " per all-reduce in bf16. A " +
-    "decode step at batch 1 reduces " + NN.count(IDEC_ELEMS) + " elements, " +
-    BY(IDEC_ELEMS * BF16B) + ". The ratio is " +
-    NN.count(ITRAIN_ELEMS / IDEC_ELEMS) + ", and it is not approximately " +
-    "anything — it is exactly batch times sequence, because decode " +
-    "processes exactly one position per sequence per step. Sixteen " +
-    "kilobytes is a message size at which no interconnect on earth is " +
-    "bandwidth-limited. You are paying the cost of STARTING a collective, " +
-    "over and over.",
-  build: function () {
-    const r8 = ISTEP[IPER_NODE];
+  chapter: "Inference parallelism · the pairing",
+  plain: "W_q, W_k, W_v by column; W_o by row — which is why there is exactly " +
+         "one all-reduce",
+  notes: "Four matrices, and the pattern is the whole reason attention " +
+    "parallelises cheaply. Q, K and V are cut by column on the same line, so " +
+    "each GPU builds its own head's queries, keys and values out of the full " +
+    "input and needs nothing from the other GPU to do it. Then W_o is cut by " +
+    "ROW — by input feature — precisely so it consumes the half-width output " +
+    "the head produced. Each GPU multiplies its half of the concatenated " +
+    "head output by its half of W_o and gets something of the full output " +
+    "shape that is numerically wrong: a partial sum. Adding the two partials " +
+    "is one all-reduce. Column then row is what buys you one collective " +
+    "instead of two — cut W_o by column instead and you would have to " +
+    "all-gather the activation before the matmul could even start.",
+  build: function (ctx) {
+    ctx.cuts = [];
+    function box(mat, part, mode, label) {
+      const c = NN.viz.cut({
+        matrix: mat, parts: TW, mode: mode, digits: 3, ownerLabel: igpuLab,
+        title: part.display + " · " + mode + " cut"
+      });
+      c.step(1);
+      ctx.cuts.push(c);
+      return d("panel " + (mode === "column" ? "w" : "g"), [
+        ph(label), c,
+        h("small muted", part.tp.per_gpu_shape.join(" × ") + " per GPU")
+      ]);
+    }
     return [
-      kicker("Inference parallelism · <b>where the bytes went</b>"),
-      title("The payload is smaller by exactly the sequence length", true),
-      frag(NN.formula({ rule: "all-reduce payload",
-        sub: "tokens in the step × d_model — training: batch × sequence × d · " +
-             "decode: batch × <b>1</b> × d",
-        result: "ratio = batch × sequence = " + NN.count(ITRAIN_ELEMS / IDEC_ELEMS),
-        cls: "activation" }), "f-fade"),
-      frag(d("cols3", [
-        d("panel w", [ph("training · part III's worked configuration"),
-          h("midnum v-weight", BY(ITRAIN_ELEMS * BF16B)),
-          h("small muted", "batch " + ITRAIN.batch + " × seq " +
-            NN.count(ITRAIN.seq) + " × d " + NN.count(ITRAIN.d) + " = " +
-            NN.count(ITRAIN_ELEMS) + " elements in bf16")]),
-        d("panel a", [ph("decode · one token, batch 1"),
-          h("midnum v-activation", BY(IDEC_ELEMS * BF16B)),
-          h("small muted", "1 × d " + NN.count(IM.d_model) + " = " +
-            NN.count(IDEC_ELEMS) + " elements in bf16")]),
-        d("panel acc", [ph("ratio"),
-          h("midnum", NN.count(ITRAIN_ELEMS / IDEC_ELEMS) + "×"),
-          h("small muted", "exactly batch × sequence · nothing approximate " +
-            "about it")])
+      kicker("Inference parallelism · <b>column, column, column, row</b>"),
+      title("Three cuts one way, one cut the other", true),
+      frag(d("cols4", [
+        box(PRM["L0.Wq"], IWQ, "column", "queries"),
+        box(PRM["L0.Wk"], IWK, "column", "keys"),
+        box(PRM["L0.Wv"], IWV, "column", "values"),
+        box(PRM["L0.Wo"], IWO, "row", "output projection")
       ]), "f-pop"),
       frag(d("cols wide-l", [
-        NN.callout("key", "At " + BY(IDEC_ELEMS * BF16B) +
-          " no wire is the bottleneck",
-          "At TP = " + IPER_NODE + " the ring sends " + BY(r8.ar.sent) +
-          " per GPU per all-reduce. On " + INVL.name + " at " +
-          INVL.per_dir_GBps + " GB/s per direction and " + f(IEFF * 100, 0) +
-          "% achieved, that is <b class='num'>" + iUs(r8.ar.bwTime) +
-          "</b>. The fixed cost of starting the collective is <b class='num'>" +
-          iUs(r8.ar.lat) + "</b>. Part three's analysis — payload × ring " +
-          "factor ÷ bandwidth — computes the term that is " +
-          iPc(1 - r8.ar.latShare, 2) + " of the answer here."),
+        NN.callout("key", "Why the pairing is always column then row",
+          "The column cut leaves each GPU holding a <em>narrow</em> " +
+          "activation, " + DH + " features wide — its head. W_o is cut by " +
+          "input feature so that it eats exactly that width: “" + IWO.tp.why +
+          "”. Each GPU then produces a full-shaped output that is " +
+          "numerically wrong, and adding the " + TW + " of them is <b>one</b> " +
+          "all-reduce. Cut W_o by column instead and you would need an " +
+          "all-gather <em>before</em> the matmul — a second collective, for " +
+          "nothing."),
         NN.tiles([
-          { k: "bandwidth term", v: iUs(r8.ar.bwTime),
-            s: iPc(1 - r8.ar.latShare, 2) + " of one all-reduce" },
-          { k: "latency term", v: iUs(r8.ar.lat),
-            s: iPc(r8.ar.latShare) + " of one all-reduce", cls: "gradient" }
+          { k: "collectives inside one attention block", v: "1",
+            s: "after W_o, never before", cls: "gradient" },
+          { k: "collectives inside the softmax", v: "0",
+            s: "a head is self-contained — the next slide shows it",
+            cls: "activation" }
         ])
       ]), "f-fade")
     ];
   }
 });
 
-/* --------------------------------------------------------- I3. the split */
+/* --------------------- P3. a head is self-contained --------------------- */
 S({
-  chapter: "Inference parallelism · the split",
-  plain: "At TP = " + IPER_NODE + " one all-reduce is " +
-         iUs(ISTEP[IPER_NODE].ar.total) + ", of which bandwidth is " +
-         iUs(ISTEP[IPER_NODE].ar.bwTime),
-  notes: "The arithmetic, term by term, at the configuration people actually " +
-    "run. TP = " + IPER_NODE + ", one NVSwitch domain, batch 1. The ring " +
-    "sends " + BY(ISTEP[IPER_NODE].ar.sent) + " per GPU per all-reduce, " +
-    "which at " + INVL.per_dir_GBps + " GB/s and " + f(IEFF * 100, 0) +
-    "% achieved takes " + iUs(ISTEP[IPER_NODE].ar.bwTime) + ". The latency " +
-    "term is alpha times 2(N−1) hops: " + ICM.latency_us.intra_node +
-    " microseconds times " + (2 * (IPER_NODE - 1)) + " = " +
-    iUs(ISTEP[IPER_NODE].ar.lat) + ". Latency is " +
-    iPc(ISTEP[IPER_NODE].ar.latShare, 1) + " of it. Multiply by " +
-    (2 * IM.n_layers) + " collectives per token and the fixed cost alone is " +
-    iMs(ISTEP[IPER_NODE].commLat) + " of every token, against " +
-    iMs(ISTEP[IPER_NODE].tMem) + " of actual HBM reading. More than half " +
-    "the token is waiting for collectives to start.",
-  build: function () {
-    const cols = [2, 4, 8, 16];
-    const spec = [
-      ["link the ring rides", function (r) { return r.ar.link.name; }],
-      ["ring factor " + IAR.ring_factor, function (r) { return f(iRing(r.N), 4); }],
-      ["bytes sent per GPU per all-reduce", function (r) { return BY(r.ar.sent); }],
-      ["→ bandwidth term", function (r) { return iUs(r.ar.bwTime); }],
-      ["→ latency term · α × 2(N−1)", function (r) { return iUs(r.ar.lat); }],
-      ["one all-reduce", function (r) { return iUs(r.ar.total); }],
-      ["latency's share of it", function (r) { return iPc(r.ar.latShare, 1); }],
-      [(2 * IM.n_layers) + " all-reduces per token", function (r) { return iMs(r.comm); }],
-      ["HBM read of weights + KV ÷ " + "TP", function (r) { return iMs(r.tMem); }],
-      ["inter-token latency", function (r) { return iMs(r.itl); }]
-    ];
-    const body = spec.map(function (s, i) {
-      return el("tr", { class: (i === 6 || i === 9) ? "deadparam" : "" },
-        [el("td", { style: { textAlign: "left" } }, s[0])].concat(
-          cols.map(function (n) {
-            return el("td", { class: "n" + (i === 6 ? " v-gradient" : "") },
-                      s[1](ISTEP[n]));
-          })));
+  chapter: "Inference parallelism · inside a head",
+  plain: "GPU 0 runs head 0's scores, softmax and output end to end — no wire " +
+         "crosses attention",
+  notes: "This is why the head is the unit you cut on. Two real attention " +
+    "probability matrices from TF2's layer zero, one per head, causal mask " +
+    "hatched, revealed a query at a time. Head zero and head one disagree " +
+    "about where to look, which is the point of having more than one. Now " +
+    "notice what is NOT here: communication. The softmax denominator is a " +
+    "sum over one head's keys, and all of them live on the same GPU, so the " +
+    "normalisation is local. Q dot K is local. The weighted sum of V is " +
+    "local. Every byte the other GPU holds is irrelevant until W_o. That is " +
+    "the whole reason attention shards along heads rather than along the " +
+    "model dimension — cut the other way and every softmax becomes a " +
+    "collective, inside the attention rather than after it.",
+  build: function (ctx) {
+    const labs = TOK.slice(0, SQ);
+    ctx.h = [0, 1].map(function (g) {
+      return NN.viz.heat({
+        matrix: FL[0].heads[g].P, rowLabels: labs, colLabels: labs,
+        cls: "activation", cell: 54,
+        masked: function (i, j) { return j > i; }
+      });
     });
-    const r8 = ISTEP[IPER_NODE];
     return [
-      kicker("Inference parallelism · <b>term by term</b>"),
-      title("Latency is <span class='v-gradient'>" +
-            iPc(r8.ar.latShare, 1) + "</span> of the collective", true),
-      frag(d("panel w", [ph(IM.name + " on " + IG.name + " · one decode " +
-        "token · batch 1 · seq " + NN.count(IM.seq)),
-        el("table", { class: "data nowrap" }, [
-          el("thead", {}, el("tr", {}, [
-            el("th", { style: { textAlign: "left" } }, "term")
-          ].concat(cols.map(function (n) {
-            return el("th", {}, "TP = " + n + (n > IPER_NODE ? " ⚠" : ""));
-          })))),
-          el("tbody", {}, body)
-        ]),
-        h("small muted", "α from PARALLEL.cost_model.latency_us: " +
-          ICM.latency_us.intra_node + " µs intra-node, " +
-          ICM.latency_us.inter_node + " µs inter-node. " +
-          ICM.latency_us.note)]), "f-fade"),
+      kicker("Inference parallelism · <b>a head is self-contained</b>"),
+      title("Nothing crosses the wire until W_o", true),
+      frag(d("cols", [
+        d("panel w", [ph("GPU 0 · head 0 · attention probabilities"),
+          ctx.h[0],
+          h("small muted", "from Q, K, V columns " +
+            FL[0].heads[0].cols[0] + "–" + (FL[0].heads[0].cols[1] - 1) +
+            " — all of which live here")]),
+        d("panel o", [ph("GPU 1 · head 1 · attention probabilities"),
+          ctx.h[1],
+          h("small muted", "from Q, K, V columns " +
+            FL[0].heads[1].cols[0] + "–" + (FL[0].heads[1].cols[1] - 1) +
+            " — all of which live there")])
+      ]), "f-fade"),
+      frag(NN.tiles([
+        { k: "queries resolved", v: SQ + " of " + SQ,
+          s: "hatched cells are future tokens and cannot be attended to" },
+        { k: "bytes exchanged to build either map", v: "0",
+          s: "the wire is idle for the whole of attention", cls: "activation" }
+      ]), "f-pop"),
+      frag(NN.callout("key", "The softmax is the reason the cut is by head",
+        "Every row of each map sums to 1 over that head's own keys, and both " +
+        "denominators are sums over columns that never left the GPU. Shard " +
+        "the model dimension instead of the heads and each of those " +
+        "denominators becomes an all-reduce — " + (2 * NL) +
+        " per token on this toy, thousands on a real model, and all of them " +
+        "in the middle of attention rather than at the end of it."), "f-fade")
+    ];
+  },
+  render: function (n, ctx) {
+    const k = NN.clamp(n, 0, SQ);
+    ctx.h.forEach(function (x) { x.step(k); });
+  }
+});
+
+}  /* end if (F2) — the three cut slides need the transformer toy */
+
+/* --------------------- P4. the KV cache splits too ---------------------- */
+S({
+  chapter: "Inference parallelism · the cache",
+  plain: "Each GPU caches only its own heads' K rows — two half-width caches, " +
+         "not one",
+  notes: "The cut does not stop at the weights. K and V are produced by W_k " +
+    "and W_v, which were column-cut, so the K and V a GPU produces are " +
+    "already only its own heads' columns — and those are the columns it " +
+    "caches. Watch the three buffers fill together. On the left is what one " +
+    "GPU would hold: the whole " + IMETA.d_model + "-wide row per token. On " +
+    "the right, the two shards, each " + (IMETA.d_model / 2) + " wide. " +
+    "Prefill lands " + IGEN.steps[0].n_tokens_processed + " rows at once, " +
+    "because the whole prompt goes through together. Then every decode step " +
+    "lands exactly one more row in each shard, forever. Nobody sends " +
+    "anything: GPU 0 computed its own columns and keeps them. The cache is " +
+    "sharded for free, as a side effect of the weight cut you already made.",
+  build: function (ctx) {
+    const K = IGEN.cache_dump[0].K, NRW = K.length;
+    const D = IMETA.d_model, HALF = D / 2;
+    const rowLabs = IGEN.final_sequence.slice(0, NRW).map(function (t, i) {
+      return "t" + i + " " + ITOK[t];
+    });
+    function colLab(a, b) {
+      const out = []; for (let j = a; j < b; j++) out.push("k" + j);
+      return out;
+    }
+    function cache(a, b, cls, cap) {
+      return NN.viz.grow({
+        rows: K.map(function (r) { return r.slice(a, b); }),
+        rowLabels: rowLabs, colLabels: colLab(a, b), cls: cls, digits: 3,
+        caption: cap
+      });
+    }
+    ctx.one = cache(0, D, "activation", function (k) {
+      return k + " rows × " + D + " resident";
+    });
+    ctx.g0 = cache(0, HALF, "weight", function (k) {
+      return k + " × " + HALF + " — head 0 only";
+    });
+    ctx.g1 = cache(HALF, D, "optimizer", function (k) {
+      return k + " × " + HALF + " — head 1 only";
+    });
+    const lens = [0].concat(IGEN.steps.map(function (s) {
+      return s.cache_len_after;
+    }));
+    ctx.play = playbar({
+      count: lens.length, ms: 950,
+      label: function (i) {
+        if (i === 0) return "cache empty";
+        const s = IGEN.steps[i - 1];
+        return s.phase + " · " + s.n_tokens_processed + " token" +
+               (s.n_tokens_processed === 1 ? "" : "s") + " in · " +
+               s.cache_len_after + " rows resident";
+      },
+      frame: function (i) {
+        ctx.one.step(lens[i]); ctx.g0.step(lens[i]); ctx.g1.step(lens[i]);
+      }
+    });
+    return [
+      kicker("Inference parallelism · <b>the cache is cut by the same line</b>"),
+      title("Two caches, each half as wide, and nobody sent a byte", true),
+      d("cols wide-r", [
+        d("panel a", [ph("one GPU · the whole row · INFER cache_dump L0 · K"),
+          ctx.one]),
+        d("cols", [
+          d("panel w", [ph("GPU 0 · columns 0–" + (IMETA.d_model / 2 - 1)),
+            ctx.g0]),
+          d("panel o", [ph("GPU 1 · columns " + (IMETA.d_model / 2) + "–" +
+            (IMETA.d_model - 1)), ctx.g1])
+        ])
+      ]),
+      ctx.play,
+      frag(NN.callout("key", "Sharded for free, by the cut you already made",
+        "K for token j is the row <span class='mono'>W_k</span> produced for " +
+        "token j, and W_k was column-cut — so GPU 0 never had the other " +
+        "columns to begin with. No scatter, no exchange, no extra " +
+        "collective: the cache arrives pre-split. INFER's own check says the " +
+        "cached path matches full recomputation to max |error| = " +
+        IGEN.cache_equivalence.max_abs_err + "."), "f-fade")
+    ];
+  },
+  render: function (n, ctx) { if (n === 0 && ctx.play) ctx.play.set(0); }
+});
+
+/* -------- P5. and that is often the real reason you shard at all -------- */
+S({
+  chapter: "Inference parallelism · why the cache is the reason",
+  plain: "The weights are a fixed " + BY(W_BYTES) + "; the cache grows until " +
+         "it is " + f(IKVRATIO, 1) + "× them",
+  notes: "Why sharding the cache is usually the point and sharding the " +
+    "weights is the excuse. The weights are a constant: " + BY(W_BYTES) +
+    " for " + IM.name + ", " + BY(IWPG) + " once you divide by TP = " +
+    IPER_NODE + ", and that number never moves however busy the server gets. " +
+    "The cache is not a constant. It is " + BY(IKVPG) + " per GPU per " +
+    "concurrent sequence, and concurrency is exactly the thing you are " +
+    "trying to increase. At " + f(ISEQEQ, 0) + " sequences the cache equals " +
+    "the weights; this GPU can hold " + ISEQFIT + ", at which point the " +
+    "cache is " + f(IKVRATIO, 1) + " times the weights and is being re-read " +
+    "in full on every single token. Tensor parallelism is the only lever " +
+    "that divides that term, and unlike the weights you cannot quantise your " +
+    "way out of concurrency.",
+  build: function () {
+    const pts = [1, 16, 64, ISEQFIT];
+    return [
+      kicker("Inference parallelism · <b>the term that grows</b>"),
+      title("Sharding the weights is the excuse. The cache is the reason.",
+            true),
       frag(d("cols wide-l", [
-        NN.chart.bars({ items: [
-          { label: "latency · α × hops, TP = " + IPER_NODE,
-            value: r8.commLat * 1e3, color: "var(--gradient)",
-            sub: "· " + iPc(r8.ar.latShare, 1) + " of the communication" },
-          { label: "bandwidth · bytes ÷ link rate, TP = " + IPER_NODE,
-            value: r8.commBw * 1e3, color: "var(--gradient)",
-            sub: "· " + iPc(1 - r8.ar.latShare, 2) },
-          { label: "HBM read of weights + KV, per GPU",
-            value: r8.tMem * 1e3, color: "var(--weight)",
-            sub: "· " + BY(r8.perGpu) + " at " +
-                 f(IG.hbm_bw_bytes_per_s / 1e12, 2) + " TB/s" }
-        ], unit: "ms per token" }),
-        NN.callout("warn", "Buy a faster wire; nothing happens",
-          "The bandwidth term is " + iUs(r8.ar.bwTime) + " per collective. " +
-          "Double the link rate and you save " +
-          iUs(r8.ar.bwTime / 2) + " — out of " + iUs(r8.ar.total) +
-          ". Halve the hop count and you save " + iUs(r8.ar.lat / 2) +
-          ". Everything that matters here is in the fixed cost.")
+        d("panel acc", [ph("per GPU at TP = " + IPER_NODE + " · " + IM.name +
+          " on " + IG.name + " · seq " + NN.count(IM.seq)),
+          NN.chart.bars({
+            items: [{ label: "weights ÷ " + IPER_NODE + "   (fixed, forever)",
+                      value: IWPG / 1e9, color: "var(--weight)",
+                      sub: "· " + BY(W_BYTES) + " ÷ " + IPER_NODE }]
+              .concat(pts.map(function (b) {
+                return { label: "KV cache ÷ " + IPER_NODE + "   ·   " + b +
+                           " concurrent sequence" + (b === 1 ? "" : "s"),
+                         value: b * IKVPG / 1e9, color: "var(--activation)",
+                         sub: b === ISEQFIT ? "· the GPU is now full" : "" };
+              })),
+            unit: "GB",
+            limit: { value: GPUD.hbm_bytes / 1e9, label: "one " + IG.name } }),
+          h("small muted", "Bars and the capacity line are both decimal GB, " +
+            "so they are comparable. " + IKV.note)]),
+        d("stack", [
+          frag(NN.tiles([
+            { k: "sequences at which cache = weights", v: f(ISEQEQ, 0),
+              s: "INFER.kv_cache · sequences_to_equal_weights",
+              cls: "activation" },
+            { k: "sequences this GPU can hold", v: String(ISEQFIT),
+              s: "the cache is then " + f(IKVRATIO, 1) + "× the weights",
+              cls: "gradient" }
+          ]), "f-pop"),
+          frag(NN.callout("key", "Why this outranks the weight split",
+            "A weight byte is read once per step however many sequences are " +
+            "in flight. A cache byte is read once per step <em>per " +
+            "sequence</em>. You can quantise weights; you cannot quantise " +
+            "away concurrency. Tensor parallelism divides both by " +
+            IPER_NODE + " — but only one of them was ever going to grow."),
+            "f-fade")
+        ])
+      ]), "f-fade")
+    ];
+  }
+});
+
+/* ------------------------------- P6. prefill ---------------------------- */
+S({
+  chapter: "Inference parallelism · prefill",
+  plain: "Prefill: the whole prompt at once, and the block's all-reduce " +
+         "carries " + BY(IPRE_B),
+  notes: "Prefill is the shape a GPU likes. The whole prompt goes in " +
+    "together — INFER's step zero puts " + IGEN.steps[0].n_tokens_processed +
+    " tokens through in one pass and a real one puts thousands through — so " +
+    "every matmul is a big matrix times a big matrix. When the block ends " +
+    "and W_o has produced its partial sums, the all-reduce that fixes them " +
+    "up carries one row per token: " + NN.count(IPRE_TOK) + " rows of " +
+    NN.count(IM.d_model) + " in bf16, " + BY(IPRE_B) + ". Two GPUs, " +
+    IPRE2.hops + " hops, and each hop is hauling that. This is a bandwidth " +
+    "problem and it behaves exactly like the training all-reduce part three " +
+    "priced, because structurally it IS that all-reduce. Remember how thick " +
+    "the arcs are; the next slide draws the other half at the same scale.",
+  build: function (ctx) {
+    ctx.flow = NN.viz.flow({
+      nodes: iGpuNodes(ITP2, iHeadSub),
+      hops: iRingHops(ITP2, IPRE_B, BY(IPRE_B)),
+      unit: "bytes", width: 620, height: 210, boxW: 150, speed: 700
+    });
+    ctx.flow.showAll(true);
+    return [
+      kicker("Inference parallelism · <b>the prompt goes through whole</b>"),
+      title("Prefill: big matrices, and a fat all-reduce ending every block",
+            true),
+      d("cols wide-r", [
+        d("stack", [
+          frag(NN.formula({ rule: "all-reduce payload, end of one block",
+            sub: "tokens in the step × d_model × " + BF16B + " bytes",
+            result: NN.count(IPRE_TOK) + " × " + NN.count(IM.d_model) + " × " +
+                    BF16B + " = " + BY(IPRE_B), cls: "activation" }), "f-fade"),
+          frag(NN.tiles([
+            { k: "tokens in one prefill pass", v: NN.count(IPRE_TOK),
+              s: IM.name + "'s full context", cls: "activation" },
+            { k: "all-reduces in that one pass", v: String(2 * IM.n_layers),
+              s: "two per block × " + IM.n_layers + " blocks", cls: "gradient" }
+          ]), "f-pop")
+        ]),
+        frag(d("panel a", [ph("one all-reduce · TP = " + ITP2 + " · " +
+          IPRE2.hops + " hops on " + IPRE2.link.name), ctx.flow,
+          h("small muted", "Arc thickness is the payload.")]), "f-fade")
+      ]),
+      frag(NN.callout("key", "Structurally this is the training all-reduce",
+        "Same op, same ring, same " + IPRE2.hops + " hops, and a payload of " +
+        BY(IPRE_B) + ". Everything part three concluded about bandwidth " +
+        "applies here without a single change. Prefill is not the " +
+        "interesting half."), "f-fade")
+    ];
+  },
+  render: function (n, ctx) {
+    if (n >= 4) ctx.flow.step((n - 4) % IPRE2.hops);
+    else ctx.flow.showAll(true);
+  }
+});
+
+/* ================= P7. THE SLIDE — decode: one token =================== */
+S({
+  chapter: "Inference parallelism · decode",
+  plain: "Decode: identical ring, identical " + IDEC2.hops + " hops, payload " +
+         BY(IDEC_B) + " — smaller by exactly " + NN.count(IPRE_TOK) + "×",
+  notes: "This is the picture the section exists for. Both rings are drawn " +
+    "on one diagram at one scale, so arc thickness is honest: the outer, " +
+    "thick pair is prefill and the inner hairline pair is decode. " +
+    "Everything else about them is identical — same collective, same ring, " +
+    "same " + IDEC2.hops + " hops, the same lines of code, fired the same " +
+    (2 * IM.n_layers) + " times per pass. The only difference is that decode " +
+    "processes one position per sequence instead of " + NN.count(IPRE_TOK) +
+    ", so the payload falls by exactly the token count. Not approximately — " +
+    "exactly, because that ratio IS the token count. " + BY(IDEC_B) +
+    " is a message size at which no interconnect on earth is " +
+    "bandwidth-limited. What you are paying for now is the act of STARTING " +
+    "a collective, " + (2 * IM.n_layers) + " times, for every single token " +
+    "you emit. Step the playbar through all " + (2 * IDEC2.hops) +
+    " arcs and let people watch the hairline take the same route.",
+  build: function (ctx) {
+    const pre = iRingHops(ITP2, IPRE_B, "prefill " + BY(IPRE_B))
+      .map(function (x) { x.lane = x.lane + 2; x.cls = "activation"; return x; });
+    const dec = iRingHops(ITP2, IDEC_B, "decode " + BY(IDEC_B))
+      .map(function (x) { x.cls = "gradient"; return x; });
+    const hops = pre.concat(dec);
+    ctx.flow = NN.viz.flow({
+      nodes: iGpuNodes(ITP2, iHeadSub), hops: hops, unit: "bytes",
+      width: 700, height: 280, boxW: 150, speed: 750
+    });
+    ctx.flow.showAll(true);
+    ctx.play = playbar({
+      count: hops.length + 1, ms: 800,
+      label: function (i) {
+        return i === 0 ? "both payloads, one scale"
+                       : hops[i - 1].label + "  (GPU " + hops[i - 1].from +
+                         " → GPU " + hops[i - 1].to + ")";
+      },
+      frame: function (i) {
+        if (i === 0) { ctx.flow.step(null); ctx.flow.showAll(true); }
+        else ctx.flow.step(i - 1);
+      }
+    });
+    return [
+      kicker("Inference parallelism · <b>one token</b>"),
+      title("Same ring. Same " + IDEC2.hops +
+            " hops. The cargo collapsed by <span class='v-gradient'>" +
+            NN.count(IPRE_TOK) + "×</span>.", true),
+      d("cols wide-l", [
+        d("stack", [
+          d("panel acc", [ph("both payloads on one diagram · thickness is " +
+            "bytes"), ctx.flow]),
+          ctx.play
+        ]),
+        d("stack", [
+          frag(d("cols", [
+            d("panel a", [ph("prefill · " + NN.count(IPRE_TOK) + " tokens"),
+              h("midnum v-activation", BY(IPRE_B)),
+              h("small muted", NN.count(IPRE_ELEMS) + " elements, bf16")]),
+            d("panel g", [ph("decode · 1 token"),
+              h("midnum v-gradient", BY(IDEC_B)),
+              h("small muted", NN.count(IDEC_ELEMS) + " elements, bf16")])
+          ]), "f-pop"),
+          frag(NN.formula({ rule: "ratio",
+            sub: "tokens in a prefill step ÷ tokens in a decode step",
+            result: NN.count(IPRE_TOK) + " ÷ 1 = " +
+                    NN.count(IPRE_B / IDEC_B) + "×", cls: "gradient" }),
+            "f-fade"),
+          frag(NN.callout("key", "Nothing else changed, and that is the problem",
+            "Same op, same ring, same " + IDEC2.hops + " hops, same " +
+            (2 * IM.n_layers) + " firings per pass, same code path. A " +
+            "collective whose payload collapses does not get cheaper in " +
+            "proportion, because moving the bytes was never most of what it " +
+            "was doing."), "f-fade")
+        ])
+      ])
+    ];
+  },
+  render: function (n, ctx) { if (n === 0 && ctx.play) ctx.play.set(0); }
+});
+
+/* ------------- P8. same collective, opposite bottleneck ----------------- */
+S({
+  chapter: "Inference parallelism · the inversion",
+  plain: "Prefill's all-reduce is " + iPc(1 - IPRE2.latShare, 1) +
+         " bandwidth; decode's is " + iPc(IDEC2.latShare, 1) + " latency",
+  notes: "Now put a clock on the two arcs. They are the same collective at " +
+    "TP = " + ITP2 + " on " + IPRE2.link.name + ". Prefill: " +
+    iUs(IPRE2.bwTime) + " of moving bytes and " + iUs(IPRE2.lat) +
+    " of fixed start-up, so " + iPc(1 - IPRE2.latShare, 1) +
+    " of it is bandwidth. Decode: " + iUs(IDEC2.bwTime) +
+    " of moving bytes and the same " + iUs(IDEC2.lat) + " of start-up, so " +
+    iPc(IDEC2.latShare, 1) + " of it is latency. The fixed term did not " +
+    "change — it cannot, it is alpha times the hop count and neither of " +
+    "those depends on the payload. What changed is that the variable term " +
+    "evaporated and left the fixed one standing alone. That is the answer to " +
+    "why the same collective is bandwidth-bound in training and " +
+    "latency-bound in decode. It is also why buying a faster wire does " +
+    "nothing for decode: you would be shortening the term that is already " +
+    iPc(1 - IDEC2.latShare, 2) + " of the answer.",
+  build: function () {
+    return [
+      kicker("Inference parallelism · <b>the fixed cost does not shrink</b>"),
+      title("The bytes evaporated. The waiting did not.", true),
+      frag(d("cols", [
+        d("panel a", [ph("prefill · one all-reduce · " + BY(IPRE_B)),
+          NN.chart.bars({ items: [
+            { label: "bandwidth · bytes ÷ link rate",
+              value: IPRE2.bwTime * 1e6, color: "var(--activation)",
+              sub: "· " + iPc(1 - IPRE2.latShare, 1) },
+            { label: "latency · α × " + IPRE2.hops + " hops",
+              value: IPRE2.lat * 1e6, color: "var(--gradient)",
+              sub: "· " + iPc(IPRE2.latShare, 1) }
+          ], unit: "µs" })]),
+        d("panel g", [ph("decode · one all-reduce · " + BY(IDEC_B)),
+          NN.chart.bars({ items: [
+            { label: "bandwidth · bytes ÷ link rate",
+              value: IDEC2.bwTime * 1e6, color: "var(--activation)",
+              sub: "· " + iPc(1 - IDEC2.latShare, 2) },
+            { label: "latency · α × " + IDEC2.hops + " hops",
+              value: IDEC2.lat * 1e6, color: "var(--gradient)",
+              sub: "· " + iPc(IDEC2.latShare, 1) }
+          ], unit: "µs" }),
+          h("small muted", "The two charts have different maxima — " +
+            iUs(IPRE2.total) + " against " + iUs(IDEC2.total) +
+            " — so compare the labels, not the bar lengths, across them.")])
+      ]), "f-fade"),
+      frag(d("cols wide-l", [
+        NN.callout("key", "α × hops is a property of the wiring, not of the message",
+          "The latency term is " + ICM.latency_us.intra_node + " µs × " +
+          IDEC2.hops + " hops = " + iUs(IDEC2.lat) + " in <em>both</em> " +
+          "columns. It is set by how many machines are in the ring and how " +
+          "far apart they are, and shrinking the message shrinks only the " +
+          "other term. So a collective that was " +
+          iPc(1 - IPRE2.latShare, 1) + " bandwidth becomes " +
+          iPc(IDEC2.latShare, 1) + " latency without anyone changing " +
+          "anything about it."),
+        NN.tiles([
+          { k: "decode's bandwidth term", v: iUs(IDEC2.bwTime),
+            s: "halve it, save " + iUs(IDEC2.bwTime / 2), cls: "activation" },
+          { k: "decode's latency term", v: iUs(IDEC2.lat),
+            s: "halve the hops, save " + iUs(IDEC2.lat / 2), cls: "gradient" }
+        ])
       ]), "f-fade"),
       frag(h("small muted", IMODEL_CAVEAT), "f-fade")
     ];
   }
 });
 
-/* ------------------------------------------------------- I4. the crossover */
+/* ------------- P9. more GPUs = more hops, same tiny cargo --------------- */
 S({
-  chapter: "Inference parallelism · the crossover",
+  chapter: "Inference parallelism · hops",
+  plain: "Hops grow as 2(N−1) — " + (2 * (2 - 1)) + ", " + (2 * (4 - 1)) +
+         ", " + (2 * (IPER_NODE - 1)) + " — while each one carries less",
+  notes: "Walk the ring at two, four and eight. A ring all-reduce moves a " +
+    "chunk N−1 times to reduce it and N−1 times to carry the reduced value " +
+    "back round, so the hop count is 2(N−1): two, six, fourteen. Every one " +
+    "of those hops pays alpha in full. Meanwhile the chunk each hop carries " +
+    "is the payload divided by N, so it is getting SMALLER — at eight GPUs " +
+    "each hop moves " + BY(IDEC_B / IPER_NODE) + " and spends " +
+    ICM.latency_us.intra_node + " microseconds doing it. You are adding " +
+    "waiting and subtracting cargo. In training the cargo was big enough " +
+    "that dividing it was the win; in decode there is nothing left to " +
+    "divide, so all you bought was hops. Press play and count the arcs.",
+  build: function (ctx) {
+    const Ns = [2, 4, IPER_NODE];
+    ctx.flows = Ns.map(function (N) {
+      const fl = NN.viz.flow({
+        nodes: iGpuNodes(N), hops: iRingHops(N), unit: "bytes",
+        width: 1120, height: 190, speed: 300,
+        boxW: N <= 2 ? 150 : (N <= 4 ? 120 : 78)
+      });
+      fl.showAll(true);
+      return fl;
+    });
+    ctx.play = playbar({
+      count: 2 * (IPER_NODE - 1), ms: 340,
+      label: function (i) {
+        return "hop " + (i + 1) + " of " + (2 * (IPER_NODE - 1)) +
+               " · " + (i < IPER_NODE - 1 ? "reduce-scatter" : "all-gather");
+      },
+      frame: function (i) {
+        ctx.flows.forEach(function (fl, k) {
+          if (i < 2 * (Ns[k] - 1)) fl.step(i);
+          else { fl.step(null); fl.showAll(true); }
+        });
+      }
+    });
+    return [
+      kicker("Inference parallelism · <b>2(N−1)</b>"),
+      title("Every GPU you add adds hops and removes cargo", true),
+      d("stack", ctx.flows.map(function (fl, i) {
+        return d("panel " + (i === 2 ? "crit" : "acc"), [
+          ph("TP = " + Ns[i] + "  ·  " + (2 * (Ns[i] - 1)) + " hops  ·  each " +
+             "carries " + BY(IDEC_B / Ns[i]) + " of the " + BY(IDEC_B) +
+             " decode payload"), fl]);
+      })),
+      ctx.play,
+      frag(NN.callout("warn", "The two things you are trading are not the same size",
+        "Chunk per hop at TP = " + IPER_NODE + ": " + BY(IDEC_B / IPER_NODE) +
+        ", which crosses " + IDEC2.link.name + " in " +
+        iUs(iARof(IPER_NODE, IDEC_ELEMS).bwTime) + ". Cost of taking that " +
+        "hop at all: " + ICM.latency_us.intra_node + " µs. The hop count is " +
+        "what you are buying, and it is the only term with any size left in " +
+        "it."), "f-fade")
+    ];
+  },
+  render: function (n, ctx) { if (n === 0 && ctx.play) ctx.play.set(0); }
+});
+
+/* --------------- P10. the payoff: sixteen is slower than eight ---------- */
+S({
+  chapter: "Inference parallelism · the payoff",
   plain: ICROSS.cross
-    ? "TP " + ICROSS.cross.from + " → " + ICROSS.cross.to + ": " +
-      iMs(ICROSS.cross.prev) + " → " + iMs(ICROSS.cross.itl) + ", a " +
-      iX(ICROSS.cross.itl / ICROSS.cross.prev) + " regression for twice the GPUs"
+    ? "TP " + ICROSS.cross.from + " → " + ICROSS.cross.to + " is " +
+      iX(ICROSS.cross.itl / ICROSS.cross.prev) + " SLOWER for twice the GPUs"
     : "latency still improving at TP = " + ITPS[ITPS.length - 1],
-  notes: "Adding tensor parallelism does two things at once and they pull " +
-    "against each other. It divides the bytes each GPU has to read out of " +
-    "HBM, which is the whole of decode's real work — pure win. And it adds " +
-    (2 * IM.n_layers) + " collectives per token whose fixed cost GROWS with " +
-    "the group size, because more ranks means more hops. Below the crossing " +
-    "more TP is faster. Above it, more TP is slower. On " + IM.name +
-    " at batch 1 the crossing is at the node boundary: TP = " +
-    IPER_NODE + " gives " + iMs(ISTEP[IPER_NODE].itl) + " and TP = " +
-    (IPER_NODE * 2) + " gives " + iMs(ISTEP[IPER_NODE * 2].itl) + ". That " +
-    "is " + iX(ISTEP[IPER_NODE * 2].itl / ISTEP[IPER_NODE].itl) +
-    " SLOWER for twice the hardware. If you have ever watched someone add " +
-    "GPUs to a latency-sensitive endpoint and make it worse, this is the " +
-    "slide that explains it.",
+  notes: "The measured consequence, and it is the one people do not believe " +
+    "until they see it. Doubling from TP " + IPER_NODE + " to " +
+    (IPER_NODE * 2) + " halves the HBM read exactly as advertised, " +
+    iMs(ISTEP[IPER_NODE].tMem) + " down to " +
+    iMs(ISTEP[IPER_NODE * 2].tMem) + ". And it takes communication from " +
+    iMs(ISTEP[IPER_NODE].comm) + " to " + iMs(ISTEP[IPER_NODE * 2].comm) +
+    ", because at the node boundary two things go wrong at once: alpha jumps " +
+    "from " + ICM.latency_us.intra_node + " to " + ICM.latency_us.inter_node +
+    " microseconds when the ring leaves the NVSwitch domain, and the hop " +
+    "count doubles because N doubled. Multiply those and one all-reduce goes " +
+    "from " + iUs(ISTEP[IPER_NODE].ar.total) + " to " +
+    iUs(ISTEP[IPER_NODE * 2].ar.total) + ". Net: " +
+    (ICROSS.cross ? iX(ICROSS.cross.itl / ICROSS.cross.prev) : "worse") +
+    " the time per token for twice the hardware. And there is a second, " +
+    "independent reason " + (IPER_NODE * 2) + " is a bad number here: this " +
+    "model has " + IM.n_kv_heads + " KV heads, so past TP = " +
+    IM.n_kv_heads + " the cache cannot be split by head at all and starts " +
+    "being replicated instead.",
   build: function () {
-    const rows = ITPS.map(function (n) {
-      const r = ISTEP[n];
-      return el("tr", { class: n === IPER_NODE * 2 ? "deadparam" : "" }, [
-        el("td", { class: "n" }, String(n) + (r.ar.crossed ? " ⚠" : "")),
-        el("td", { class: "n" }, r.fits ? BY(W_BYTES / n) : "does not fit"),
-        el("td", { class: "n v-weight" }, iMs(r.tMem)),
-        el("td", { class: "n v-gradient" }, iMs(r.comm)),
-        el("td", { class: "n" }, iMs(r.itl)),
-        el("td", { class: "n" }, iPc(r.commShare)),
-        el("td", { class: "n" }, f(1 / r.itl, 0))
-      ]);
-    });
     return [
-      kicker("Inference parallelism · <b>two curves, one crossing</b>"),
+      kicker("Inference parallelism · <b>the counterintuitive one</b>"),
       title(ICROSS.cross
-        ? "TP " + ICROSS.cross.from + " → " + ICROSS.cross.to +
-          " is <span class='v-critical'>" +
-          iX(ICROSS.cross.itl / ICROSS.cross.prev) + " slower</span> for " +
-          iX(ICROSS.cross.to / ICROSS.cross.from, 0) + " the GPUs"
+        ? "TP = " + ICROSS.cross.to +
+          " decodes a token <span class='v-critical'>" +
+          iX(ICROSS.cross.itl / ICROSS.cross.prev) + " slower</span> than TP = " +
+          ICROSS.cross.from
         : "latency still improving at TP = " + ITPS[ITPS.length - 1], true),
-      frag(d("cols wide-l", [
-        d("panel acc", [ph("inter-token latency by TP degree · lower is better"),
-          NN.chart.bars({
-            items: ITPS.map(function (n) {
+      frag(d("panel crit", [ph("time per decoded token · " + IM.name + " on " +
+        IG.name + " · batch 1 · lower is better"),
+        NN.chart.bars({
+          items: ITPS.filter(function (n) { return ISTEP[n].fits; })
+            .map(function (n) {
               const r = ISTEP[n];
-              return { label: "TP = " + n + (r.ar.crossed ? "  (cross-node)" : "") +
-                         (r.fits ? "" : "  — weights do not fit"),
-                value: r.itl * 1e3,
-                color: r.ar.crossed ? "var(--critical)" : "var(--accent)",
-                sub: "· " + iMs(r.tMem) + " HBM + " + iMs(r.comm) + " comm" };
-            }), unit: "ms / token" }),
-          h("small muted", "Weights alone need TP ≥ " + IMIN_TP + " to fit " +
-            BY(W_BYTES) + " into " + CAP(GPUD.hbm_bytes) + " per GPU, so " +
-            (IMIN_TP > 1
-              ? "every degree below " + IMIN_TP + " is not an option at all — " +
-                "the leftmost bars are drawn for the arithmetic, not as a choice."
-              : "every degree on this chart is at least available."))]),
-        d("stack", [
-          frag(d("panel w tight", [ph("the two terms, separately"),
-            el("table", { class: "data nowrap" }, [
-              el("thead", {}, el("tr", {}, [
-                el("th", {}, "TP"), el("th", {}, "weights/GPU"),
-                el("th", {}, "HBM read"), el("th", {}, "communication"),
-                el("th", {}, "ITL"), el("th", {}, "comm share"),
-                el("th", {}, "tok/s")])),
-              el("tbody", {}, rows)
-            ])]), "f-right"),
-          frag(NN.callout("key", "The HBM term halves; the comm term more than doubles",
-            "From TP " + IPER_NODE + " to " + (IPER_NODE * 2) + ": the HBM " +
-            "read falls from " + iMs(ISTEP[IPER_NODE].tMem) + " to " +
-            iMs(ISTEP[IPER_NODE * 2].tMem) + ", exactly as advertised. " +
-            "Communication goes from " + iMs(ISTEP[IPER_NODE].comm) + " to " +
-            iMs(ISTEP[IPER_NODE * 2].comm) + ". You bought " +
-            iMs(ISTEP[IPER_NODE].tMem - ISTEP[IPER_NODE * 2].tMem) +
-            " and paid " + iMs(ISTEP[IPER_NODE * 2].comm -
-              ISTEP[IPER_NODE].comm) + " for it."), "f-right")
-        ])
-      ]), "f-fade")
-    ];
-  }
-});
-
-/* --------------------------------------------------- I5. the node boundary */
-S({
-  chapter: "Inference parallelism · the cliff",
-  plain: "At the NVSwitch boundary α jumps " + ICM.latency_us.intra_node +
-         " → " + ICM.latency_us.inter_node + " µs AND the hop count doubles",
-  notes: "Why the cliff is a cliff and not a slope. Two things go wrong at " +
-    "the same instant when the ring leaves the node. The per-collective " +
-    "latency alpha jumps from " + ICM.latency_us.intra_node +
-    " microseconds to " + ICM.latency_us.inter_node + " — a factor of " +
-    f(ICM.latency_us.inter_node / ICM.latency_us.intra_node, 2) + " — " +
-    "because the traffic now crosses a NIC and a switch fabric instead of " +
-    "an NVSwitch. And the hop count 2(N−1) doubles, from " +
-    (2 * (IPER_NODE - 1)) + " to " + (2 * (IPER_NODE * 2 - 1)) + ", because " +
-    "N doubled. Multiply those together and one all-reduce goes from " +
-    iUs(ISTEP[IPER_NODE].ar.total) + " to " +
-    iUs(ISTEP[IPER_NODE * 2].ar.total) + ". Meanwhile the bandwidth term " +
-    "stays negligible the whole way — it is not that the wire got slower, " +
-    "it is that there is now much more waiting. Say clearly that the " +
-    "cost model here is a MODEL: in-network reduction and one-shot " +
-    "algorithms move the cliff, and it is on the list of things this model " +
-    "does not credit. But the fixed cost is still " +
-    f(ICM.latency_us.inter_node / ICM.latency_us.intra_node, 2) +
-    "× the moment you cross, whatever the algorithm.",
-  build: function () {
-    const a = ISTEP[IPER_NODE].ar, b = ISTEP[IPER_NODE * 2].ar;
-    const rows = [
-      ["ring rides", a.link.name, b.link.name,
-       "NVSwitch domain → the fabric"],
-      ["α per collective", ICM.latency_us.intra_node + " µs",
-       ICM.latency_us.inter_node + " µs",
-       iX(ICM.latency_us.inter_node / ICM.latency_us.intra_node) + " worse"],
-      ["hops · 2(N−1)", String(2 * (IPER_NODE - 1)), String(2 * (IPER_NODE * 2 - 1)),
-       iX((2 * (IPER_NODE * 2 - 1)) / (2 * (IPER_NODE - 1))) + " more"],
-      ["latency term", iUs(a.lat), iUs(b.lat),
-       iX(b.lat / a.lat) + " — the two multiply"],
-      ["bandwidth term", iUs(a.bwTime), iUs(b.bwTime),
-       "still negligible in both"],
-      ["one all-reduce", iUs(a.total), iUs(b.total), iX(b.total / a.total)]
-    ].map(function (r, i) {
-      return el("tr", { class: i === 3 ? "deadparam" : "" }, [
-        el("td", { style: { textAlign: "left" } }, r[0]),
-        el("td", { class: "n" }, r[1]),
-        el("td", { class: "n v-critical" }, r[2]),
-        el("td", { class: "n muted" }, r[3])
-      ]);
-    });
-    return [
-      kicker("Inference parallelism · <b>two things go wrong at once</b>"),
-      title("The node boundary is a step function, not a slope", true),
+              return { label: "TP = " + n +
+                         (r.ar.crossed ? "   — the ring left the node" : ""),
+                       value: r.itl * 1e3,
+                       color: r.ar.crossed ? "var(--critical)" : "var(--accent)",
+                       sub: "· " + iMs(r.tMem) + " reading HBM + " +
+                            iMs(r.comm) + " in collectives" };
+            }),
+          unit: "ms / token" }),
+        h("small muted", "Degrees below TP = " + IMIN_TP + " are left out: " +
+          BY(W_BYTES) + " does not fit into " + CAP(GPUD.hbm_bytes) +
+          " until then, so they are not choices.")]), "f-fade"),
+      frag(d("cols3", [
+        d("panel w", [ph("what doubling TP bought"),
+          h("midnum v-weight", "−" + iMs(ISTEP[IPER_NODE].tMem -
+            ISTEP[IPER_NODE * 2].tMem)),
+          h("small muted", "half the weights and half the cache to read")]),
+        d("panel crit", [ph("what it cost"),
+          h("midnum v-gradient", "+" + iMs(ISTEP[IPER_NODE * 2].comm -
+            ISTEP[IPER_NODE].comm)),
+          h("small muted", "α " + ICM.latency_us.intra_node + " → " +
+            ICM.latency_us.inter_node + " µs <b>and</b> hops " +
+            (2 * (IPER_NODE - 1)) + " → " + (2 * (IPER_NODE * 2 - 1)))]),
+        d("panel acc", [ph("and the cache stops splitting"),
+          h("midnum", String(IM.n_kv_heads)),
+          h("small muted", "KV heads. Past TP = " + IM.n_kv_heads +
+            " there is nothing left to shard by head.")])
+      ]), "f-pop"),
       frag(d("cols wide-l", [
-        d("panel crit", [ph("TP = " + IPER_NODE + " → TP = " + (IPER_NODE * 2) +
-          " · one all-reduce"),
-          el("table", { class: "data nowrap" }, [
-            el("thead", {}, el("tr", {}, [
-              el("th", { style: { textAlign: "left" } }, "term"),
-              el("th", {}, "TP = " + IPER_NODE), el("th", {}, "TP = " + (IPER_NODE * 2)),
-              el("th", { style: { textAlign: "left" } }, "")])),
-            el("tbody", {}, rows)
-          ])]),
-        d("stack", [
-          NN.callout("key", "The rule that falls out of this",
-            "Keep the TP group inside one NVSwitch domain. That is not " +
-            "guidance, it is the shape of the cost function: everything " +
-            "inside the box costs " + ICM.latency_us.intra_node +
-            " µs per collective and everything outside it costs " +
-            ICM.latency_us.inter_node + " µs with twice as many hops. It is " +
-            "the same conclusion part three reached for training, arrived at " +
-            "for a completely different reason — there it was bandwidth, " +
-            "here it is latency."),
-          h("small muted", IMODEL_CAVEAT)
-        ])
+        NN.callout("key", "Both halves of the deck land on the same boundary",
+          "Part three said keep the tightly-coupled axis inside one NVSwitch " +
+          "domain because the payload is large and the fabric is " +
+          f(INVL.per_dir_GBps / INDR.per_dir_GBps, 0) + "× slower. This " +
+          "section says it because the payload is negligible and α is " +
+          f(ICM.latency_us.inter_node / ICM.latency_us.intra_node, 2) +
+          "× worse with twice the hops. Two independent arguments, one " +
+          "boundary — usually a sign the boundary is real. Best here is TP = " +
+          ICROSS.best.N + " at " + iMs(ICROSS.best.itl) + " per token."),
+        h("small muted", IMODEL_CAVEAT)
       ]), "f-fade")
     ];
   }
 });
 
-/* --------------------------------------------------------------- I6. PP */
+/* ------------------------------ P11. pipeline --------------------------- */
 S({
   chapter: "Inference parallelism · pipeline",
-  plain: "Pipeline parallelism does not reduce per-token latency. The division cancels.",
-  notes: "Part three spent most of its pipeline section on the bubble, " +
-    "because in training the bubble is what pipelining costs you. At " +
-    "inference the bubble is not the interesting failure — continuous " +
-    "batching keeps a stream of requests in flight, so a serving pipeline " +
-    "is rarely draining. The problem is structural and it is not about " +
-    "occupancy at all. Split the layers across P stages and each stage holds " +
-    "one Pth of the weights, so each stage's HBM read is one Pth as long. " +
-    "But a token has to traverse ALL P stages in order. The division by P " +
-    "and the multiplication by P cancel exactly — the stage times sum back " +
-    "to the single-GPU time — and then you add P−1 wire hops on top. " +
-    "Pipeline parallelism is the one axis that makes per-token latency " +
-    "strictly worse than not doing it. It is excellent for throughput, " +
-    "because a token leaves the last stage every stage-time rather than " +
-    "every token-time, and the only reason to accept the latency is that " +
-    "without it the model may not fit anywhere.",
-  build: function () {
-    const P = 4;
+  plain: "Pipeline: the divisions cancel — a token still visits every stage in " +
+         "order",
+  notes: "Pipeline parallelism, briefly, because for latency it does nothing " +
+    "and the picture says why in one look. Split the layers across four " +
+    "stages and each stage holds a quarter of the weights, so each stage's " +
+    "HBM read is a quarter as long. But follow token A down the diagonal: it " +
+    "has to be on stage zero, then stage one, then two, then three, in that " +
+    "order. Four quarters is one whole. The division by P and the " +
+    "multiplication by P cancel exactly, and then you add P−1 wire hops on " +
+    "top, so per-token latency is strictly worse than one GPU. Now read the " +
+    "columns instead of the diagonal: every stage is busy in every slot, and " +
+    "a finished token leaves the right-hand edge once per stage-time. That " +
+    "is the trade — pipeline parallelism buys throughput and sells " +
+    "inter-token latency. The bubble, which was the whole story in training, " +
+    "barely matters here, because continuous batching always has another " +
+    "request to push in.",
+  build: function (ctx) {
+    const P = 4, SLOTS = 8;
+    const LET = ["A", "B", "C", "D", "E", "F", "G", "H"];
     const single = iStep(1, 1);
-    const stageT = (W_BYTES + KVNAT.bytes_per_sequence) / P / IG.hbm_bw_bytes_per_s;
-    const hopBytes = 1 * IM.d_model * BF16B;
+    const stageT = (W_BYTES + KVNAT.bytes_per_sequence) / P /
+                   IG.hbm_bw_bytes_per_s;
+    const hopB = 1 * IM.d_model * BF16B;
     const hopT = ICM.latency_us.inter_node * 1e-6 +
-                 hopBytes / (INDR.per_dir_GBps * 1e9 * IEFF);
+                 hopB / (INDR.per_dir_GBps * 1e9 * IEFF);
     const total = P * stageT + (P - 1) * hopT;
-    const tp4 = ISTEP[4];
+    const lanes = [];
+    for (let s = 0; s < P; s++) {
+      const cells = [];
+      for (let k = 0; s + k < SLOTS; k++) {
+        cells.push({ t: s + k, span: 1, kind: k === 0 ? "prefill" : "decode",
+                     text: LET[k] });
+      }
+      lanes.push({ label: "stage " + s + " · layers " +
+                     Math.round(s * IM.n_layers / P) + "–" +
+                     (Math.round((s + 1) * IM.n_layers / P) - 1),
+                   cells: cells });
+    }
+    ctx.tl = NN.viz.timeline({
+      slots: SLOTS, cell: 46, tickEvery: 1, lanes: lanes,
+      legend: [{ kind: "prefill", label: "token A — follow the diagonal" },
+               { kind: "decode", label: "other tokens in flight" },
+               { kind: "idle", label: "stage idle" }]
+    });
+    ctx.play = playbar({
+      count: SLOTS, ms: 520,
+      label: function (i) { return "stage-time " + i + " of " + (SLOTS - 1); },
+      frame: function (i) { ctx.tl.step(i); }
+    });
     return [
-      kicker("Inference parallelism · <b>the division cancels</b>"),
-      title("Split by depth and the token still visits every stage", true),
-      frag(d("rowflex", (function () {
-        const out = []; let acc = 0;
-        for (let s = 0; s < P; s++) {
-          acc += stageT;
-          out.push(d("panel w tight", [ph("stage " + s),
-            h("midnum v-weight", iMs(stageT)),
-            h("small muted", Math.round(s * IM.n_layers / P) + "–" +
-              (Math.round((s + 1) * IM.n_layers / P) - 1) + " · t = " + iMs(acc))]));
-          if (s < P - 1) {
-            acc += hopT;
-            out.push(d("panel a tight", [ph("hop " + s),
-              h("midnum v-activation", iUs(hopT)),
-              h("small muted", BY(hopBytes) + " p2p")]));
-          }
-        }
-        return out;
-      })()), "f-pop"),
+      kicker("Inference parallelism · <b>the divisions cancel</b>"),
+      title("A token still visits every stage, in order", true),
+      d("panel w", [ph("PP = " + P + " · one slot = one stage-time = " +
+        iMs(stageT)), ctx.tl]),
+      ctx.play,
       frag(d("cols4", [
-        NN.tiles([{ k: "P × stage time", v: iMs(P * stageT),
+        NN.tiles([{ k: P + " × stage time", v: iMs(P * stageT),
           s: "identical to one GPU (" + iMs(single.tMem) + ")", cls: "weight" }]),
-        NN.tiles([{ k: "P−1 hops", v: iMs((P - 1) * hopT),
-          s: "pure addition, never a subtraction", cls: "activation" }]),
-        NN.tiles([{ k: "token latency under PP = " + P, v: iMs(total),
-          s: iX(total / single.itl, 3) + " the single-GPU time" }]),
-        NN.tiles([{ k: "the same " + P + " GPUs under TP", v: iMs(tp4.itl),
-          s: iX(total / tp4.itl, 1) + " faster than the pipeline",
+        NN.tiles([{ k: (P - 1) + " wire hops", v: iMs((P - 1) * hopT),
+          s: "added, never subtracted", cls: "activation" }]),
+        NN.tiles([{ k: "per-token latency at PP = " + P, v: iMs(total),
+          s: iX(total / single.itl, 3) + " the single-GPU time",
+          cls: "gradient" }]),
+        NN.tiles([{ k: "the same " + P + " GPUs under TP", v: iMs(ISTEP[P].itl),
+          s: iX(total / ISTEP[P].itl, 1) + " faster than the pipeline",
           cls: "activation" }])
-      ]), "f-fade"),
-      frag(d("cols wide-l", [
-        NN.callout("warn", "But it is fine for throughput, and that is the point",
-          "One token leaves the last stage every " + iMs(stageT) +
-          ", not every " + iMs(total) + " — so steady-state throughput is " +
-          f(1 / stageT, 0) + " tok/s even though each individual token takes " +
-          iMs(total) + ". Pipeline parallelism buys tokens per second and " +
-          "sells inter-token latency. If your product is a batch " +
-          "summarisation job that is a good trade; if it is a chat endpoint " +
-          "it is not."),
-        NN.callout("key", "And the bubble genuinely is not the issue",
-          "Part three's bubble formula assumes a fixed set of micro-batches " +
-          "that drains. A serving pipeline under continuous batching always " +
-          "has another request to push in, so the stages stay fed. The thing " +
-          "that hurts is the serial traversal, which no scheduling can " +
-          "remove.")
-      ]), "f-fade")
+      ]), "f-pop"),
+      frag(NN.callout("key", "Read the diagonal for latency, the column for throughput",
+        "Down the diagonal: token A needs " + P + " stage-times to get out, " +
+        "which is the whole single-GPU time back again. Down a column: all " +
+        P + " stages are busy, and one finished token leaves every " +
+        iMs(stageT) + " — " + f(1 / stageT, 0) + " tok/s, against " +
+        f(1 / total, 0) + " tok/s if you waited for each token on its own. " +
+        "Pipeline parallelism buys tokens per second and sells inter-token " +
+        "latency."), "f-fade")
     ];
-  }
+  },
+  render: function (n, ctx) { if (n === 0 && ctx.play) ctx.play.set(0); }
 });
 
-/* --------------------------------------------------------------- I7. DP */
+/* ---------------------------- P12. data parallel ------------------------ */
 S({
   chapter: "Inference parallelism · data parallel",
-  plain: "Data parallel: no communication at all, linear throughput, latency unchanged",
-  notes: "The simplest axis, and at inference it is also the cleanest. Put a " +
-    "whole copy of the model on each replica and route requests to them. " +
-    "There is no gradient to all-reduce, because there is no backward pass, " +
-    "so replicas never talk to each other at all — not once, not per token, " +
-    "not per request. Throughput is exactly linear in the replica count and " +
-    "per-token latency is exactly unchanged. The price is memory: every " +
-    "replica holds the full " + BY(W_BYTES) + " of weights, so data " +
-    "parallelism costs you nothing in time and everything in capacity. Which " +
-    "is why the real recipe is TP inside a node to make the model fit and " +
-    "cut the HBM read, and DP across nodes to scale throughput — and " +
-    "nothing else, unless the model genuinely does not fit.",
-  build: function () {
-    const one = ISTEP[IPER_NODE];
-    const rows = [
-      ["tensor parallel", "the weights and the KV cache",
-       (2 * IM.n_layers) + " all-reduces per token, " +
-       iPc(one.ar.latShare, 1) + " latency",
-       "improves ITL until the node boundary", "gradient"],
-      ["pipeline parallel", "the layers, by depth",
-       "P−1 point-to-point hops per token",
-       "does not improve ITL at all", "activation"],
-      ["data parallel", "nothing — full replicas", "<b>none</b>",
-       "ITL exactly unchanged, throughput exactly linear", "weight"]
-    ].map(function (r) {
-      return el("tr", {}, [
-        el("td", { style: { textAlign: "left" }, class: "v-" + r[4] }, r[0]),
-        el("td", { style: { textAlign: "left" } }, r[1]),
-        el("td", { style: { textAlign: "left" }, html: r[2] }),
-        el("td", { style: { textAlign: "left" }, class: "muted" }, r[3])
-      ]);
+  plain: "Data parallel: the diagram has no arrows at all, ever",
+  notes: "The last axis, and the one you actually scale with. This diagram " +
+    "is not missing anything. Data parallelism at inference has no " +
+    "collective — not per token, not per request, not once. There is no " +
+    "gradient to reduce because there is no backward pass, so replicas never " +
+    "speak to each other. Throughput is exactly linear in the replica count " +
+    "and per-token latency is exactly unchanged. What it costs is capacity: " +
+    "every replica holds the whole " + BY(W_BYTES) + " and its own cache " +
+    "budget. Which gives the recipe in one line — tensor parallelism inside " +
+    "the node until the model fits and the cache is split, data parallelism " +
+    "outside it to multiply what you built, and nothing else unless the " +
+    "model genuinely will not fit.",
+  build: function (ctx) {
+    ctx.flow = NN.viz.flow({
+      nodes: [0, 1, 2, 3].map(function (r) {
+        return { label: "replica " + r, sub: "TP group of " + ICROSS.best.N };
+      }),
+      hops: [], width: 940, height: 180, boxW: 170
     });
     return [
-      kicker("Inference parallelism · <b>the three axes, ranked</b>"),
-      title("The axis with no communication is the one you scale with", true),
-      frag(d("panel acc", [ph("what each axis splits, what it costs per token, " +
-        "and what it does to latency"),
-        el("table", { class: "data nowrap" }, [
-          el("thead", {}, el("tr", {}, [
-            el("th", { style: { textAlign: "left" } }, "axis"),
-            el("th", { style: { textAlign: "left" } }, "splits"),
-            el("th", { style: { textAlign: "left" } }, "communication per token"),
-            el("th", { style: { textAlign: "left" } }, "effect on latency")])),
-          el("tbody", {}, rows)
-        ])]), "f-fade"),
+      kicker("Inference parallelism · <b>no collective, ever</b>"),
+      title("The axis you scale with is the one with no arrows", true),
+      d("panel acc", [ph("data parallel at inference · every arc this diagram " +
+        "would draw"), ctx.flow,
+        h("small muted", "Nothing has been omitted here. A request is routed " +
+          "to a replica and never leaves it.")]),
       frag(d("cols3", [
-        d("panel w", [ph("what DP costs"),
-          h("say", BY(W_BYTES) + " of weights on <em>every</em> replica, " +
-            "plus every replica's own KV budget. Capacity, not time.")]),
-        d("panel a", [ph("what DP buys"),
-          h("say", "Throughput linear in replicas, and complete failure " +
-            "isolation. A replica that dies takes its own requests with it " +
-            "and nothing else.")]),
-        d("panel acc", [ph("why it is not the whole answer"),
-          h("say", BY(W_BYTES) + " does not fit in " + CAP(GPUD.hbm_bytes) +
-            ". You need TP ≥ " + IMIN_TP + " before a replica exists at " +
-            "all — TP makes the replica, DP multiplies it.")])
-      ]), "f-pop")
-    ];
-  }
-});
-
-/* ------------------------------------------------------------ I8. the recipe */
-S({
-  chapter: "Inference parallelism · the recipe",
-  plain: "The serving recipe, next to part III's training recipe — read the inversions",
-  notes: "Put the two recipes side by side and read across, because every " +
-    "line is an inversion. In training TP is 8 and bounded by bandwidth " +
-    "inside the node; in serving TP is the smallest degree that fits and is " +
-    "bounded by LATENCY at the same boundary — same number, opposite " +
-    "reason, and if you raise it for the training reason you make serving " +
-    "worse. In training PP is how you span nodes and the bubble is the " +
-    "cost; in serving PP is a last resort and per-token latency is the cost. " +
-    "In training DP is where the gradient all-reduce lives and it is the " +
-    "expensive axis; in serving DP is free and it is the axis you scale " +
-    "with. The one line that does not invert is the node boundary itself: " +
-    "keep the tightly-coupled axis inside the box. Both halves of the deck " +
-    "agree on that, for two completely different reasons.",
-  build: function () {
-    const rows = [
-      ["TP degree", "8 — one NVSwitch domain",
-       "the smallest that fits: TP ≥ " + IMIN_TP,
-       "bandwidth-bound → latency-bound"],
-      ["why not more TP", "the all-reduce leaves the node and the payload is large",
-       "the all-reduce leaves the node and the LATENCY is " +
-       iX(ISTEP[IPER_NODE * 2].comm / ISTEP[IPER_NODE].comm) + " worse",
-       "same boundary, other reason"],
-      ["PP", "how you span nodes · cost is the bubble",
-       "last resort · cost is the whole of per-token latency",
-       "throughput axis either way"],
-      ["DP", "the gradient all-reduce lives here · the expensive axis",
-       "no communication at all · the free axis",
-       "completely inverted"],
-      ["what you optimise", "time per training step",
-       "TTFT, ITL, throughput and goodput — four numbers that fight",
-       "one objective becomes four"],
-      ["the collective's cost", "bandwidth · payload " +
-       BY(ITRAIN_ELEMS * BF16B),
-       "latency · payload " + BY(IDEC_ELEMS * BF16B),
-       iPc(ISTEP[IPER_NODE].ar.latShare, 1) + " latency at TP " + IPER_NODE]
-    ].map(function (r, i) {
-      return el("tr", { class: i === 3 ? "deadparam" : "" }, [
-        el("td", { style: { textAlign: "left" } }, r[0]),
-        el("td", { style: { textAlign: "left" }, class: "muted" }, r[1]),
-        el("td", { style: { textAlign: "left" } }, r[2]),
-        el("td", { style: { textAlign: "left" }, class: "v-activation" }, r[3])
-      ]);
-    });
-    return [
-      kicker("Inference parallelism · <b>the same three axes, ranked backwards</b>"),
-      title("Part III's recipe, and this one", true),
-      frag(d("panel acc", [ph("read across · every line is an inversion except the last"),
-        el("table", { class: "data" }, [
-          el("thead", {}, el("tr", {}, [
-            el("th", { style: { textAlign: "left" } }, ""),
-            el("th", { style: { textAlign: "left" } }, "training (part III)"),
-            el("th", { style: { textAlign: "left" } }, "serving (part IV)"),
-            el("th", { style: { textAlign: "left" } }, "what changed")])),
-          el("tbody", {}, rows)
-        ])]), "f-fade"),
-      frag(d("cols wide-l", [
-        NN.callout("key", "The one thing both halves agree on",
-          "Keep the tightly-coupled axis inside one NVSwitch domain. Part " +
-          "three reached that from bandwidth — the payload is large and the " +
-          "fabric is " + f(INVL.per_dir_GBps / INDR.per_dir_GBps, 0) +
-          "× slower than NVLink. Part four reaches it from latency — the " +
-          "payload is negligible and α is " +
-          f(ICM.latency_us.inter_node / ICM.latency_us.intra_node, 2) +
-          "× worse with twice the hops. Two independent arguments, same " +
-          "boundary. That is usually a sign the boundary is real."),
-        NN.tiles([
-          { k: "best ITL", v: iMs(ICROSS.best.itl),
-            s: "at TP = " + ICROSS.best.N + ", batch 1", cls: "activation" },
-          { k: "communication share there",
-            v: iPc(ICROSS.best.commShare),
-            s: "of every token", cls: "gradient" }
-        ])
-      ]), "f-fade")
+        NN.tiles([{ k: "collectives per token", v: "0",
+          s: "against " + (2 * IM.n_layers) + " under tensor parallelism",
+          cls: "activation" }]),
+        NN.tiles([{ k: "effect on time per token", v: "none",
+          s: "a replica does not know the others exist" }]),
+        NN.tiles([{ k: "cost per replica", v: BY(W_BYTES),
+          s: "plus its own cache budget — capacity, not time", cls: "weight" }])
+      ]), "f-pop"),
+      frag(NN.callout("key", "The recipe this section adds up to",
+        "Tensor parallelism up to TP = " + ICROSS.best.N + ", inside one " +
+        "NVSwitch domain: it is what makes " + BY(W_BYTES) + " fit into " +
+        CAP(GPUD.hbm_bytes) + " at all, it divides the HBM read, and it " +
+        "splits the cache so concurrency has somewhere to go. Then data " +
+        "parallelism across nodes, because it is free. TP makes the replica; " +
+        "DP multiplies it. Everything past the node boundary is paying α " +
+        (2 * IM.n_layers) + " times a token for the privilege."), "f-fade")
     ];
   }
 });
