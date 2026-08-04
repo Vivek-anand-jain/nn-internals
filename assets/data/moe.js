@@ -1116,6 +1116,191 @@ window.MOE = {
   ],
   "note": "Two all-to-alls per MoE layer in forward, and two more in backward. Unlike tensor parallelism's all-reduce, the payload SIZE here is data-dependent -- it depends on how the router happened to distribute this batch."
  },
+ "ragged": {
+  "batches": [
+   {
+    "name": "batch A",
+    "tokens": [
+     "the",
+     "cat",
+     "sat",
+     "on",
+     "the",
+     "mat"
+    ],
+    "chosen": [
+     [
+      2,
+      3
+     ],
+     [
+      3,
+      0
+     ],
+     [
+      3,
+      1
+     ],
+     [
+      1,
+      3
+     ],
+     [
+      3,
+      0
+     ],
+     [
+      3,
+      0
+     ]
+    ],
+    "counts": [
+     3,
+     2,
+     1,
+     6
+    ],
+    "dispatch_matrix": [
+     [
+      2,
+      4
+     ],
+     [
+      3,
+      3
+     ]
+    ],
+    "send_rows": [
+     6,
+     6
+    ],
+    "recv_rows": [
+     5,
+     7
+    ],
+    "pairs_crossing_gpus": 7,
+    "pairs_local": 5,
+    "elements_crossing": 28,
+    "max_recv_rows": 7
+   },
+   {
+    "name": "batch B",
+    "tokens": [
+     "a",
+     "dog",
+     "ran",
+     "in",
+     "the",
+     "rain"
+    ],
+    "chosen": [
+     [
+      3,
+      0
+     ],
+     [
+      2,
+      3
+     ],
+     [
+      2,
+      3
+     ],
+     [
+      2,
+      3
+     ],
+     [
+      1,
+      3
+     ],
+     [
+      1,
+      3
+     ]
+    ],
+    "counts": [
+     1,
+     2,
+     3,
+     6
+    ],
+    "dispatch_matrix": [
+     [
+      1,
+      5
+     ],
+     [
+      2,
+      4
+     ]
+    ],
+    "send_rows": [
+     6,
+     6
+    ],
+    "recv_rows": [
+     3,
+     9
+    ],
+    "pairs_crossing_gpus": 7,
+    "pairs_local": 5,
+    "elements_crossing": 28,
+    "max_recv_rows": 9
+   }
+  ],
+  "rows_differ": true,
+  "per_row_elements": 4,
+  "pairs_per_rank": 6,
+  "option_counts": {
+   "name": "exchange the counts first",
+   "op": "all_to_all",
+   "ints_moved": 4,
+   "bytes_moved": 16,
+   "extra_collectives_per_layer_per_step": 4,
+   "cost": "latency, not bandwidth",
+   "note": "Rank i tells rank j how many rows are coming. That is EP*EP integers -- nothing -- but it is a full collective with a full launch and synchronisation cost, and it happens before every dispatch and every combine, in forward and in backward."
+  },
+  "option_pad": {
+   "name": "pad every buffer to the worst case",
+   "worst_case_rows_per_buffer": 12,
+   "per_batch": [
+    {
+     "batch": "batch A",
+     "worst_case_rows": 12,
+     "recv_rows": [
+      5,
+      7
+     ],
+     "occupancy": [
+      0.4167,
+      0.5833
+     ],
+     "busiest_actual_rows": 7,
+     "wasted_rows": 12,
+     "useful_fraction": 0.5
+    },
+    {
+     "batch": "batch B",
+     "worst_case_rows": 12,
+     "recv_rows": [
+      3,
+      9
+     ],
+     "occupancy": [
+      0.25,
+      0.75
+     ],
+     "busiest_actual_rows": 9,
+     "wasted_rows": 12,
+     "useful_fraction": 0.5
+    }
+   ],
+   "cost": "bandwidth, not latency",
+   "note": "A receive buffer sized for the worst case never overflows and never needs a count exchange. It also moves rows that are not there."
+  },
+  "why": "The dispatch matrix is the argument an all_to_all takes, and it is the router's output. Every other collective in this project moves a payload whose shape is a property of the MODEL. This one moves a payload whose shape is a property of the DATA, so the same code moves different bytes on different batches and no buffer can be sized in advance."
+ },
  "load_balance": {
   "counts": [
    3,

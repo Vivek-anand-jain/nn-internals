@@ -52,6 +52,12 @@ CAPACITY_FACTOR = 1.25
 
 TOKEN_STR = ["the", "cat", "sat", "on", "the", "mat"]
 
+# A SECOND batch, through the identical model. Nothing about the weights
+# changes; only the data does. That is the whole point of the ragged slides:
+# the all-to-all's payload is a property of the batch, not of the model, so
+# these two runs of the same code move different numbers of bytes.
+TOKEN_STR_B = ["a", "dog", "ran", "in", "the", "rain"]
+
 
 def det(i, j, salt):
     return round(((((i * 7 + j * 13 + salt * 11 + 3) % 19) - 9) / 30.0), 4)
@@ -59,6 +65,8 @@ def det(i, j, salt):
 
 X = [[round(((t * 5 + d * 3) % 7 + 1) / 8.0, 4) for d in range(D_MODEL)]
      for t in range(N_TOKENS)]
+X_B = [[round(((t + d * 3) % 10 + 1) / 8.0, 4) for d in range(D_MODEL)]
+       for t in range(N_TOKENS)]
 
 W_GATE = [[det(i, e, 1) for e in range(N_EXPERTS)] for i in range(D_MODEL)]
 EXPERTS = [{
@@ -112,7 +120,7 @@ def expert_forward(v, e):
 # 1. THE ROUTER
 # ============================================================================
 
-def route():
+def route(Xin=None, names=None):
     """
     logits = x @ W_gate, then softmax, then keep the top k.
 
@@ -120,9 +128,11 @@ def route():
     weights sum to 1 -- otherwise routing to two experts would systematically
     scale the output differently from routing to one.
     """
+    Xin = X if Xin is None else Xin
+    names = TOKEN_STR if names is None else names
     table = []
     for t in range(N_TOKENS):
-        logits = matvec(X[t], W_GATE)
+        logits = matvec(Xin[t], W_GATE)
         probs = softmax(logits)
         order = sorted(range(N_EXPERTS), key=lambda e: -probs[e])
         chosen = order[:TOP_K]
@@ -130,7 +140,7 @@ def route():
         s = sum(raw)
         weights = [r / s for r in raw]
         table.append({
-            "token": t, "text": TOKEN_STR[t],
+            "token": t, "text": names[t],
             "logits": logits, "probs": probs,
             "chosen": chosen, "raw_gates": raw, "weights": weights,
             "top1": chosen[0],
@@ -156,7 +166,7 @@ def reference(table):
     return out
 
 
-def grouped(table):
+def grouped(table, Xin=None):
     """
     The way it is actually done: GROUP tokens by expert, run each expert once
     over its whole group as a single matmul, then scatter the results back.
@@ -164,6 +174,7 @@ def grouped(table):
     This is what makes MoE efficient at all -- one GEMM per expert rather
     than one tiny GEMV per token.
     """
+    Xin = X if Xin is None else Xin
     groups = {e: [] for e in range(N_EXPERTS)}
     for t in range(N_TOKENS):
         for k, e in enumerate(table[t]["chosen"]):
@@ -178,7 +189,7 @@ def grouped(table):
             per_expert.append({"expert": e, "n_tokens": 0, "tokens": [],
                                "input": [], "output": []})
             continue
-        Xe = [X[item["token"]] for item in g]
+        Xe = [Xin[item["token"]] for item in g]
         U = mm(Xe, EXPERTS[e]["W_up"])
         G = [[gelu(v) for v in r] for r in U]
         Y = mm(G, EXPERTS[e]["W_down"])
@@ -257,6 +268,102 @@ def expert_parallel(table, groups):
                 "backward. Unlike tensor parallelism's all-reduce, the "
                 "payload SIZE here is data-dependent -- it depends on how "
                 "the router happened to distribute this batch.",
+    }
+
+
+# ============================================================================
+# 3b. THE RAGGED PROBLEM  -- the same code, twice, on different data
+# ============================================================================
+
+def ragged():
+    """
+    Every other collective in this project moves a payload whose shape is a
+    property of the MODEL: a parameter count, a batch x seq x d_model
+    activation. You can size those buffers at build time.
+
+    all_to_all in an MoE moves a payload whose shape is a property of the
+    DATA. Rank i's send count to rank j is however many of rank i's tokens
+    the router happened to send to an expert that rank j owns -- and that is
+    not known until the router has run, which is halfway through the layer.
+
+    So: run the identical model over two different batches and record both
+    dispatch matrices. Then price the two things a real implementation can
+    do about it -- exchange the counts first (an extra latency-bound
+    collective every layer) or pad every buffer to the worst case (waste).
+    """
+    pairs_per_rank = (N_TOKENS // EP) * TOP_K
+
+    batches = []
+    for name, names, Xin in (("batch A", TOKEN_STR, X),
+                             ("batch B", TOKEN_STR_B, X_B)):
+        tbl = route(Xin, names)
+        _, _, grp = grouped(tbl, Xin)
+        ep = expert_parallel(tbl, grp)
+        dm = ep["dispatch_matrix"]
+        batches.append({
+            "name": name,
+            "tokens": names,
+            "chosen": [r["chosen"] for r in tbl],
+            "counts": [len(grp[e]) for e in range(N_EXPERTS)],
+            "dispatch_matrix": dm,
+            "send_rows": [sum(dm[i]) for i in range(EP)],
+            "recv_rows": [sum(dm[i][j] for i in range(EP)) for j in range(EP)],
+            "pairs_crossing_gpus": ep["pairs_crossing_gpus"],
+            "pairs_local": ep["pairs_local"],
+            "elements_crossing": ep["pairs_crossing_gpus"] * D_MODEL,
+            "max_recv_rows": max(sum(dm[i][j] for i in range(EP))
+                                 for j in range(EP)),
+        })
+
+    # Option 2: pad. A receive buffer that is always big enough must assume
+    # every rank sent it everything it had.
+    worst_rows = EP * pairs_per_rank
+    pads = []
+    for b in batches:
+        pads.append({
+            "batch": b["name"],
+            "worst_case_rows": worst_rows,
+            "recv_rows": b["recv_rows"],
+            "occupancy": [round(r / worst_rows, 4) for r in b["recv_rows"]],
+            "busiest_actual_rows": b["max_recv_rows"],
+            "wasted_rows": worst_rows * EP - sum(b["recv_rows"]),
+            "useful_fraction": round(sum(b["recv_rows"]) / (worst_rows * EP), 4),
+        })
+
+    return {
+        "batches": batches,
+        "rows_differ": batches[0]["dispatch_matrix"] !=
+                       batches[1]["dispatch_matrix"],
+        "per_row_elements": D_MODEL,
+        "pairs_per_rank": pairs_per_rank,
+        "option_counts": {
+            "name": "exchange the counts first",
+            "op": "all_to_all",
+            "ints_moved": EP * EP,
+            "bytes_moved": EP * EP * 4,
+            "extra_collectives_per_layer_per_step": 2 * 2,
+            "cost": "latency, not bandwidth",
+            "note": "Rank i tells rank j how many rows are coming. That is "
+                    "EP*EP integers -- nothing -- but it is a full collective "
+                    "with a full launch and synchronisation cost, and it "
+                    "happens before every dispatch and every combine, in "
+                    "forward and in backward.",
+        },
+        "option_pad": {
+            "name": "pad every buffer to the worst case",
+            "worst_case_rows_per_buffer": worst_rows,
+            "per_batch": pads,
+            "cost": "bandwidth, not latency",
+            "note": "A receive buffer sized for the worst case never "
+                    "overflows and never needs a count exchange. It also "
+                    "moves rows that are not there.",
+        },
+        "why": "The dispatch matrix is the argument an all_to_all takes, and "
+               "it is the router's output. Every other collective in this "
+               "project moves a payload whose shape is a property of the "
+               "MODEL. This one moves a payload whose shape is a property of "
+               "the DATA, so the same code moves different bytes on "
+               "different batches and no buffer can be sized in advance.",
     }
 
 
@@ -480,6 +587,7 @@ def build():
                      "nothing about what is computed.",
         },
         "expert_parallel": ep,
+        "ragged": ragged(),
         "load_balance": lb,
         "accounting": accounting(),
         "inference": inference_view(),
@@ -526,6 +634,18 @@ def main():
     print(f"  all-to-all: {ep['pairs_crossing_gpus']} of {ep['pairs_total']} "
           f"(token,expert) pairs cross a GPU boundary")
     print(f"  dispatch matrix {ep['dispatch_matrix']}")
+    print()
+    rg = d["ragged"]
+    print("  the ragged problem — same weights, same code, two batches:")
+    for b in rg["batches"]:
+        print(f"    {b['name']}  {' '.join(b['tokens']):24s} "
+              f"loads {b['counts']}  dispatch {b['dispatch_matrix']}  "
+              f"{b['pairs_crossing_gpus']} cross")
+    print(f"    dispatch matrices differ: {rg['rows_differ']}")
+    print(f"    pad to worst case: {rg['option_pad']['worst_case_rows_per_buffer']}"
+          f" rows/buffer; useful "
+          + ", ".join(f"{p['batch']} {p['useful_fraction']:.0%}"
+                      for p in rg["option_pad"]["per_batch"]))
     print()
     t = ac["toy"]
     print(f"  toy params: {t['params_total']} total, "
